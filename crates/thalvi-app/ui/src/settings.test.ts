@@ -1102,7 +1102,7 @@ describe("the Recognition page", () => {
       return [
         head.querySelector(".what > :first-child")?.textContent,
         head.querySelector(".what small")?.textContent,
-        head.querySelector(".ctl button[aria-label^='Add ']")?.getAttribute("aria-label") ?? null,
+        head.querySelector(".ctl button[aria-label^='Add a']")?.getAttribute("aria-label") ?? null,
         box.querySelector(".none")?.textContent ?? null,
       ];
     });
@@ -1247,7 +1247,7 @@ describe("the Recognition page", () => {
     expect(names(listOf("realtime"))).toEqual(["Realtime speech server"]);
     expect(listOf("realtime").children[1]).toBe(editorEl());
     expect(editorEl().querySelector("h4")?.textContent).toBe("Editing “Cybrex2”");
-    expect(Array.from(editorEl().querySelectorAll(".actions button:not([hidden])")).map((node) => node.textContent)).toEqual(["Remove", "Cancel", "Save"]);
+    expect(Array.from(editorEl().querySelectorAll<HTMLElement>(".actions button")).filter((node) => node.closest("[hidden]") === null).map((node) => node.textContent)).toEqual(["Remove", "Cancel", "Save"]);
     await addServer("extra");
     expect(root.querySelectorAll(".editor")).toHaveLength(1);
     expect(names(listOf("realtime"))).toEqual(["Realtime speech server", "Cybrex2"]);
@@ -1925,22 +1925,22 @@ describe("the speech model catalog", () => {
     mountSettings(root, stub.backend);
     await settle();
     goTo("recognition");
-    const row = (): HTMLElement | null => root.querySelector(".trow.server");
+    const row = (): HTMLElement | null => root.querySelector('.table[data-kind="on_device"] .trow.server');
     expect(stub.backend.speechDevice).toHaveBeenCalledWith("nemotron_160ms");
-    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)");
+    expect(row()?.querySelector(".unit")?.textContent).toBe("Nemotron Streaming · GPU");
 
     // The model loads behind the window: when the app's state changes, the row asks again.
     stub.backend.speechDevice.mockResolvedValue("Runs on the CPU: no usable GPU");
     stub.emit({ state: "loading", notice: "Loading the speech model." });
     stub.emit({ state: "listening" });
     await settle();
-    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU: no usable GPU");
+    expect(row()?.querySelector(".unit")?.textContent).toBe("Nemotron Streaming · CPU");
 
     // A download finishes without a state change, so its end makes the row ask again too.
-    stub.backend.speechDevice.mockResolvedValue("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
+    stub.backend.speechDevice.mockResolvedValue("Runs on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)");
     stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] });
     await settle();
-    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
+    expect(row()?.querySelector(".unit")?.textContent).toBe("Nemotron Streaming · GPU");
 
     root.replaceChildren();
     const folder = stubBackend(local("/models/mine"));
@@ -1948,7 +1948,7 @@ describe("the speech model catalog", () => {
     await settle();
     goTo("recognition");
     expect(folder.backend.speechDevice).not.toHaveBeenCalled();
-    expect(row()?.querySelector(".device")).toBeNull();
+    expect(row()?.querySelector(".unit")?.textContent).toBe("mine");
   });
 
   it("names the hardware each picked model runs on and asks again once its download is done", async () => {

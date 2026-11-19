@@ -75,7 +75,26 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .editor { display: flex; flex-direction: column; }
 .editor[hidden] { display: none; }
 .editor h4 { margin: 12px 0 0; }
-.table > .editor { margin-left: 1.5em; padding: 0 10px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+.table > .editor { padding: 0 10px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surf); }
+.editor .about { margin: 4px 0 6px; font-size: 12px; }
+.fields { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px 12px; }
+.fields > .row { grid-column: span 6; flex-direction: column; align-items: stretch; gap: 4px; padding: 0; border: 0; min-height: 0; }
+.fields > .row.half { grid-column: span 3; }
+.fields > .row.third { grid-column: span 2; }
+.fields > .row > .what { max-width: none; font-size: 12px; }
+.fields > .row > .ctl { justify-content: stretch; }
+.fields > .row > .ctl > :is(input, select), .fields .stack.wide > input { width: 100%; max-width: none; box-sizing: border-box; }
+.editor .actions { justify-content: flex-end; flex-wrap: wrap; margin-top: 10px; }
+.editor .actions > .remove { margin-right: auto; flex-wrap: wrap; }
+.table[data-kind] .trow.server { padding: 2px 0; }
+.table[data-kind] .trow.server .phrase { flex: 1 1 10em; }
+.table[data-kind] .trow.server .unit { flex: 1 1 12em; }
+.trow.server .tail { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.trow.server > .applied { flex-basis: 100%; text-align: right; }
+.extra { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.none { margin: 2px 0; font: 12px var(--mono); color: var(--mut); }
+.needs-chat { margin: 4px 0; font-size: 12px; color: var(--mut); }
+.needs-chat[hidden] { display: none; }
 .next-dictation { margin: 6px 0; font-size: 13px; }
 .next-dictation:empty { display: none; }
 details.entry-details, details.model-details, details.fold { font-size: 12px; color: var(--mut); }
@@ -153,6 +172,7 @@ code.line { display: block; padding: 6px 8px; border: 1px solid var(--line); bor
   .trow.file .unit:last-child { flex-basis: 100%; }
   .table .trow:not(.add) { flex-wrap: wrap; }
   .table .trow:not(.add) .phrase { flex-basis: 100%; }
+  .fields > .row.half, .fields > .row.third { grid-column: span 6; }
   .table .trow:not(.add) select { flex: 1; }
   .trow.add.phrase-add { flex-wrap: wrap; }
   .trow.add.phrase-add input { flex-basis: 100%; }
