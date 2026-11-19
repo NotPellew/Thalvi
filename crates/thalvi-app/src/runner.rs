@@ -3546,6 +3546,104 @@ mod tests {
         assert!(requests.listening_off, "one toggle during a capture pauses");
     }
 
+    struct NoticeRig;
+
+    impl Rig for NoticeRig {
+        type Recognizer = Chosen;
+        type Wake = WakeEngine;
+        type Cues = CpalCuePlayer;
+        type Input = Microphone;
+        type Host = TestHost;
+
+        async fn load(
+            &self,
+            _: &DesktopConfig,
+            _: &InputGate,
+            _: &Rc<Publisher>,
+        ) -> Result<Loaded<Self>, Failure> {
+            std::future::pending().await
+        }
+
+        fn input(&self, _: InputGate, _: Option<String>, _: Metrics) -> Microphone {
+            panic!("notice controls do not open a microphone")
+        }
+    }
+
+    #[tokio::test]
+    async fn working_hold_keys_clear_the_shown_or_pending_failure_without_ending_a_capture() {
+        let config = DesktopConfig::from_json_str("{}").unwrap();
+        let (link, ends, _) = EngineLink::wire(&config, false);
+        let publisher = Publisher::new(ends.status, config.ending_pause);
+        publisher.mode(Mode::Idle);
+        let mut runner = Runner::new(
+            config,
+            Arc::new(Delivery::new(TestHost::default())),
+            ends.control,
+            Rc::clone(&publisher),
+            ends.level,
+            ends.audio,
+            Shared {
+                rig: NoticeRig,
+                key: ends.key,
+                history: Arc::new(History::at("unused-history")),
+                drafts: Arc::new(Drafts::default()),
+                feeding: ends.feeding,
+                paused: false,
+                last_writing_window: ends.last_writing_window,
+            },
+        );
+        for show in [true, false] {
+            runner
+                .handle(Control::HoldKeyFailed("Hyprland refused F9.".to_owned()))
+                .await;
+            if show {
+                runner.show_hold_problem();
+                assert!(
+                    matches!(&publisher.view.borrow().mode, Mode::Failed(f) if f.headline == "Hold key unavailable")
+                );
+            }
+            link.hold_problems()(HoldReport::Working);
+            let control = runner.control.recv().await.unwrap();
+            runner.handle(control).await;
+            assert!(
+                runner.hold_problem.is_none(),
+                "recovery clears a pending hold failure"
+            );
+            assert_eq!(
+                publisher.view.borrow().mode,
+                Mode::Idle,
+                "recovery clears a shown hold failure"
+            );
+        }
+        let other = Mode::Failed(Failure {
+            kind: FailureKind::Other,
+            headline: "Another failure",
+            notice: "Keep this.".to_owned(),
+            causes: Vec::new(),
+        });
+        publisher.mode(other.clone());
+        runner.handle(Control::HoldKeyWorks).await;
+        assert_eq!(
+            publisher.view.borrow().mode,
+            other,
+            "unrelated failures stay visible"
+        );
+
+        let mut requests = Requests::default();
+        assert!(!requests.take(Some(Control::HoldKeyFailed(
+            "Hyprland refused F9.".to_owned()
+        ))));
+        assert!(
+            !requests.take(Some(Control::HoldKeyWorks)),
+            "recovery does not end the capture"
+        );
+        assert!(!requests.ended);
+        assert_eq!(
+            requests.hold_problem, None,
+            "recovery clears a failure pending during capture"
+        );
+    }
+
     #[test]
     fn a_refused_hold_key_is_kept_through_a_capture_and_told_in_plain_words() {
         let (sender, mut control) = mpsc::unbounded_channel();

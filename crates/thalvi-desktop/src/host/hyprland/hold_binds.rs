@@ -1031,6 +1031,96 @@ mod tests {
         }
     }
 
+    fn follow_start(
+        hypr: &Compositor,
+        installed: &Installed,
+        keys: &[(HoldKind, HoldKey)],
+    ) -> (
+        Result<HoldSource, HostError>,
+        UnixStream,
+        mpsc::Receiver<HoldReport>,
+    ) {
+        let (hyprland, ours) = UnixStream::pair().unwrap();
+        let (told, reports) = mpsc::channel();
+        let source = bind(
+            Arc::clone(&hypr.runner),
+            installed.clone(),
+            Path::new(EXE),
+            keys,
+            Events::on(ours),
+            move |report| {
+                let _ = told.send(report);
+            },
+        );
+        (source, hyprland, reports)
+    }
+
+    #[test]
+    fn a_refused_start_recovers_on_reload_and_reports_later_conflicts() {
+        let conflict = row("F9", false, "exec", "thalvi-desktop hold-start");
+        let hypr = Compositor::new(vec![conflict.clone()]);
+        let (source, mut events, reports) = follow_start(&hypr, &Installed::default(), &defaults());
+        let Ok(HoldSource::Refused { reason, watch }) = source else {
+            panic!("a refused start must keep following reloads");
+        };
+        assert!(
+            reason
+                .to_string()
+                .contains("one press would start two holds")
+        );
+        assert_eq!(hypr.commands(), ["hyprctl -j binds"]);
+        hypr.binds.lock().unwrap().clear();
+        events.write_all(b"configreloaded>>\n").unwrap();
+        assert_eq!(reports.recv_timeout(WAIT).unwrap(), HoldReport::Working);
+        assert_eq!(
+            hypr.bound(),
+            bound_by_thalvi(EXE, &[("F9", "hold"), ("F10", "write")])
+        );
+        // An already-bound watch reports success even if the compositor kept its binds.
+        events.write_all(b"configreloaded>>\n").unwrap();
+        assert_eq!(reports.recv_timeout(WAIT).unwrap(), HoldReport::Working);
+        let before = hypr.commands().len();
+        *hypr.binds.lock().unwrap() = vec![conflict];
+        events.write_all(b"configreloaded>>\n").unwrap();
+        assert_eq!(reports.recv_timeout(WAIT).unwrap(), HoldReport::Problem(
+            "Hyprland already binds F9 to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them. The hold keys do not work until that is fixed and Hyprland reloads its config again.".to_owned()
+        ));
+        assert_eq!(&hypr.commands()[before..], ["hyprctl -j binds"]);
+        assert_eq!(hypr.bound().len(), 1);
+        drop(watch);
+        events.set_read_timeout(Some(WAIT)).unwrap();
+        assert_eq!(events.read(&mut [0; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn dropping_a_never_bound_watch_leaves_the_earlier_watch_owning_its_keys() {
+        let installed = Installed::default();
+        let hypr = Compositor::new(vec![row("F7", false, "exec", "obs")]);
+        let (earlier, _) = bind_keys(&hypr, &installed, EXE, &[hold("F9")]);
+        let earlier = earlier.unwrap();
+        let (source, mut events, reports) =
+            follow_start(&hypr, &installed, &[hold("F9"), write("F7")]);
+        let Ok(HoldSource::Refused { watch, .. }) = source else {
+            panic!("a refused start must return its waiting watch");
+        };
+        let commands = hypr.commands();
+        drop(watch);
+        events.set_read_timeout(Some(WAIT)).unwrap();
+        assert_eq!(events.read(&mut [0; 1]).unwrap(), 0);
+        assert_eq!(
+            reports.recv_timeout(WAIT),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+        assert_eq!(
+            hypr.commands(),
+            commands,
+            "a never-bound watch unbinds nothing"
+        );
+        assert_eq!(hypr.bound().len(), 3, "the earlier watch still owns F9");
+        drop(earlier);
+        assert_eq!(hypr.bound(), [("F7".to_owned(), false, "obs".to_owned())]);
+    }
+
     struct Following {
         watch: HoldWatch,
         /// Hyprland's end of the event socket.
