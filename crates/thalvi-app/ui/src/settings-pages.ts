@@ -1583,16 +1583,16 @@ function speech(context: PageContext): SpeechRows {
       return node;
     };
     const rows: HTMLElement[] = [
-      row("Name", null, controls.draftText(working.name, (value) => {
+      row("Name", "How this server is listed when something fails.", controls.draftText(working.name, (value) => {
         working.name = value;
       })),
     ];
-    const address = (placeholder: string): HTMLElement =>
-      sized(row("Address", null, controls.draftText("address" in working ? working.address : "", (value) => {
+    const address = (hint: string, placeholder: string): HTMLElement =>
+      sized(row("Address", hint, controls.draftText("address" in working ? working.address : "", (value) => {
         if ("address" in working) working.address = value;
       }, { placeholder })), "half");
     const modelRow = (size: "half" | "third"): HTMLElement =>
-      sized(row("Model", null, controls.draftText("model" in working ? (working.model ?? "") : "", (value) => {
+      sized(row("Model", "The model named in each request.", controls.draftText("model" in working ? (working.model ?? "") : "", (value) => {
         if (working.kind === "realtime" || working.kind === "open_ai" || working.kind === "extra") working.model = value;
       })), size);
     const key: { input?: HTMLInputElement } = {};
@@ -1612,24 +1612,24 @@ function speech(context: PageContext): SpeechRows {
         cleared.hidden = false;
       }, "quiet");
       clear.hidden = !saved;
-      return sized(row("API key", null, {
+      return sized(row("API key", "Saved in the config. Never shown again.", {
         node: el("div", { class: "stack wide" }, field.node, clear, cleared),
         field: field.field,
       }), "half");
     };
     switch (working.kind) {
       case "realtime":
-        rows.push(address("ws://127.0.0.1:8012"), keyRow(), modelRow("half"));
+        rows.push(address("A ws:// or wss:// Meta realtime server.", "ws://127.0.0.1:8012"), keyRow(), modelRow("half"));
         break;
       case "open_ai":
         rows.push(
-          address("http://127.0.0.1:9000/v1"),
+          address("Where each capture is sent for transcription.", "http://127.0.0.1:9000/v1"),
           keyRow(),
           modelRow("third"),
-          sized(row("Request", null, controls.draftSelect(OPEN_AI_REQUESTS, working.request, (value) => {
+          sized(row("Request", "Transcriptions, or Chat with audio.", controls.draftSelect(OPEN_AI_REQUESTS, working.request, (value) => {
             working.request = value;
           })), "third"),
-          sized(row("Language", null, controls.draftText(working.language, (value) => {
+          sized(row("Language", "A two-letter code such as de. Empty detects it.", controls.draftText(working.language, (value) => {
             working.language = value;
           }, { placeholder: "Detect automatically" })), "third"),
         );
@@ -1642,10 +1642,10 @@ function speech(context: PageContext): SpeechRows {
       }
       case "extra":
         rows.push(
-          address("http://127.0.0.1:9000/v1"),
+          address("Where the extra transcription is sent.", "http://127.0.0.1:9000/v1"),
           keyRow(),
           modelRow("half"),
-          sized(row("API", null, controls.draftSelect(APIS, working.api, (value) => {
+          sized(row("API", "Which transcription API the endpoint speaks.", controls.draftSelect(APIS, working.api, (value) => {
             working.api = value;
           })), "half"),
         );
