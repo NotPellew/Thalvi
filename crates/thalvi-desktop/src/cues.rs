@@ -276,11 +276,7 @@ impl CueEngine {
                 Some(kept) if kept.id == id && !kept.state.broken.load(Ordering::Acquire) => {
                     (kept, false)
                 }
-                _ => {
-                    let state = Arc::new(OutputState::default());
-                    let speaker = self.output.build(&id, Arc::clone(&state))?;
-                    (Kept { id, speaker, state }, true)
-                }
+                _ => (self.output.build()?, true),
             };
             let _muted = (mic == Mic::Muted).then(|| Muted::new(&self.gate));
             let rate = kept.speaker.rate();
@@ -373,11 +369,7 @@ impl Drop for Muted<'_> {
 
 trait Output {
     fn default_device(&self) -> Result<cpal::DeviceId, CueError>;
-    fn build(
-        &self,
-        id: &cpal::DeviceId,
-        state: Arc<OutputState>,
-    ) -> Result<Box<dyn Speaker + Send>, CueError>;
+    fn build(&self) -> Result<Kept, CueError>;
 }
 
 trait Speaker {
@@ -409,30 +401,33 @@ impl Output for CpalOutput {
             .map_err(CueError::Failed)
     }
 
-    fn build(
-        &self,
-        id: &cpal::DeviceId,
-        state: Arc<OutputState>,
-    ) -> Result<Box<dyn Speaker + Send>, CueError> {
+    fn build(&self) -> Result<Kept, CueError> {
         let device = cpal::default_host()
-            .device_by_id(id)
+            .default_output_device()
             .ok_or(CueError::NoOutputDevice)?;
+        let id = device.id().map_err(CueError::Failed)?;
+        let state = Arc::new(OutputState::default());
         let supported = device.default_output_config().map_err(CueError::Failed)?;
         let rate = supported.sample_rate();
         let config = supported.config();
+        let callback = Arc::clone(&state);
         let stream = match supported.sample_format() {
-            SampleFormat::F32 => output::<f32>(&device, config, state),
-            SampleFormat::I16 => output::<i16>(&device, config, state),
-            SampleFormat::I32 => output::<i32>(&device, config, state),
-            SampleFormat::U16 => output::<u16>(&device, config, state),
-            SampleFormat::F64 => output::<f64>(&device, config, state),
+            SampleFormat::F32 => output::<f32>(&device, config, callback),
+            SampleFormat::I16 => output::<i16>(&device, config, callback),
+            SampleFormat::I32 => output::<i32>(&device, config, callback),
+            SampleFormat::U16 => output::<u16>(&device, config, callback),
+            SampleFormat::F64 => output::<f64>(&device, config, callback),
             other => Err(cpal::Error::with_message(
                 ErrorKind::UnsupportedConfig,
                 format!("speaker sample format {other} is not supported"),
             )),
         }
         .map_err(CueError::Failed)?;
-        Ok(Box::new(CpalSpeaker { stream, rate }))
+        Ok(Kept {
+            id,
+            speaker: Box::new(CpalSpeaker { stream, rate }),
+            state,
+        })
     }
 }
 
@@ -557,11 +552,9 @@ mod tests {
             ))
         }
 
-        fn build(
-            &self,
-            id: &cpal::DeviceId,
-            state: Arc<OutputState>,
-        ) -> Result<Box<dyn Speaker + Send>, CueError> {
+        fn build(&self) -> Result<Kept, CueError> {
+            let id = self.default_device()?;
+            let state = Arc::new(OutputState::default());
             self.build_input
                 .lock()
                 .unwrap()
@@ -572,11 +565,15 @@ mod tests {
                 return Err(CueError::NoOutputDevice);
             }
             self.states.lock().unwrap().push(Arc::clone(&state));
-            Ok(Box::new(FakeSpeaker {
-                output: Arc::clone(self),
-                device,
+            Ok(Kept {
+                id,
+                speaker: Box::new(FakeSpeaker {
+                    output: Arc::clone(self),
+                    device,
+                    state: Arc::clone(&state),
+                }),
                 state,
-            }))
+            })
         }
     }
 
