@@ -679,6 +679,53 @@ mod tests {
     }
 
     #[test]
+    fn missing_programs_are_replaced_in_one_batch_including_adopted_pairs() {
+        let gone = "/tmp/.mount_ThalviGone/usr/bin/thalvi-desktop";
+        assert!(!Path::new(gone).exists());
+        for (name, program, adopted) in [
+            ("quoted", format!("'{gone}'"), false),
+            ("bare", gone.to_owned(), false),
+            ("escaped quote", "'/tmp/Thalvi gone'\\''s/thalvi-desktop'".to_owned(), false),
+            ("adopted pair", format!("'{gone}'"), true),
+        ] {
+            let mut existing = vec![
+                row("F9", false, "exec", &format!("{program} hold-start")),
+                row("F9", true, "exec", &format!("{program} hold-end")),
+                row("F10", false, "exec", &format!("{program} write-start")),
+                row("F10", true, "exec", &format!("{program} write-end")),
+            ];
+            if adopted {
+                existing.push(row("F9", false, "exec", &format!("'{EXE}' hold-start")));
+            }
+            let hypr = Compositor::new(existing);
+            let (watch, _) = bind_keys(&hypr, &Installed::default(), EXE, &defaults());
+            assert!(watch.is_ok(), "{name}: dead binds must be replaced");
+            assert_eq!(hypr.commands(), [
+                "hyprctl -j binds".to_owned(),
+                format!("hyprctl --batch keyword unbind , F9; keyword bind , F9, exec, '{EXE}' hold-start; keyword bindrti , F9, exec, '{EXE}' hold-end; keyword unbind , F10; keyword bind , F10, exec, '{EXE}' write-start; keyword bindrti , F10, exec, '{EXE}' write-end"),
+            ], "{name}");
+            assert_eq!(hypr.bound(), bound_by_thalvi(EXE, &[("F9", "hold"), ("F10", "write")]), "{name}");
+            drop(watch);
+            assert_eq!(hypr.bound(), [], "{name}: the watch owns the replacements");
+        }
+    }
+
+    #[test]
+    fn an_existing_program_is_refused_without_promising_reload_removes_it() {
+        let path = std::env::temp_dir().join(format!("thalvi-566-impl-1-live-{}", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        let command = format!("{} hold-start", quoted(&path).unwrap());
+        let hypr = Compositor::new(vec![row("F9", false, "exec", &command)]);
+        let (watch, _) = bind_keys(&hypr, &Installed::default(), EXE, &defaults());
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(watch.err(), Some(HostError::Unsupported(
+            "Hyprland already binds F9 to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them.".to_owned()
+        )));
+        assert_eq!(hypr.commands(), ["hyprctl -j binds"]);
+        assert_eq!(hypr.bound().len(), 1);
+    }
+
+    #[test]
     fn a_key_another_bind_holds_is_refused_and_nothing_is_bound() {
         let taken = |key: &str| {
             format!("{key} is already bound in Hyprland. Pick another key or remove that bind.")
