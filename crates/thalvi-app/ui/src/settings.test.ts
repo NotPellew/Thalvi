@@ -1231,6 +1231,17 @@ describe("the Recognition page", () => {
     expect(editorEl().querySelector("details.fold[data-fold^='recognition/server/']")).toBeNull();
   });
 
+  it.each([
+    ["realtime", [["Name", "How this server is listed when something fails."], ["Address", "A ws:// or wss:// Meta realtime server."], ["API key", "Saved in the config. Never shown again."], ["Model", "The model named in each request."]]],
+    ["open_ai", [["Name", "How this server is listed when something fails."], ["Address", "Where each capture is sent for transcription."], ["API key", "Saved in the config. Never shown again."], ["Model", "The model named in each request."], ["Request", "Transcriptions, or Chat with audio."], ["Language", "A two-letter code such as de. Empty detects it."]]],
+    ["on_device", [["Name", "How this server is listed when something fails."], ["Show models for", "Filters this list by each card's languages."], ["Speech model", "Downloads on first use. A pick applies next."]]],
+    ["extra", [["Name", "How this server is listed when something fails."], ["Address", "Where the extra transcription is sent."], ["API key", "Saved in the config. Never shown again."], ["Model", "The model named in each request."], ["API", "Which transcription API the endpoint speaks."]]],
+  ] as const)("explains each field of the %s form under its label", async (kind, hints) => {
+    await openSeveral();
+    await addServer(kind);
+    expect(Array.from(editorEl().querySelectorAll<HTMLElement>(".row")).map((row) => [row.querySelector(".what > :first-child")?.textContent, row.querySelector(".what > small")?.textContent ?? null])).toEqual(hints);
+  });
+
   it("numbers a default name that is taken", async () => {
     await open({ ...several(), stt: { entries: [{ ...SERVER, name: "Meta realtime ASR" }, { ...META, name: "Extra recognizer" }] } });
     goTo("recognition");
@@ -1598,6 +1609,18 @@ describe("the fake backend's rule for extra recognizers", () => {
   });
 });
 
+describe("the fake backend's address check", () => {
+  it.each([
+    ["realtime", { ...SERVER, address: "wss://asr.example" }, { ...SERVER, address: "https://asr.example" }, "ws:// or wss://"],
+    ["open_ai", { ...GATEWAY, address: "http://127.0.0.1:9000/v1" }, { ...GATEWAY, address: "ws://127.0.0.1:9000/v1" }, "http:// or https://"],
+    ["extra", { ...META, address: "http://127.0.0.1:9000/v1" }, { ...META, address: "wss://meta.example/v1" }, "http:// or https://"],
+  ] as const)("accepts the addresses the desktop takes for kind %s and refuses another", async (_kind, good, bad, wanted) => {
+    const backend = fakeBackend(new URLSearchParams());
+    await expect(backend.checkSpeechEntry(good)).resolves.toBeUndefined();
+    await expect(backend.checkSpeechEntry(bad)).rejects.toThrow(`the address must start with ${wanted}.`);
+  });
+});
+
 describe("the attached speech editor", () => {
   async function openSeveral() {
     const stub = await open(several());
@@ -1927,20 +1950,21 @@ describe("the speech model catalog", () => {
     goTo("recognition");
     const row = (): HTMLElement | null => root.querySelector('.table[data-kind="on_device"] .trow.server');
     expect(stub.backend.speechDevice).toHaveBeenCalledWith("nemotron_160ms");
-    expect(row()?.querySelector(".unit")?.textContent).toBe("Nemotron Streaming · GPU");
+    expect(row()?.querySelector(".unit")?.textContent).toBe("Nemotron Streaming");
+    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)");
 
     // The model loads behind the window: when the app's state changes, the row asks again.
     stub.backend.speechDevice.mockResolvedValue("Runs on the CPU: no usable GPU");
     stub.emit({ state: "loading", notice: "Loading the speech model." });
     stub.emit({ state: "listening" });
     await settle();
-    expect(row()?.querySelector(".unit")?.textContent).toBe("Nemotron Streaming · CPU");
+    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU: no usable GPU");
 
     // A download finishes without a state change, so its end makes the row ask again too.
-    stub.backend.speechDevice.mockResolvedValue("Runs on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)");
+    stub.backend.speechDevice.mockResolvedValue("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
     stub.speechProgress({ name: "nemotron_160ms", percent: 100, status: "done", message: null, causes: [] });
     await settle();
-    expect(row()?.querySelector(".unit")?.textContent).toBe("Nemotron Streaming · GPU");
+    expect(row()?.querySelector(".device")?.textContent).toBe("Runs on the CPU. The GPU model is downloaded now and is used the next time the speech model loads.");
 
     root.replaceChildren();
     const folder = stubBackend(local("/models/mine"));
@@ -1948,7 +1972,7 @@ describe("the speech model catalog", () => {
     await settle();
     goTo("recognition");
     expect(folder.backend.speechDevice).not.toHaveBeenCalled();
-    expect(row()?.querySelector(".unit")?.textContent).toBe("mine");
+    expect(row()?.querySelector(".device")).toBeNull();
   });
 
   it("names the hardware each picked model runs on and asks again once its download is done", async () => {
