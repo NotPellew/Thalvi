@@ -269,15 +269,20 @@ impl CueEngine {
     /// Why the cue could not be played.
     pub fn play(&self, cue: Cue, mic: Mic, called: Instant) -> Result<Option<CueTiming>, CueError> {
         let mut timing = None;
-        self.play_gated(cue, mic, |playback| {
+        self.play_gated(cue, Mic::Open, |playback| {
             let id = self.output.default_device()?;
-            let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
-            let state = Arc::new(OutputState::default());
-            let speaker = self.output.build(&id, Arc::clone(&state))?;
-            *kept = Some(Kept { id, speaker, state });
-            let Some(kept) = kept.as_mut() else {
-                return Err(CueError::Stalled);
+            let mut cache = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+            let (kept, rebuilt) = match cache.take() {
+                Some(kept) if kept.id == id && !kept.state.broken.load(Ordering::Acquire) => {
+                    (kept, false)
+                }
+                _ => {
+                    let state = Arc::new(OutputState::default());
+                    let speaker = self.output.build(&id, Arc::clone(&state))?;
+                    (Kept { id, speaker, state }, true)
+                }
             };
+            let _muted = (mic == Mic::Muted).then(|| Muted::new(&self.gate));
             let rate = kept.speaker.rate();
             *kept
                 .state
@@ -290,11 +295,13 @@ impl CueEngine {
                 rate,
                 playback: Arc::clone(playback),
             });
-            kept.speaker.play()?;
             let limit =
                 Duration::from_secs_f64(notes(cue).iter().map(|note| note.1).sum()) + STALL_MARGIN;
-            let result = playback.wait(limit);
-            kept.speaker.pause()?;
+            let result = kept.speaker.play().and_then(|()| playback.wait(limit));
+            let paused = kept.speaker.pause();
+            if result.is_err() || paused.is_err() {
+                kept.state.broken.store(true, Ordering::Release);
+            }
             *kept
                 .state
                 .voice
@@ -303,9 +310,10 @@ impl CueEngine {
             timing = playback.first_sample.get().map(|&(at, output)| CueTiming {
                 start: at.saturating_duration_since(called),
                 output,
-                rebuilt: true,
+                rebuilt,
             });
-            result
+            *cache = Some(kept);
+            result.and(paused)
         })?;
         Ok(timing)
     }
