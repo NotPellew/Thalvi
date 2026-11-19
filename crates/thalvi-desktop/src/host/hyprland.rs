@@ -2,10 +2,8 @@
 
 mod hold_binds;
 
-use std::ffi::OsString;
 use std::fmt;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 use serde::Deserialize;
@@ -80,7 +78,13 @@ impl Hyprland {
     ) -> Result<HoldSource, HostError> {
         /// Shared by every watch, since a key change has two at once.
         static INSTALLED: LazyLock<Installed> = LazyLock::new(Installed::default);
-        let exe = executable(std::env::var_os("APPIMAGE"), std::env::current_exe())?;
+        // The mounted binary, not `$APPIMAGE`: the AppImage's `AppRun` waits up to 1 s on the desktop portal per press.
+        let exe = std::env::current_exe().map_err(|_| {
+            HostError::Unsupported(
+                "Thalvi could not find its own program file, so the hold keys cannot be bound."
+                    .to_owned(),
+            )
+        })?;
         hold_binds::bind(
             Arc::new(SystemRunner),
             INSTALLED.clone(),
@@ -90,23 +94,6 @@ impl Hyprland {
             on_problem,
         )
         .map(HoldSource::Watching)
-    }
-}
-
-/// The program the binds run: the `AppImage` when Thalvi runs from one, since its own path is a
-/// mount that goes away, else the running executable.
-fn executable(
-    appimage: Option<OsString>,
-    current: io::Result<PathBuf>,
-) -> Result<PathBuf, HostError> {
-    match appimage.filter(|path| !path.is_empty()) {
-        Some(path) => Ok(path.into()),
-        None => current.map_err(|_| {
-            HostError::Unsupported(
-                "Thalvi could not find its own program file, so the hold keys cannot be bound."
-                    .to_owned(),
-            )
-        }),
     }
 }
 
@@ -557,52 +544,6 @@ mod tests {
             "Thalvi would refuse these binds as its own: {hand_written:?}"
         );
         assert!(conf.contains("Thalvi binds the hold and write keys itself"));
-    }
-
-    #[test]
-    fn the_binds_run_the_appimage_else_the_running_program() {
-        let missing = || Err(io::ErrorKind::NotFound.into());
-        for (name, appimage, current, expected) in [
-            (
-                "an AppImage",
-                Some("/home/me/Thalvi.AppImage"),
-                Ok("/tmp/.mount_x/usr/bin/thalvi-desktop"),
-                Ok("/home/me/Thalvi.AppImage"),
-            ),
-            (
-                "no AppImage",
-                None,
-                Ok("/usr/bin/thalvi-desktop"),
-                Ok("/usr/bin/thalvi-desktop"),
-            ),
-            (
-                "an empty AppImage variable",
-                Some(""),
-                Ok("/usr/bin/thalvi-desktop"),
-                Ok("/usr/bin/thalvi-desktop"),
-            ),
-            (
-                "an AppImage, whatever the program",
-                Some("/a"),
-                missing(),
-                Ok("/a"),
-            ),
-            (
-                "neither",
-                None,
-                missing(),
-                Err(HostError::Unsupported(
-                    "Thalvi could not find its own program file, so the hold keys cannot be bound."
-                        .to_owned(),
-                )),
-            ),
-        ] {
-            assert_eq!(
-                executable(appimage.map(OsString::from), current.map(PathBuf::from)),
-                expected.map(PathBuf::from),
-                "{name}"
-            );
-        }
     }
 
     use std::sync::Mutex;
