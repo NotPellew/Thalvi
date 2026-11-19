@@ -68,9 +68,11 @@ impl Hyprland {
     /// which report the presses and releases, so `_on_change` is not called. The binds go when the
     /// watch is dropped, and come back after a config reload. Later problems go to `on_problem`.
     ///
+    /// [`HoldSource::Refused`] when another bind holds a key or Hyprland refuses the binds; its
+    /// watch binds them at the next config reload that allows it.
+    ///
     /// # Errors
-    /// [`HostError::Unsupported`] when a key is not F1 to F12 alone, another bind holds it, or
-    /// Hyprland refuses the binds.
+    /// [`HostError::Unsupported`] when a key is not F1 to F12 alone or the program path cannot be bound.
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
         _on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,

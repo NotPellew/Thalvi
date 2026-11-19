@@ -69,6 +69,7 @@ impl Row {
             })
     }
 
+    /// Whether this is a Thalvi hold bind whose program, the first shell word, is an absolute path that no longer exists.
     fn is_leftover(&self) -> bool {
         if !self.is_thalvi_hold() {
             return false;
@@ -139,14 +140,16 @@ fn wanted(exe: &Path, keys: &[(HoldKind, HoldKey)]) -> Result<Vec<Bind>, HostErr
     Ok(binds)
 }
 
-/// The binds of `wanted` that Hyprland lacks, or the notice why they cannot be added: another bind
-/// holds a key, or a hold bind that Thalvi did not add does. A bind identical to a wanted one is
-/// adopted, so it is neither added again nor in the way.
+/// What Hyprland needs to hold every wanted bind.
 struct Changes<'a> {
+    /// Keys whose binds go first: they hold binds of a Thalvi whose program is gone.
     replace: Vec<&'a str>,
     add: Vec<&'a Bind>,
 }
 
+/// The binds of `wanted` that Hyprland lacks, or the notice why they cannot be added: another bind
+/// holds a key, or a hold bind that Thalvi did not add does. A bind identical to a wanted one is
+/// adopted, so it is neither added again nor in the way, and a leftover is replaced.
 fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> {
     let mut keys: Vec<&str> = wanted.iter().map(|bind| bind.key.as_str()).collect();
     keys.dedup();
@@ -245,7 +248,9 @@ impl Installed {
     }
 }
 
+/// Whether a watch relies on its binds in [`Installed`]: only a bound watch gives them up when dropped.
 enum State {
+    /// The first bind was refused; a reload may still bind them.
     Waiting,
     Bound,
     Gone,
@@ -811,8 +816,7 @@ mod tests {
 
     #[test]
     fn an_existing_program_is_refused_without_promising_reload_removes_it() {
-        let path =
-            std::env::temp_dir().join(format!("thalvi-566-impl-1-live-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("thalvi-live-program-{}", std::process::id()));
         std::fs::write(&path, "").unwrap();
         let command = format!("{} hold-start", quoted(&path).unwrap());
         let hypr = Compositor::new(vec![row("F9", false, "exec", &command)]);
