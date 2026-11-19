@@ -1719,8 +1719,12 @@ async fn cancelling_from_outside_stops_whatever_the_capture_is_doing() {
                 rig.handle.cancel();
                 assert_eq!(
                     finished(task).await,
-                    CaptureOutcome::Cancelled {
-                        dictated: (!matches!(moment, Moment::Starting)).then(|| "Hello".to_owned())
+                    match moment {
+                        Moment::AcceptedCue => accepted(CaptureRoute::Paste, "Hello"),
+                        _ => CaptureOutcome::Cancelled {
+                            dictated: (!matches!(moment, Moment::Starting))
+                                .then(|| "Hello".to_owned()),
+                        },
                     }
                 );
                 let log = rig.cue_log();
@@ -2323,8 +2327,8 @@ fn capture_and_listen(
     })
 }
 
-/// When the extras go out: the capture ends at 3500 and the accepted cue takes 100 ms.
-const MERGE_STARTS: u64 = 3600;
+/// The extras go out as the capture ends, while the accepted cue plays.
+const MERGE_STARTS: u64 = 3500;
 
 const ALL: RecordKinds = RecordKinds {
     metrics: true,
@@ -7611,7 +7615,7 @@ async fn a_buffering_streaming_extra_is_told_the_audio_is_complete_and_merges_it
                 r#"["live words","X words"]"#
             );
             extras_were(&extra_metrics(&dir), &[("X", "ok", true)]);
-            assert_eq!(extra_duration(&dir, "X").round(), 400.0);
+            assert_eq!(extra_duration(&dir, "X").round(), 300.0);
         })
         .await;
 }
@@ -7667,31 +7671,51 @@ async fn a_streaming_extra_is_waited_for_until_every_word_it_heard_is_final() {
 async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, mut engine, mut frames) = Rig::new("{}");
-            rig.cues.never_finishes(Cue::Accepted);
-            let task = tokio::task::spawn_local(async move {
-                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
-                let outcome = engine.capture(&mut frames, None).await;
-                (outcome, engine)
-            });
-            rig.hold().await;
-            rig.say(1000, Say::Partial("hello world")).await;
-            rig.release(1200).await;
-            rig.say(1250, Say::Final("hello world")).await;
-            assert_eq!(rig.started(Cue::Accepted), [1250]);
-            assert!(
-                task.is_finished(),
-                "paste is ready while the accepted cue still plays"
-            );
-            let (outcome, engine) = task.await.unwrap();
-            assert_eq!(outcome, accepted(CaptureRoute::Paste, "hello world"));
-            assert!(!rig.cue_log().iter().any(|(_, log)| matches!(
-                log,
-                CueLog::Finished(Cue::Accepted) | CueLog::Cut(Cue::Accepted)
-            )));
-            rig.handle.cancel();
-            settle().await;
-            engine.finish().await;
+            for cleanup in [false, true] {
+                let (url, _asked, _feed) = chat(Chat::After(50, says!("hello world"))).await;
+                let config = if cleanup {
+                    cleaning(&url)
+                } else {
+                    "{}".to_owned()
+                };
+                let (mut rig, mut engine, mut frames) = Rig::new(&config);
+                rig.cues.never_finishes(Cue::Accepted);
+                rig.cues.mutes(&rig.gate);
+                let task = tokio::task::spawn_local(async move {
+                    assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                    let outcome = engine.capture(&mut frames, None).await;
+                    (outcome, engine)
+                });
+                rig.hold().await;
+                rig.say(1000, Say::Partial("hello world")).await;
+                rig.release(1200).await;
+                rig.say(1250, Say::Final("hello world")).await;
+                if cleanup {
+                    rig.at(1300).await;
+                }
+                assert_eq!(rig.started(Cue::Accepted), [1250]);
+                assert!(
+                    task.is_finished(),
+                    "paste is ready while the accepted cue still plays"
+                );
+                let (outcome, engine) = task.await.unwrap();
+                assert_eq!(outcome, accepted(CaptureRoute::Paste, "hello world"));
+                assert!(!rig.cue_log().iter().any(|(_, log)| matches!(
+                    log,
+                    CueLog::Finished(Cue::Accepted) | CueLog::Cut(Cue::Accepted)
+                )));
+                assert!(
+                    !rig.gate.is_enabled(),
+                    "the remaining cue still mutes input"
+                );
+                rig.handle.cancel();
+                settle().await;
+                engine.finish().await;
+                assert!(
+                    rig.gate.is_enabled(),
+                    "input returns after the remaining cue stops"
+                );
+            }
         })
         .await;
 }

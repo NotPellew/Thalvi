@@ -33,7 +33,7 @@ use crate::entries::{ExtraEntry, LiveEntry, LiveKind};
 use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
 use crate::hold::{Cutoff, HoldKind, KeyState, Press, Presses, Refusal};
 use crate::merge;
-use crate::metrics::{Dictation, Event, RecordKinds, Recorder};
+use crate::metrics::{Dictation, Event, Metrics, RecordKinds, Recorder};
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
@@ -446,6 +446,7 @@ pub struct Engine<R, W, C> {
     recognizer: R,
     wake: W,
     cues: Rc<C>,
+    ending_cues: JoinSet<()>,
     cues_on: Cues,
     gate: InputGate,
     vad: VadDetector,
@@ -467,7 +468,7 @@ pub struct Engine<R, W, C> {
     speech: SpeechSource,
     http: reqwest::Client,
     recorder: Recorder,
-    notice: Box<dyn Fn(&str)>,
+    notice: Rc<dyn Fn(&str)>,
     spotter: Option<Box<dyn KeywordSpotter>>,
     spotter_off: Option<String>,
     state: watch::Sender<EngineState>,
@@ -542,6 +543,26 @@ struct CueEnd {
     /// From the event that called for the cue until it started playing.
     waited: Duration,
     result: Result<Option<CueTiming>, CueError>,
+}
+
+fn cue_metric(metrics: &Metrics, event: Event, end: &CueEnd) {
+    if !end.played {
+        return;
+    }
+    let outcome = if end.result.is_ok() { "ok" } else { "error" };
+    let mut fields = json!({"cue": cue_name(end.cue)});
+    // `duration_ms` is play to drained; these tell our code, the device and the user's wait apart.
+    if let Ok(Some(timing)) = &end.result {
+        if timing.rebuilt {
+            fields["rebuilt"] = json!(true);
+        }
+        fields["start_ms"] = json!(millis(timing.start));
+        fields["output_ms"] = json!(timing.output.map(millis));
+        fields["audible_ms"] = json!(timing.audible().map(millis));
+        fields["perceived_ms"] =
+            json!(timing.audible().map(|audible| millis(end.waited + audible)));
+    }
+    metrics.metric(event, outcome, Some(end.took), fields);
 }
 
 /// One capture in progress, after the recognizer is ready.
@@ -1067,6 +1088,7 @@ where
             recognizer: parts.recognizer,
             wake: parts.wake,
             cues: Rc::new(parts.cues),
+            ending_cues: JoinSet::new(),
             cues_on: config.cues,
             gate: parts.gate,
             vad: VadDetector::new(),
@@ -1083,7 +1105,7 @@ where
             speech: config.speech_source(),
             http: parts.http,
             recorder,
-            notice: parts.notice,
+            notice: Rc::from(parts.notice),
             spotter: parts.spotter,
             spotter_off: parts.spotter_off,
             state,
@@ -1166,7 +1188,8 @@ where
 
     /// Writes the recordings still queued and abandons extras still running; call once at
     /// shutdown.
-    pub async fn finish(self) {
+    pub async fn finish(mut self) {
+        while self.ending_cues.join_next().await.is_some() {}
         drop(self.recorded_only);
         self.recorder.finish().await;
     }
@@ -1457,6 +1480,7 @@ where
     /// [`WakeTrigger::Hold`]. Cancellation through [`EngineHandle::cancel`] applies to this call
     /// only. Returns to listening in every case. `window` is the app bound at wake, used only to
     /// choose a writing prompt; `None` when nothing was bound or this desktop names no app.
+    /// Run within a [`tokio::task::LocalSet`] so the ending cue can continue during delivery.
     pub async fn capture(
         &mut self,
         frames: &mut impl FrameSource,
@@ -1509,7 +1533,10 @@ where
         if pressed > 0 {
             self.ignore(Refusal::Capturing, pressed);
         }
-        self.gate.set_enabled(true);
+        while self.ending_cues.try_join_next().is_some() {}
+        if self.ending_cues.is_empty() {
+            self.gate.set_enabled(true);
+        }
         self.level.send_replace(0.0);
         self.set_state(EngineState::Listening);
         let route = match &outcome {
@@ -1596,20 +1623,7 @@ where
     }
 
     fn cue_metric(&self, event: Event, end: &CueEnd) {
-        if !end.played {
-            return;
-        }
-        let outcome = if end.result.is_ok() { "ok" } else { "error" };
-        let mut fields = json!({"cue": cue_name(end.cue)});
-        // `duration_ms` is play to drained; these tell our code, the device and the user's wait apart.
-        if let Ok(Some(timing)) = &end.result {
-            fields["start_ms"] = json!(millis(timing.start));
-            fields["output_ms"] = json!(timing.output.map(millis));
-            fields["audible_ms"] = json!(timing.audible().map(millis));
-            fields["perceived_ms"] =
-                json!(timing.audible().map(|audible| millis(end.waited + audible)));
-        }
-        self.recorder.metric(event, outcome, Some(end.took), fields);
+        cue_metric(&self.recorder.metrics(), event, end);
     }
 
     /// Reports a cue that failed to play; the capture goes on without it.
@@ -2443,7 +2457,7 @@ where
                                     .is_some_and(writing::Writing::clean_dictation)
                                 && has_words(&request.text) =>
                         {
-                            // `decided` is the dictation final; the call starts after the ending cue.
+                            // `decided` is the dictation final; cleanup can overlap the ending cue.
                             self.clean(request, decided).await
                         }
                         outcome => outcome,
@@ -2472,7 +2486,7 @@ where
     }
 
     /// Plays `cue` while releasing `session`: closed when the capture was accepted, cancelled
-    /// otherwise. False when the user cancelled while the cue played.
+    /// otherwise. Accepted captures wait only for release; the cue keeps playing independently.
     async fn end_with(
         &mut self,
         cue: Cue,
@@ -2487,8 +2501,43 @@ where
                 None => {}
             }
         };
-        let (completed, ()) = tokio::join!(self.end_cue(cue, decided), release);
-        completed
+        if !close {
+            let (completed, ()) = tokio::join!(self.end_cue(cue, decided), release);
+            return completed;
+        }
+        while self.ending_cues.try_join_next().is_some() {}
+        let played = self.cue(cue, Mic::Muted, decided);
+        let metrics = self.recorder.metrics();
+        let notice = Rc::clone(&self.notice);
+        let mut cancel = self.cancel.clone();
+        let gate = self.gate.clone();
+        let state = self.state.clone();
+        self.ending_cues.spawn_local(async move {
+            let started = Instant::now();
+            tokio::select! {
+                biased;
+                _ = cancel.changed() => metrics.metric(
+                    Event::EndCue, "cancelled", Some(started.elapsed()), json!({"cue": cue_name(cue)})),
+                end = played => {
+                    cue_metric(&metrics, Event::EndCue, &end);
+                    if let Err(error) = end.result {
+                        notice(&format!("{error} The capture continues."));
+                    }
+                }
+            }
+            if *state.borrow() == EngineState::Listening {
+                gate.set_enabled(true);
+            }
+        });
+        tokio::pin!(release);
+        tokio::select! {
+            biased;
+            _ = self.cancel.changed() => {
+                release.await;
+                false
+            }
+            () = &mut release => true,
+        }
     }
 
     /// Merges the live text with the texts of the switched-on extras that arrive in time: the chat
