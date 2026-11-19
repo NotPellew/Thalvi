@@ -68,6 +68,27 @@ impl Row {
                 ["hold-start", "hold-end", "write-start", "write-end"].contains(&word)
             })
     }
+
+    fn is_leftover(&self) -> bool {
+        if !self.is_thalvi_hold() {
+            return false;
+        }
+        let mut word = String::new();
+        let mut quoted = false;
+        let mut chars = self.arg.trim_start().chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' => quoted = !quoted,
+                '\\' if !quoted => match chars.next() {
+                    Some(c) => word.push(c),
+                    None => return false,
+                },
+                c if c.is_whitespace() && !quoted => break,
+                c => word.push(c),
+            }
+        }
+        !quoted && Path::new(&word).is_absolute() && !Path::new(&word).exists()
+    }
 }
 
 /// `exe` as one shell word for the `exec` of a bind.
@@ -121,25 +142,35 @@ fn wanted(exe: &Path, keys: &[(HoldKind, HoldKey)]) -> Result<Vec<Bind>, HostErr
 /// The binds of `wanted` that Hyprland lacks, or the notice why they cannot be added: another bind
 /// holds a key, or a hold bind that Thalvi did not add does. A bind identical to a wanted one is
 /// adopted, so it is neither added again nor in the way.
-fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Vec<&'a Bind>, String> {
+struct Changes<'a> {
+    replace: Vec<&'a str>,
+    add: Vec<&'a Bind>,
+}
+
+fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> {
     let mut keys: Vec<&str> = wanted.iter().map(|bind| bind.key.as_str()).collect();
     keys.dedup();
-    let (mut doubled, mut taken) = (Vec::new(), Vec::new());
+    let (mut doubled, mut taken, mut replace) = (Vec::new(), Vec::new(), Vec::new());
     for key in keys {
         let strangers: Vec<&Row> = rows
             .iter()
             .filter(|row| row.on(key) && !wanted.iter().any(|bind| bind.is(row)))
             .collect();
-        if strangers.iter().any(|row| row.is_thalvi_hold()) {
+        let (leftovers, conflicts): (Vec<_>, Vec<_>) =
+            strangers.into_iter().partition(|row| row.is_leftover());
+        if !leftovers.is_empty() {
+            replace.push(key);
+        }
+        if conflicts.iter().any(|row| row.is_thalvi_hold()) {
             doubled.push(key);
-        } else if !strangers.is_empty() {
+        } else if !conflicts.is_empty() {
             taken.push(key);
         }
     }
     let mut notices = Vec::new();
     if !doubled.is_empty() {
         notices.push(format!(
-            "Hyprland already binds {} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf. If it has none, a Thalvi that did not quit left them, and hyprctl reload clears them.",
+            "Hyprland already binds {} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them.",
             doubled.join(" and ")
         ));
     }
@@ -156,10 +187,15 @@ fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Vec<&'a Bind>, String
     if !notices.is_empty() {
         return Err(notices.join(" "));
     }
-    Ok(wanted
-        .iter()
-        .filter(|bind| !rows.iter().any(|row| bind.is(row)))
-        .collect())
+    Ok(Changes {
+        add: wanted
+            .iter()
+            .filter(|bind| {
+                replace.contains(&bind.key.as_str()) || !rows.iter().any(|row| bind.is(row))
+            })
+            .collect(),
+        replace,
+    })
 }
 
 /// The binds this process has put in Hyprland, each with the watches that rely on it: a key change
@@ -226,15 +262,23 @@ impl<R: CommandRunner> Shared<R> {
         let rows: Vec<Row> = serde_json::from_str(&list).map_err(|_| {
             HostError::NothingTyped("The desktop returned an invalid bind list.".to_owned())
         })?;
-        let missing = missing(&self.binds, &rows).map_err(HostError::Unsupported)?;
+        let Changes {
+            replace,
+            add: missing,
+        } = missing(&self.binds, &rows).map_err(HostError::Unsupported)?;
         if missing.is_empty() {
             return Ok(());
         }
-        let batch = missing
-            .iter()
-            .map(|bind| bind.keyword())
-            .collect::<Vec<_>>()
-            .join("; ");
+        let mut commands = Vec::new();
+        for bind in &missing {
+            if replace.contains(&bind.key.as_str())
+                && !commands.contains(&format!("keyword unbind , {}", bind.key))
+            {
+                commands.push(format!("keyword unbind , {}", bind.key));
+            }
+            commands.push(bind.keyword());
+        }
+        let batch = commands.join("; ");
         let refusal = match self.run.run("hyprctl", &["--batch", &batch], None) {
             Ok(reply) => {
                 let replies: Vec<&str> = reply
@@ -242,7 +286,7 @@ impl<R: CommandRunner> Shared<R> {
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
                     .collect();
-                if replies.len() == missing.len() && replies.iter().all(|reply| *reply == "ok") {
+                if replies.len() == commands.len() && replies.iter().all(|reply| *reply == "ok") {
                     return Ok(());
                 }
                 replies
@@ -685,7 +729,11 @@ mod tests {
         for (name, program, adopted) in [
             ("quoted", format!("'{gone}'"), false),
             ("bare", gone.to_owned(), false),
-            ("escaped quote", "'/tmp/Thalvi gone'\\''s/thalvi-desktop'".to_owned(), false),
+            (
+                "escaped quote",
+                "'/tmp/Thalvi gone'\\''s/thalvi-desktop'".to_owned(),
+                false,
+            ),
             ("adopted pair", format!("'{gone}'"), true),
         ] {
             let mut existing = vec![
@@ -700,11 +748,21 @@ mod tests {
             let hypr = Compositor::new(existing);
             let (watch, _) = bind_keys(&hypr, &Installed::default(), EXE, &defaults());
             assert!(watch.is_ok(), "{name}: dead binds must be replaced");
-            assert_eq!(hypr.commands(), [
-                "hyprctl -j binds".to_owned(),
-                format!("hyprctl --batch keyword unbind , F9; keyword bind , F9, exec, '{EXE}' hold-start; keyword bindrti , F9, exec, '{EXE}' hold-end; keyword unbind , F10; keyword bind , F10, exec, '{EXE}' write-start; keyword bindrti , F10, exec, '{EXE}' write-end"),
-            ], "{name}");
-            assert_eq!(hypr.bound(), bound_by_thalvi(EXE, &[("F9", "hold"), ("F10", "write")]), "{name}");
+            assert_eq!(
+                hypr.commands(),
+                [
+                    "hyprctl -j binds".to_owned(),
+                    format!(
+                        "hyprctl --batch keyword unbind , F9; keyword bind , F9, exec, '{EXE}' hold-start; keyword bindrti , F9, exec, '{EXE}' hold-end; keyword unbind , F10; keyword bind , F10, exec, '{EXE}' write-start; keyword bindrti , F10, exec, '{EXE}' write-end"
+                    ),
+                ],
+                "{name}"
+            );
+            assert_eq!(
+                hypr.bound(),
+                bound_by_thalvi(EXE, &[("F9", "hold"), ("F10", "write")]),
+                "{name}"
+            );
             drop(watch);
             assert_eq!(hypr.bound(), [], "{name}: the watch owns the replacements");
         }
@@ -712,7 +770,8 @@ mod tests {
 
     #[test]
     fn an_existing_program_is_refused_without_promising_reload_removes_it() {
-        let path = std::env::temp_dir().join(format!("thalvi-566-impl-1-live-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("thalvi-566-impl-1-live-{}", std::process::id()));
         std::fs::write(&path, "").unwrap();
         let command = format!("{} hold-start", quoted(&path).unwrap());
         let hypr = Compositor::new(vec![row("F9", false, "exec", &command)]);
@@ -732,7 +791,7 @@ mod tests {
         };
         let thalvi = |keys: &str| {
             format!(
-                "Hyprland already binds {keys} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf. If it has none, a Thalvi that did not quit left them, and hyprctl reload clears them."
+                "Hyprland already binds {keys} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them."
             )
         };
         let cases = [
@@ -775,16 +834,6 @@ mod tests {
                     row("F9", true, "exec", "thalvi-desktop hold-end"),
                 ],
                 thalvi("F9"),
-            ),
-            (
-                "binds left by an instance that ran from another path",
-                vec![row(
-                    "F10",
-                    false,
-                    "exec",
-                    "'/old/Thalvi.AppImage' write-start",
-                )],
-                thalvi("F10"),
             ),
             (
                 "another program's bind that ends in a word like the hold commands",
