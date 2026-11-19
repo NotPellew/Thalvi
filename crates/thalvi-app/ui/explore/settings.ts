@@ -349,7 +349,7 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
     title: "speech-model Download, then the refresh when it finishes",
     pinned: true,
     steps: [
-      { kind: "click", name: "Add a speech server" },
+      { kind: "click", name: "Add a streaming server" },
       { kind: "click", name: "Edit On this computer" },
       { kind: "click", name: "Download" },
       { kind: "key", key: "Tab" },
@@ -371,7 +371,7 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
     pinned: true,
     steps: [
       { kind: "click", name: "Recognition" },
-      { kind: "click", name: "Add an extra recognizer" },
+      { kind: "click", name: "Add an extra-only server" },
       { kind: "click", name: "Cancel" },
     ],
   },
