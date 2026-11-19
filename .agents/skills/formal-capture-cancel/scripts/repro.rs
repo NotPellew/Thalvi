@@ -7,7 +7,7 @@ use std::time::Duration;
 use thalvi_desktop::audio::InputGate;
 use thalvi_desktop::capture::CaptureRoute;
 use thalvi_desktop::config::DesktopConfig;
-use thalvi_desktop::cues::{Cue, CueError, CueTiming};
+use thalvi_desktop::cues::{Cue, CueError, CueTiming, Mic};
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
 use thalvi_desktop::draft::Draft;
 use thalvi_desktop::draft::Drafts;
@@ -222,7 +222,7 @@ async fn settings_apply_reports_presses_during_successful_and_failed_rebuilds() 
 
 struct ImmediateCues;
 impl CuePlayer for ImmediateCues {
-    async fn play(&self, _: Cue) -> Result<Option<CueTiming>, CueError> {
+    async fn play(&self, _: Cue, _: Mic) -> Result<Option<CueTiming>, CueError> {
         Ok(None)
     }
 }
