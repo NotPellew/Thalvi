@@ -300,6 +300,7 @@ async fn closing_capture(cancel: bool) {
             cues: ImmediateCues,
             gate,
             http: reqwest::Client::new(),
+            chat: None,
             hold,
             notice: Box::new(|_| {}),
             spotter: None,
@@ -370,7 +371,7 @@ async fn closing_capture(cancel: bool) {
             config: &config,
             recorder: &recorder,
         }
-        .settle(outcome, requests.ended, &bound, &mut key, |_, _| {})
+        .settle(outcome, None, requests.ended, &bound, &mut key, |_, _| {})
         .await
     } else {
         None
@@ -447,6 +448,7 @@ async fn no_rebuild_apply_handoff_keeps_holds_and_reports_taps() {
                     cues: ImmediateCues,
                     gate,
                     http: reqwest::Client::new(),
+                    chat: None,
                     hold,
                     notice: Box::new(|_| {}),
                     spotter: None,
