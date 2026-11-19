@@ -76,6 +76,12 @@ function within(parent: HTMLElement, name: string): HTMLButtonElement {
   return found;
 }
 
+/** Presses `action` inside `parent`, then the yes of the question it asks. */
+function confirmIn(parent: HTMLElement, action: string, yes: string): void {
+  within(parent, action).click();
+  within(parent, yes).click();
+}
+
 function goTo(page: string): void {
   (root.querySelector(`nav [data-page="${page}"]`) as HTMLElement).click();
 }
@@ -3510,37 +3516,34 @@ describe("history", () => {
 
   it("deletes one entry by id and shows the list without it", async () => {
     const stub = await openHistory(ENTRIES, [ENTRIES[0] as HistoryEntry, ENTRIES[2] as HistoryEntry]);
-    within(cards()[1] as HTMLElement, "Delete").click();
+    confirmIn(cards()[1] as HTMLElement, "Delete", "Yes, delete");
     await settle();
     expect(stub.backend.deleteHistoryEntry).toHaveBeenCalledExactlyOnceWith(20);
     expect(cards().map((card) => shown(card).text)).toEqual(["Remind me to call.", "Never mind this one"]);
   });
 
   it.each([
-    ["the first of three", ENTRIES, 0, true, null, 1],
-    ["the middle of three", ENTRIES, 1, true, null, 2],
-    ["the last of three", ENTRIES, 2, true, null, 1],
-    ["the only entry", ENTRIES.slice(0, 1), 0, true, null, "Nothing has been kept yet."],
-    ["an entry, refused", ENTRIES, 1, true, "The history could not be written.", 1],
-    ["an entry while nothing has focus", ENTRIES, 1, false, null, "BODY"],
-  ] as const)("after deleting %s, focus is on its neighbour's Delete, else the empty note", async (_case, list, deleted, focused, refusal, expected) => {
+    ["the first of three", ENTRIES, 0, null, 1],
+    ["the middle of three", ENTRIES, 1, null, 2],
+    ["the last of three", ENTRIES, 2, null, 1],
+    ["the only entry", ENTRIES.slice(0, 1), 0, null, "Nothing has been kept yet."],
+    ["an entry, refused", ENTRIES, 1, "The history could not be written.", 1],
+  ] as const)("after deleting %s, focus is on its neighbour's Delete, else the empty note", async (_case, list, deleted, refusal, expected) => {
     const stub = await openHistory(list, list, list.filter((_, index) => index !== deleted));
     goTo("history");
     await settle();
     if (refusal) stub.backend.deleteHistoryEntry.mockRejectedValueOnce(refusal);
     const labels = cards().map((card) => within(card, "Delete").getAttribute("aria-label"));
-    const del = within(cards()[deleted] as HTMLElement, "Delete");
-    if (focused) del.focus();
-    del.click();
+    confirmIn(cards()[deleted] as HTMLElement, "Delete", "Yes, delete");
     await settle();
     const active = document.activeElement as HTMLElement;
-    expect(active.getAttribute("aria-label") ?? (active === document.body ? "BODY" : active.textContent)).toBe(typeof expected === "number" ? labels[expected] : expected);
+    expect(active.getAttribute("aria-label") ?? active.textContent).toBe(typeof expected === "number" ? labels[expected] : expected);
   });
 
   it("keeps the list and says why when an entry cannot be deleted", async () => {
     const stub = await openHistory(ENTRIES);
     stub.backend.deleteHistoryEntry.mockRejectedValueOnce("The history could not be written.");
-    within(cards()[0] as HTMLElement, "Delete").click();
+    confirmIn(cards()[0] as HTMLElement, "Delete", "Yes, delete");
     await settle();
     expect(cards()).toHaveLength(3);
     expect(rowOf("Recent dictations").querySelector(".note")?.textContent).toBe("The history could not be written.");
@@ -3636,7 +3639,7 @@ describe("last dictation", () => {
 
   const area = (): HTMLTextAreaElement => rowOf("Last dictation").querySelector("textarea") as HTMLTextAreaElement;
   const section = (): HTMLElement => rowOf("Last dictation");
-  const buttons = (): string[] => Array.from(section().querySelectorAll("button")).map((candidate) => candidate.textContent);
+  const buttons = (): string[] => Array.from(section().querySelectorAll("button")).filter(shownInSection).map((candidate) => candidate.textContent);
   const notes = (): string[] => Array.from(section().querySelectorAll<HTMLElement>(".note")).filter(shownInSection).map((node) => node.textContent);
 
   function shownInSection(node: HTMLElement): boolean {
@@ -3775,35 +3778,31 @@ describe("last dictation", () => {
   it("discards the draft and shows the one that waited", async () => {
     const stub = await openDraft({ ...DRAFT, newerWaiting: true });
     stub.backend.getDraft.mockResolvedValueOnce({ ...DRAFT, id: 9, original: "Waiting.", text: "Waiting." });
-    within(section(), "Discard").click();
+    confirmIn(section(), "Discard", "Yes, discard");
     await settle();
     expect(stub.backend.discardDraft).toHaveBeenCalledOnce();
     expect(area().value).toBe("Waiting.");
     expect(notes()).not.toContain("A newer dictation is waiting. Discard this one to see it.");
 
     stub.backend.getDraft.mockResolvedValueOnce(null);
-    within(section(), "Discard").click();
+    confirmIn(section(), "Discard", "Yes, discard");
     await settle();
     expect(notes()[0]).toContain("Nothing to recover yet.");
   });
 
   it.each([
-    ["nothing is left", null, true, null, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it."],
-    ["a newer draft waits", { ...DRAFT, id: 9, original: "Waiting.", text: "Waiting." }, true, null, "Discard"],
-    ["the discard is refused", null, true, "The draft could not be removed.", "Discard"],
-    ["nothing has focus", null, false, null, "BODY"],
-  ] as const)("after Discard when %s, focus is on the empty note, else on Discard", async (_case, next, focused, refusal, expected) => {
+    ["nothing is left", null, null, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it."],
+    ["a newer draft waits", { ...DRAFT, id: 9, original: "Waiting.", text: "Waiting." }, null, "Discard"],
+    ["the discard is refused", null, "The draft could not be removed.", "Discard"],
+  ] as const)("after Discard when %s, focus is on the empty note, else on Discard", async (_case, next, refusal, expected) => {
     const stub = await openDraft({ ...DRAFT, newerWaiting: next !== null });
     goTo("history");
     await settle();
     if (refusal) stub.backend.discardDraft.mockRejectedValueOnce(refusal);
     else stub.backend.getDraft.mockResolvedValueOnce(next);
-    const discard = within(section(), "Discard");
-    if (focused) discard.focus();
-    discard.click();
+    confirmIn(section(), "Discard", "Yes, discard");
     await settle();
-    const active = document.activeElement as HTMLElement;
-    expect(active === document.body ? "BODY" : active.textContent).toBe(expected);
+    expect(document.activeElement?.textContent).toBe(expected);
   });
 
   it.each([

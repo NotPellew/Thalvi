@@ -1724,11 +1724,11 @@ function speech(context: PageContext): SpeechRows {
       );
     };
     const label = `Remove ${entry.name}`;
-    const node = hasKey(entry)
+    const plain = button("Remove", act, "quiet");
+    const [node, ask] = hasKey(entry)
       ? confirmed("Remove", `Remove ${entry.name} and its saved key?`, "Yes, remove", "Keep", act, label)
-      : button("Remove", act, "quiet");
+      : [plain, plain];
     node.setAttribute("aria-label", label);
-    const ask = node instanceof HTMLButtonElement ? node : (node.querySelector("button") as HTMLButtonElement);
     const reason = el("small", { class: "unit", id: uid("r") }, "Choose another Live recognizer first.");
     syncEditor = () => {
       const locked = entries().some((known) => known.id === entry.id && isLive(known) && known.active);
@@ -1773,7 +1773,7 @@ function speech(context: PageContext): SpeechRows {
       void refreshChat();
     });
   });
-  const removeChat = confirmed("Remove chat model", "Delete the downloaded chat model from this computer?", "Yes, delete model", "Keep model", () => {
+  const [removeChat] = confirmed("Remove chat model", "Delete the downloaded chat model from this computer?", "Yes, delete model", "Keep model", () => {
     say(chatProblem, "");
     backend.removeChatModel().then(refreshChat, (error: unknown) => { say(chatProblem, errorText(error)); });
   });
@@ -2593,13 +2593,13 @@ function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: str
     );
   }, "quiet");
   copy.setAttribute("aria-label", `Copy the entry from ${time.textContent}`);
-  const del = button("Delete", remove, "quiet");
-  del.setAttribute("aria-label", `Delete the entry from ${time.textContent}`);
-  return [el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), result, el("span", { class: "trow" }, copy, del)), del];
+  const [deleting, del] = confirmed("Delete", "Delete this entry? This cannot be undone.", "Yes, delete", "Keep", remove, `Delete the entry from ${time.textContent}`);
+  del.classList.add("quiet");
+  return [el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), result, el("span", { class: "trow" }, copy, deleting)), del];
 }
 
-/** A button that asks before it acts: it is replaced by the question and a yes and a no. */
-function confirmed(label: string, question: string, yes: string, no: string, act: () => void, askLabel?: string): HTMLElement {
+/** A button that asks before it acts: it is replaced by the question and a yes and a no. Returns the whole and the button. */
+function confirmed(label: string, question: string, yes: string, no: string, act: () => void, askLabel?: string): [HTMLElement, HTMLButtonElement] {
   const ask = button(label, () => {
     ask.hidden = true;
     sure.hidden = false;
@@ -2616,7 +2616,7 @@ function confirmed(label: string, question: string, yes: string, no: string, act
     close();
     act();
   }), keep);
-  return el("span", { class: "stack" }, ask, sure);
+  return [el("span", { class: "stack" }, ask, sure), ask];
 }
 
 /** The last dictation: editable, with Copy, Reset and Discard. Editing sends and copies nothing. */
@@ -2646,13 +2646,14 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
     sync();
     saveEdit();
   }, "quiet");
-  const discard = button("Discard", () => {
+  const [discard, discardButton] = confirmed("Discard", "Discard the last dictation? This cannot be undone.", "Yes, discard", "Keep", () => {
     say(problem, "");
     say(done, "");
     backend.discardDraft().then(refresh, (error: unknown) => {
       say(problem, errorText(error));
     });
-  }, "quiet");
+  });
+  discardButton.classList.add("quiet");
   const editor = el("div", { class: "stack wide", hidden: true }, outcome, newer, text, el("span", { class: "trow" }, copy, reset, discard), done);
 
   function saveEdit(): void {
@@ -2774,7 +2775,7 @@ function history(context: PageContext): HTMLElement[] {
     row("Clear history", "Deletes every entry, and a damaged file.",
       confirmed("Clear history", "Delete every entry? This cannot be undone.", "Yes, clear history", "Keep history", () => {
         change(backend.clearHistory());
-      })),
+      })[0]),
     ...recordings(context),
   ];
 }
