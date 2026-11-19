@@ -3806,6 +3806,49 @@ describe("last dictation", () => {
     expect(active === document.body ? "BODY" : active.textContent).toBe(expected);
   });
 
+  it.each([
+    ["Delete", () => root.querySelector<HTMLElement>(".entry") ?? root, "Delete this entry? This cannot be undone.", "Yes, delete", /^Delete the entry from .*\d/, "Nothing has been kept yet."],
+    ["Discard", section, "Discard the last dictation? This cannot be undone.", "Yes, discard", /^Discard$/, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it."],
+  ] as const)("%s asks first: Keep changes nothing and returns to it, the yes acts once", async (action, scope, question, yes, name, after) => {
+    const stub = stubBackend();
+    let entries: HistoryEntry[] = [{ id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted" }];
+    let draft: Draft | null = DRAFT;
+    stub.backend.getHistory.mockImplementation(() => Promise.resolve(structuredClone(entries)));
+    stub.backend.deleteHistoryEntry.mockImplementation(() => { entries = []; return Promise.resolve(); });
+    stub.backend.getDraft.mockImplementation(() => Promise.resolve(structuredClone(draft)));
+    stub.backend.discardDraft.mockImplementation(() => { draft = null; return Promise.resolve(); });
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("history");
+    await settle();
+    const sent = action === "Delete" ? stub.backend.deleteHistoryEntry : stub.backend.discardDraft;
+    const ask = within(scope(), action);
+    expect(ask.getAttribute("aria-label") ?? ask.textContent).toMatch(name);
+    const asking = (): HTMLElement | null => scope().querySelector<HTMLElement>(`[role="group"][aria-label="${question}"]`);
+
+    ask.focus();
+    ask.click();
+    await settle();
+    expect(sent).not.toHaveBeenCalled();
+    expect(ask.hidden).toBe(true);
+    expect(asking()?.hidden).toBe(false);
+    expect(asking()?.textContent).toContain(question);
+    expect(document.activeElement?.textContent).toBe("Keep");
+
+    within(scope(), "Keep").click();
+    await settle();
+    expect(sent).not.toHaveBeenCalled();
+    expect(ask.hidden).toBe(false);
+    expect(asking()?.hidden).toBe(true);
+    expect(document.activeElement).toBe(ask);
+
+    ask.click();
+    within(scope(), yes).click();
+    await settle();
+    expect(sent).toHaveBeenCalledOnce();
+    expect(document.activeElement?.textContent).toBe(after);
+  });
+
   it("opens on the Recognition page, where a first start leaves it", async () => {
     await openDraft();
     expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("recognition");
