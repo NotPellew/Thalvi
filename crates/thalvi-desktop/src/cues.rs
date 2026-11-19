@@ -2,6 +2,7 @@
 
 use std::f64::consts::PI;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -121,6 +122,8 @@ pub struct CueTiming {
     pub start: Duration,
     /// The delay the device reports after that callback; none when the backend reports none.
     pub output: Option<Duration>,
+    /// The output stream was rebuilt for this cue.
+    pub rebuilt: bool,
 }
 
 impl CueTiming {
@@ -235,6 +238,8 @@ pub struct CueEngine {
     gate: InputGate,
     serial: Mutex<()>,
     current: Mutex<Option<Arc<Playback>>>,
+    output: Box<dyn Output + Send + Sync>,
+    kept: Mutex<Option<Kept>>,
 }
 
 impl CueEngine {
@@ -246,6 +251,8 @@ impl CueEngine {
             gate,
             serial: Mutex::new(()),
             current: Mutex::new(None),
+            output: Box::new(CpalOutput),
+            kept: Mutex::new(None),
         }
     }
 
@@ -263,10 +270,40 @@ impl CueEngine {
     pub fn play(&self, cue: Cue, mic: Mic, called: Instant) -> Result<Option<CueTiming>, CueError> {
         let mut timing = None;
         self.play_gated(cue, mic, |playback| {
-            let result = play_on_default_output(cue, playback);
+            let id = self.output.default_device()?;
+            let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+            let state = Arc::new(OutputState::default());
+            let speaker = self.output.build(&id, Arc::clone(&state))?;
+            *kept = Some(Kept { id, speaker, state });
+            let Some(kept) = kept.as_mut() else {
+                return Err(CueError::Stalled);
+            };
+            let rate = kept.speaker.rate();
+            *kept
+                .state
+                .voice
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(Voice {
+                samples: synthesize(cue, rate),
+                position: 0,
+                channels: 1,
+                rate,
+                playback: Arc::clone(playback),
+            });
+            kept.speaker.play()?;
+            let limit =
+                Duration::from_secs_f64(notes(cue).iter().map(|note| note.1).sum()) + STALL_MARGIN;
+            let result = playback.wait(limit);
+            kept.speaker.pause()?;
+            *kept
+                .state
+                .voice
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
             timing = playback.first_sample.get().map(|&(at, output)| CueTiming {
                 start: at.saturating_duration_since(called),
                 output,
+                rebuilt: true,
             });
             result
         })?;
@@ -326,52 +363,120 @@ impl Drop for Muted<'_> {
     }
 }
 
-fn play_on_default_output(cue: Cue, playback: &Arc<Playback>) -> Result<(), CueError> {
-    let device = cpal::default_host()
-        .default_output_device()
-        .ok_or(CueError::NoOutputDevice)?;
-    let supported = device.default_output_config().map_err(CueError::Failed)?;
-    let rate = supported.sample_rate();
-    let channels = usize::from(supported.channels().max(1));
-    let samples = synthesize(cue, rate);
-    let limit = Duration::from_secs_f64(notes(cue).iter().map(|note| note.1).sum()) + STALL_MARGIN;
-    let voice = Voice {
-        samples,
-        position: 0,
-        channels,
-        rate,
-        playback: Arc::clone(playback),
-    };
-    let config = supported.config();
-    let stream: Stream = match supported.sample_format() {
-        SampleFormat::F32 => output::<f32>(&device, config, voice),
-        SampleFormat::I16 => output::<i16>(&device, config, voice),
-        SampleFormat::I32 => output::<i32>(&device, config, voice),
-        SampleFormat::U16 => output::<u16>(&device, config, voice),
-        SampleFormat::F64 => output::<f64>(&device, config, voice),
-        other => Err(cpal::Error::with_message(
-            ErrorKind::UnsupportedConfig,
-            format!("speaker sample format {other} is not supported"),
-        )),
+trait Output {
+    fn default_device(&self) -> Result<cpal::DeviceId, CueError>;
+    fn build(
+        &self,
+        id: &cpal::DeviceId,
+        state: Arc<OutputState>,
+    ) -> Result<Box<dyn Speaker + Send>, CueError>;
+}
+
+trait Speaker {
+    fn rate(&self) -> u32;
+    fn play(&self) -> Result<(), CueError>;
+    fn pause(&self) -> Result<(), CueError>;
+}
+
+#[derive(Default)]
+struct OutputState {
+    voice: Mutex<Option<Voice>>,
+    broken: AtomicBool,
+}
+
+struct Kept {
+    id: cpal::DeviceId,
+    speaker: Box<dyn Speaker + Send>,
+    state: Arc<OutputState>,
+}
+
+struct CpalOutput;
+
+impl Output for CpalOutput {
+    fn default_device(&self) -> Result<cpal::DeviceId, CueError> {
+        cpal::default_host()
+            .default_output_device()
+            .ok_or(CueError::NoOutputDevice)?
+            .id()
+            .map_err(CueError::Failed)
     }
-    .map_err(CueError::Failed)?;
-    stream.play().map_err(CueError::Failed)?;
-    playback.wait(limit)
+
+    fn build(
+        &self,
+        id: &cpal::DeviceId,
+        state: Arc<OutputState>,
+    ) -> Result<Box<dyn Speaker + Send>, CueError> {
+        let device = cpal::default_host()
+            .device_by_id(id)
+            .ok_or(CueError::NoOutputDevice)?;
+        let supported = device.default_output_config().map_err(CueError::Failed)?;
+        let rate = supported.sample_rate();
+        let config = supported.config();
+        let stream = match supported.sample_format() {
+            SampleFormat::F32 => output::<f32>(&device, config, state),
+            SampleFormat::I16 => output::<i16>(&device, config, state),
+            SampleFormat::I32 => output::<i32>(&device, config, state),
+            SampleFormat::U16 => output::<u16>(&device, config, state),
+            SampleFormat::F64 => output::<f64>(&device, config, state),
+            other => Err(cpal::Error::with_message(
+                ErrorKind::UnsupportedConfig,
+                format!("speaker sample format {other} is not supported"),
+            )),
+        }
+        .map_err(CueError::Failed)?;
+        Ok(Box::new(CpalSpeaker { stream, rate }))
+    }
+}
+
+struct CpalSpeaker {
+    stream: Stream,
+    rate: u32,
+}
+
+impl Speaker for CpalSpeaker {
+    fn rate(&self) -> u32 {
+        self.rate
+    }
+    fn play(&self) -> Result<(), CueError> {
+        self.stream.play().map_err(CueError::Failed)
+    }
+    fn pause(&self) -> Result<(), CueError> {
+        self.stream.pause().map_err(CueError::Failed)
+    }
 }
 
 fn output<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    mut voice: Voice,
+    state: Arc<OutputState>,
 ) -> Result<Stream, cpal::Error>
 where
     T: SizedSample + FromSample<f32>,
 {
-    let playback = Arc::clone(&voice.playback);
+    let channels = usize::from(config.channels.max(1));
+    let errors = Arc::clone(&state);
     device.build_output_stream(
         config,
-        move |data: &mut [T], info: &OutputCallbackInfo| voice.fill(data, info),
-        move |error| playback.set(Phase::Failed(error)),
+        move |data: &mut [T], info: &OutputCallbackInfo| {
+            let mut voice = state.voice.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(voice) = voice.as_mut() {
+                voice.channels = channels;
+                voice.fill(data, info);
+            } else {
+                data.fill(T::from_sample(0.0));
+            }
+        },
+        move |error| {
+            errors.broken.store(true, Ordering::Release);
+            if let Some(voice) = errors
+                .voice
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                voice.playback.set(Phase::Failed(error));
+            }
+        },
         Some(Duration::from_secs(5)),
     )
 }
@@ -422,6 +527,183 @@ mod tests {
     use super::*;
 
     const RATE: u32 = 24_000;
+
+    #[derive(Default)]
+    struct FakeOutput {
+        device: std::sync::atomic::AtomicUsize,
+        builds: Mutex<Vec<usize>>,
+        plays: Mutex<Vec<usize>>,
+        states: Mutex<Vec<Arc<OutputState>>>,
+        fail_build: AtomicBool,
+        gate: InputGate,
+        build_input: Mutex<Vec<bool>>,
+        play_input: Mutex<Vec<bool>>,
+        paused: AtomicBool,
+    }
+
+    impl Output for Arc<FakeOutput> {
+        fn default_device(&self) -> Result<cpal::DeviceId, CueError> {
+            Ok(cpal::DeviceId::new(
+                cpal::default_host().id(),
+                self.device.load(Ordering::SeqCst).to_string(),
+            ))
+        }
+
+        fn build(
+            &self,
+            id: &cpal::DeviceId,
+            state: Arc<OutputState>,
+        ) -> Result<Box<dyn Speaker + Send>, CueError> {
+            self.build_input
+                .lock()
+                .unwrap()
+                .push(self.gate.is_enabled());
+            let device = id.id().parse().unwrap();
+            self.builds.lock().unwrap().push(device);
+            if self.fail_build.load(Ordering::SeqCst) {
+                return Err(CueError::NoOutputDevice);
+            }
+            self.states.lock().unwrap().push(Arc::clone(&state));
+            Ok(Box::new(FakeSpeaker {
+                output: Arc::clone(self),
+                device,
+                state,
+            }))
+        }
+    }
+
+    struct FakeSpeaker {
+        output: Arc<FakeOutput>,
+        device: usize,
+        state: Arc<OutputState>,
+    }
+
+    impl Speaker for FakeSpeaker {
+        fn rate(&self) -> u32 {
+            RATE
+        }
+        fn play(&self) -> Result<(), CueError> {
+            self.output.paused.store(false, Ordering::SeqCst);
+            self.output.plays.lock().unwrap().push(self.device);
+            self.output
+                .play_input
+                .lock()
+                .unwrap()
+                .push(self.output.gate.is_enabled());
+            let voice = self.state.voice.lock().unwrap();
+            let playback = &voice.as_ref().unwrap().playback;
+            playback
+                .first_sample
+                .set((Instant::now(), Some(Duration::ZERO)))
+                .unwrap();
+            playback.set(Phase::Drained(Instant::now()));
+            Ok(())
+        }
+        fn pause(&self) -> Result<(), CueError> {
+            self.output.paused.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn fake_engine() -> (CueEngine, Arc<FakeOutput>) {
+        let output = Arc::new(FakeOutput::default());
+        let mut engine = CueEngine::new(Cues::default(), output.gate.clone());
+        engine.output = Box::new(Arc::clone(&output));
+        (engine, output)
+    }
+
+    #[test]
+    fn two_cues_share_one_output_and_leave_it_paused() {
+        let (engine, output) = fake_engine();
+        let first = engine
+            .play(Cue::Wake, Mic::Open, Instant::now())
+            .unwrap()
+            .unwrap();
+        let second = engine
+            .play(Cue::Accepted, Mic::Muted, Instant::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *output.builds.lock().unwrap(),
+            [0],
+            "two cues build the output once"
+        );
+        assert!(first.rebuilt);
+        assert!(!second.rebuilt);
+        assert!(
+            output.paused.load(Ordering::SeqCst),
+            "idle output is paused"
+        );
+    }
+
+    #[test]
+    fn a_default_device_change_rebuilds_before_playing_on_the_new_device() {
+        let (engine, output) = fake_engine();
+        engine.play(Cue::Wake, Mic::Open, Instant::now()).unwrap();
+        output.device.store(1, Ordering::SeqCst);
+        let changed = engine
+            .play(Cue::Accepted, Mic::Muted, Instant::now())
+            .unwrap()
+            .unwrap();
+        engine.play(Cue::Wake, Mic::Open, Instant::now()).unwrap();
+        assert_eq!(
+            *output.builds.lock().unwrap(),
+            [0, 1],
+            "only the changed device rebuilds"
+        );
+        assert_eq!(
+            *output.plays.lock().unwrap(),
+            [0, 1, 1],
+            "no cue plays on the old device"
+        );
+        assert!(changed.rebuilt);
+    }
+
+    #[test]
+    fn a_stream_error_rebuilds_on_the_next_cue_and_reports_a_failed_rebuild() {
+        for fails in [false, true] {
+            let (engine, output) = fake_engine();
+            engine.play(Cue::Wake, Mic::Open, Instant::now()).unwrap();
+            engine
+                .play(Cue::Accepted, Mic::Muted, Instant::now())
+                .unwrap();
+            assert_eq!(
+                output.builds.lock().unwrap().len(),
+                1,
+                "healthy stream is reused before error"
+            );
+            output.states.lock().unwrap()[0]
+                .broken
+                .store(true, Ordering::Release);
+            output.fail_build.store(fails, Ordering::SeqCst);
+            let result = engine.play(Cue::Wake, Mic::Open, Instant::now());
+            if fails {
+                assert_eq!(result, Err(CueError::NoOutputDevice));
+                assert_eq!(*output.plays.lock().unwrap(), [0, 0]);
+            } else {
+                assert!(result.unwrap().unwrap().rebuilt);
+                assert_eq!(*output.plays.lock().unwrap(), [0, 0, 0]);
+            }
+            assert_eq!(*output.builds.lock().unwrap(), [0, 0]);
+        }
+    }
+
+    #[test]
+    fn a_muted_cue_keeps_input_enabled_during_build_and_mutes_only_playback() {
+        let (engine, output) = fake_engine();
+        engine.play(Cue::Wake, Mic::Muted, Instant::now()).unwrap();
+        assert_eq!(
+            *output.build_input.lock().unwrap(),
+            [true],
+            "input stays enabled during stream build"
+        );
+        assert_eq!(
+            *output.play_input.lock().unwrap(),
+            [false],
+            "input is muted while the cue sounds"
+        );
+        assert!(output.gate.is_enabled());
+    }
 
     /// (Hz, seconds, samples at 24 kHz)
     type Note = (f64, f64, usize);

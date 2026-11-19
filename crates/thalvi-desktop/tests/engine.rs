@@ -4026,6 +4026,7 @@ async fn every_cue_records_when_it_started_when_it_is_audible_and_what_the_user_
             let timing = CueTiming {
                 start: ms(40),
                 output: Some(ms(15)),
+                rebuilt: false,
             };
             let mut lines = cue_lines("cue-timing-dictation", timing, Run::Dictation).await;
             lines.extend(cue_lines("cue-timing-failure", timing, Run::Failure).await);
@@ -4103,6 +4104,7 @@ async fn a_device_that_reports_no_delay_leaves_output_empty_and_a_failed_cue_has
             let silent = CueTiming {
                 start: ms(30),
                 output: None,
+                rebuilt: false,
             };
             let lines = cue_lines("cue-timing-silent", silent, Run::Dictation).await;
             let wake = &lines[0];
@@ -4144,6 +4146,7 @@ async fn cue_lines_hold_timings_only_never_what_was_said_or_heard() {
             let timing = CueTiming {
                 start: ms(40),
                 output: Some(ms(15)),
+                rebuilt: false,
             };
             let lines = cue_lines("cue-timing-privacy", timing, Run::Dictation).await;
             assert_eq!(
@@ -7656,6 +7659,63 @@ async fn a_streaming_extra_is_waited_for_until_every_word_it_heard_is_final() {
                 .unwrap();
             assert_eq!(metric["api"], "realtime");
             assert_eq!(metric["model"], "m");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, mut engine, mut frames) = Rig::new("{}");
+            rig.cues.never_finishes(Cue::Accepted);
+            let task = tokio::task::spawn_local(async move {
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                let outcome = engine.capture(&mut frames, None).await;
+                (outcome, engine)
+            });
+            rig.hold().await;
+            rig.say(1000, Say::Partial("hello world")).await;
+            rig.release(1200).await;
+            rig.say(1250, Say::Final("hello world")).await;
+            assert_eq!(rig.started(Cue::Accepted), [1250]);
+            assert!(
+                task.is_finished(),
+                "paste is ready while the accepted cue still plays"
+            );
+            let (outcome, engine) = task.await.unwrap();
+            assert_eq!(outcome, accepted(CaptureRoute::Paste, "hello world"));
+            assert!(!rig.cue_log().iter().any(|(_, log)| matches!(
+                log,
+                CueLog::Finished(Cue::Accepted) | CueLog::Cut(Cue::Accepted)
+            )));
+            rig.handle.cancel();
+            settle().await;
+            engine.finish().await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cue_metrics_mark_only_stream_rebuilds() {
+    LocalSet::new()
+        .run_until(async {
+            for rebuilt in [false, true] {
+                let timing = CueTiming {
+                    start: ms(25),
+                    output: Some(ms(15)),
+                    rebuilt,
+                };
+                let lines =
+                    cue_lines(&format!("cue-rebuilt-{rebuilt}"), timing, Run::Dictation).await;
+                for line in lines {
+                    assert_eq!(
+                        line.get("rebuilt"),
+                        rebuilt.then_some(&serde_json::Value::Bool(true)),
+                        "only rebuilt cues carry rebuilt: true"
+                    );
+                }
+            }
         })
         .await;
 }
