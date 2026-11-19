@@ -50,7 +50,14 @@ const SETTINGS: Settings = {
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { entries: [{ kind: "on_device", id: "on-device", name: "On this computer", active: true, model: "nemotron_160ms" }] },
+  stt: {
+    entries: [
+      { kind: "realtime", id: "realtime", name: "Meta realtime ASR", active: false, address: "wss://asr.example", model: "nemotron", has_key: true },
+      { kind: "open_ai", id: "gateway", name: "LLM Gateway", active: false, address: "https://gw.example/v1", model: "whisper-1", request: "transcriptions", language: "", has_key: true },
+      { kind: "on_device", id: "on-device", name: "On this computer", active: true, model: "nemotron_160ms" },
+      { kind: "extra", id: "extra", name: "Extra recognizer", active: false, address: "https://extra.example/v1", model: "whisper-1", api: "openai" },
+    ],
+  },
   apps: { slack: { classes: ["Slack"], executables: ["slack.exe"], input_keys: [] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com/docs", label: "docs" }],
   overlay: { show: true, draft: true },
@@ -342,9 +349,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
       Promise.resolve(name === "unified_160ms" ? "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)" : "Will run on the CPU: this model runs on the CPU"),
     openSpeechModelSource: () => Promise.resolve(),
     checkSpeechEntry: (entry) => {
-      const wanted = entry.kind === "extra" ? /^https?:\/\// : /^wss?:\/\//;
-      return "address" in entry && !wanted.test(entry.address)
-        ? Promise.reject(new Error(`Speech server "${entry.name}": the address must start with ${entry.kind === "extra" ? "http:// or https://" : "ws:// or wss://"}.`))
+      const web = entry.kind !== "realtime";
+      return "address" in entry && !(web ? /^https?:\/\// : /^wss?:\/\//).test(entry.address)
+        ? Promise.reject(new Error(`Speech server "${entry.name}": the address must start with ${web ? "http:// or https://" : "ws:// or wss://"}.`))
         : Promise.resolve();
     },
     wordListSupport: (entry) => Promise.resolve(entry.kind !== "realtime"),
