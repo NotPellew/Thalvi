@@ -349,9 +349,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
       Promise.resolve(name === "unified_160ms" ? "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)" : "Will run on the CPU: this model runs on the CPU"),
     openSpeechModelSource: () => Promise.resolve(),
     checkSpeechEntry: (entry) => {
-      const wanted = entry.kind === "extra" ? /^https?:\/\// : /^wss?:\/\//;
-      return "address" in entry && !wanted.test(entry.address)
-        ? Promise.reject(new Error(`Speech server "${entry.name}": the address must start with ${entry.kind === "extra" ? "http:// or https://" : "ws:// or wss://"}.`))
+      const web = entry.kind !== "realtime";
+      return "address" in entry && !(web ? /^https?:\/\// : /^wss?:\/\//).test(entry.address)
+        ? Promise.reject(new Error(`Speech server "${entry.name}": the address must start with ${web ? "http:// or https://" : "ws:// or wss://"}.`))
         : Promise.resolve();
     },
     wordListSupport: (entry) => Promise.resolve(entry.kind !== "realtime"),
