@@ -1316,6 +1316,7 @@ function speech(context: PageContext): SpeechRows {
     if (!isModelFolder(model)) {
       backend.speechDevice(model).then(
         (text) => {
+          // The desktop names the device only in its sentence, which the model card shows in full.
           const device = /\b[CG]PU\b/.exec(text)?.[0];
           if (device !== undefined) line.textContent = `${title} · ${device}`;
         },
@@ -1338,7 +1339,7 @@ function speech(context: PageContext): SpeechRows {
   /** Applies a change to the entries and shows it; `where` says how it went. */
   function change(edit: (list: SpeechEntry[]) => void, where: HTMLElement, redraw: () => void): Promise<void> {
     where.textContent = "";
-    rowNote = null;
+    forgetNotes();
     say(problem, "");
     return apply((next) => {
       edit(next.stt.entries);
@@ -1381,7 +1382,7 @@ function speech(context: PageContext): SpeechRows {
   }
 
   function remove(entry: SpeechEntry): Promise<void> {
-    rowNote = null;
+    forgetNotes();
     return apply((next) => {
       next.stt.entries.splice(next.stt.entries.findIndex((known) => known.id === entry.id), 1);
     });
@@ -1401,7 +1402,7 @@ function speech(context: PageContext): SpeechRows {
     liveSelect.value = activeLive()?.id ?? "";
   }
 
-  const groups = KIND_ORDER.map((kind) => {
+  function kindGroup(kind: SpeechEntry["kind"]) {
     const list = el("div", { class: "table", "data-kind": kind });
     const add = button("+", () => {
       openEditor(add, null, kind);
@@ -1416,12 +1417,24 @@ function speech(context: PageContext): SpeechRows {
     head.dataset["label"] = KINDS[kind].terms;
     const applied = el("small", { class: "applied", role: "status" });
     return { kind, list, add, applied, node: el("div", { class: "grp" }, head, list, applied) };
-  });
-  const groupOf = (kind: SpeechEntry["kind"]): (typeof groups)[number] => groups.find((known) => known.kind === kind) ?? (groups[0] as (typeof groups)[number]);
+  }
+  const byKind: Record<SpeechEntry["kind"], ReturnType<typeof kindGroup>> = {
+    realtime: kindGroup("realtime"),
+    open_ai: kindGroup("open_ai"),
+    on_device: kindGroup("on_device"),
+    extra: kindGroup("extra"),
+  };
+  const groups = KIND_ORDER.map((kind) => byKind[kind]);
+
+  /** Clears what the last change said, so "Applied." only ever describes the latest one. */
+  function forgetNotes(): void {
+    rowNote = null;
+    for (const { applied } of groups) applied.textContent = "";
+  }
 
   function extraSwitch(entry: SpeechEntry): HTMLElement {
     const ticked = controls.toggle(isExtraOn(entry), (on) => {
-      rowNote = null;
+      forgetNotes();
       return tick(entry.id, on);
     });
     const input = ticked.field as HTMLInputElement;
@@ -1522,7 +1535,7 @@ function speech(context: PageContext): SpeechRows {
       if (children.length === 0) children.push(el("p", { class: "none" }, "None yet."));
       setChildren(list, ...children);
     }
-    if (!open) groups[0]?.list.append(editor);
+    if (!open) byKind.realtime.list.append(editor);
     syncLiveChoice();
     syncExtras();
     updateSummary();
@@ -1661,6 +1674,7 @@ function speech(context: PageContext): SpeechRows {
           }),
         )
         .then(() => {
+          forgetNotes();
           rowNote = { id: entry.id, text: controls.confirmation() };
           closeEditor();
           checkWordList();
@@ -1690,7 +1704,7 @@ function speech(context: PageContext): SpeechRows {
 
   /** Remove in an entry's form: it asks first when a saved key would be lost, and is locked while the entry is Live. */
   function removal(entry: SpeechEntry, message: HTMLElement): HTMLElement {
-    const group = groupOf(entry.kind);
+    const group = byKind[entry.kind];
     const act = (): void => {
       say(message, "");
       const position = entries().filter((known) => known.kind === entry.kind).findIndex((known) => known.id === entry.id);
