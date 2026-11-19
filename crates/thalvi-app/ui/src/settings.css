@@ -91,6 +91,7 @@ input[type="checkbox"]:checked::after { transform: translateX(16px); background:
 .table[data-kind] .trow.server .unit { flex: 1 1 12em; }
 .trow.server .tail { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .trow.server > .applied { flex-basis: 100%; text-align: right; }
+.trow.server > .device { flex-basis: 100%; overflow-wrap: anywhere; }
 .extra { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 .none { margin: 2px 0; font: 12px var(--mono); color: var(--mut); }
 .needs-chat { margin: 4px 0; font-size: 12px; color: var(--mut); }

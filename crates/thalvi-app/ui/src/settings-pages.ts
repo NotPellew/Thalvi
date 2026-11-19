@@ -1306,24 +1306,26 @@ function speech(context: PageContext): SpeechRows {
       });
   }
 
-  /** Where the entry runs: a server's host, or an on-device model's title and, for a catalog model, CPU or GPU. */
+  /** Where the entry runs: a server's host and whether a key is saved, or an on-device model's title. */
   function whereLine(entry: SpeechEntry): HTMLElement {
-    const key = hasKey(entry) ? " · key saved" : "";
-    if (entry.kind !== "on_device") return el("small", { class: "unit" }, `${new URL(entry.address).host}${key}`);
-    const title = modelTitleFor(entry);
-    const line = el("small", { class: "unit" }, title);
-    const model = entry.model ?? SPEECH_MODEL;
-    if (!isModelFolder(model)) {
-      backend.speechDevice(model).then(
-        (text) => {
-          // The desktop names the device only in its sentence, which the model card shows in full.
-          const device = /\b[CG]PU\b/.exec(text)?.[0];
-          if (device !== undefined) line.textContent = `${title} · ${device}`;
-        },
-        () => undefined,
-      );
-    }
-    return line;
+    if (entry.kind === "on_device") return el("small", { class: "unit" }, modelTitleFor(entry));
+    return el("small", { class: "unit" }, `${new URL(entry.address).host}${hasKey(entry) ? " · key saved" : ""}`);
+  }
+
+  /** Where an on-device catalog model runs, in the desktop's words; a model folder of the user's own has no line. */
+  function deviceLine(entry: SpeechEntry): HTMLElement[] {
+    const model = entry.kind === "on_device" ? (entry.model ?? SPEECH_MODEL) : "";
+    if (model === "" || isModelFolder(model)) return [];
+    const line = el("small", { class: "device" });
+    backend.speechDevice(model).then(
+      (text) => {
+        line.textContent = text;
+      },
+      (error: unknown) => {
+        line.textContent = errorText(error);
+      },
+    );
+    return [line];
   }
 
   function uniqueName(base: string): string {
@@ -1455,6 +1457,7 @@ function speech(context: PageContext): SpeechRows {
       el("span", { class: "phrase" }, entry.name),
       whereLine(entry),
       el("span", { class: "tail" }, role, edit),
+      ...deviceLine(entry),
       ...(rowNote?.id === entry.id ? [el("small", { class: "applied", role: "status" }, rowNote.text)] : []),
     );
   }

@@ -1137,7 +1137,7 @@ describe("the Recognition page", () => {
   it.each([
     ["Realtime speech server", "127.0.0.1:8012", "Live"],
     ["Cybrex2", "100.64.0.2:8012 · key saved", "Extra off"],
-    ["On this computer", "Nemotron Streaming · CPU", "Extra off"],
+    ["On this computer", "Nemotron Streaming", "Extra off"],
     ["LLM Gateway", "gw.example", "Extra off"],
     ["OpenAI", "api.openai.com · key saved", "Extra on"],
     ["Meta", "meta.example", "Extra off"],
