@@ -293,7 +293,7 @@ covered; native delivery need not already have occurred at the fence.
 The pre-accept capture pipeline is abstracted as an accepted result or an
 observed cancellation; a failure and "never mind" are the same non-accepted end. Each extra session's
 own connect, frames, events and text are not modeled, only whether the capture owns their tasks or has handed them off with or without a cancellation request.
-The replay has no streaming extra. Recognition and silence correctness, watch wraparound,
+The replay has no streaming extra and runs with dictation cleanup off. Recognition and silence correctness, watch wraparound,
 channel disconnection, thread/process failure, repeated captures, more than
 three controls, liveness/fair scheduling, config application, history writes,
 real sockets/audio/cue devices, OS focus, clipboard, key injection and native
