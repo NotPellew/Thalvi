@@ -152,12 +152,14 @@ fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> 
     keys.dedup();
     let (mut doubled, mut taken, mut replace) = (Vec::new(), Vec::new(), Vec::new());
     for key in keys {
-        let strangers: Vec<&Row> = rows
+        let (leftovers, others): (Vec<_>, Vec<_>) = rows
             .iter()
-            .filter(|row| row.on(key) && !wanted.iter().any(|bind| bind.is(row)))
+            .filter(|row| row.on(key))
+            .partition(|row| row.is_leftover());
+        let conflicts: Vec<_> = others
+            .into_iter()
+            .filter(|row| !wanted.iter().any(|bind| bind.is(row)))
             .collect();
-        let (leftovers, conflicts): (Vec<_>, Vec<_>) =
-            strangers.into_iter().partition(|row| row.is_leftover());
         if !leftovers.is_empty() {
             replace.push(key);
         }
@@ -243,12 +245,17 @@ impl Installed {
     }
 }
 
+enum State {
+    Waiting,
+    Bound,
+    Gone,
+}
+
 struct Shared<R> {
     run: Arc<R>,
     installed: Installed,
     binds: Vec<Bind>,
-    /// False once the watch is dropped, after which the binds are no longer to be kept.
-    live: Mutex<bool>,
+    state: Mutex<State>,
     tell: Box<dyn Fn(HoldReport) + Send + Sync>,
 }
 
@@ -328,19 +335,29 @@ impl<R: CommandRunner> Shared<R> {
 
     /// Puts the binds back after Hyprland dropped them, unless something else took a key meanwhile.
     fn rebind(&self) {
-        let live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
-        if !*live {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*state, State::Gone) {
             return;
         }
-        if let Err(error) = self.ensure() {
-            (self.tell)(HoldReport::Problem(format!(
+        match self.ensure() {
+            Ok(()) => {
+                if matches!(*state, State::Waiting) {
+                    self.installed.rely_on(&self.binds);
+                    *state = State::Bound;
+                }
+                (self.tell)(HoldReport::Working);
+            }
+            Err(error) => (self.tell)(HoldReport::Problem(format!(
                 "{error} The hold keys do not work until that is fixed and Hyprland reloads its config again."
-            )));
+            ))),
         }
     }
 
     fn is_live(&self) -> bool {
-        *self.live.lock().unwrap_or_else(PoisonError::into_inner)
+        !matches!(
+            *self.state.lock().unwrap_or_else(PoisonError::into_inner),
+            State::Gone
+        )
     }
 }
 
@@ -353,14 +370,17 @@ struct HoldBinds<R: CommandRunner> {
 impl<R: CommandRunner> Drop for HoldBinds<R> {
     fn drop(&mut self) {
         {
-            let mut live = self
+            let mut state = self
                 .shared
-                .live
+                .state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            *live = false;
-            let free = self.shared.installed.give_up(&self.shared.binds);
-            self.shared.unbind(&free);
+            let bound = matches!(*state, State::Bound);
+            *state = State::Gone;
+            if bound {
+                let free = self.shared.installed.give_up(&self.shared.binds);
+                self.shared.unbind(&free);
+            }
         }
         if let Some(close) = self.close_events.take() {
             close();
@@ -431,7 +451,7 @@ fn follow(mut events: impl BufRead, mut on_reload: impl FnMut()) {
 /// Problems that come later, with no call to return them from, go to `tell`.
 ///
 /// # Errors
-/// Why the keys cannot be bound: a key Hyprland cannot take, a bind in the way, or a refusal.
+/// A key Hyprland cannot take, or an unusable program path. A bind in the way returns a waiting watch.
 pub(super) fn bind<R: CommandRunner + 'static>(
     run: Arc<R>,
     installed: Installed,
@@ -444,11 +464,17 @@ pub(super) fn bind<R: CommandRunner + 'static>(
         run,
         installed,
         binds: wanted(exe, keys)?,
-        live: Mutex::new(true),
+        state: Mutex::new(State::Waiting),
         tell: Box::new(tell),
     });
-    shared.ensure()?;
-    shared.installed.rely_on(&shared.binds);
+    let refusal = match shared.ensure() {
+        Ok(()) => {
+            shared.installed.rely_on(&shared.binds);
+            *shared.state.lock().unwrap_or_else(PoisonError::into_inner) = State::Bound;
+            None
+        }
+        Err(error) => Some(error),
+    };
     let close_events = if let Ok(Events { reader, close }) = events {
         let shared = Arc::clone(&shared);
         std::thread::spawn(move || {
@@ -462,10 +488,14 @@ pub(super) fn bind<R: CommandRunner + 'static>(
         (shared.tell)(HoldReport::Problem(RELOADS_NOT_FOLLOWED.to_owned()));
         None
     };
-    Ok(HoldSource::Watching(HoldWatch::new(HoldBinds {
+    let watch = HoldWatch::new(HoldBinds {
         shared,
         close_events,
-    })))
+    });
+    Ok(match refusal {
+        Some(reason) => HoldSource::Refused { reason, watch },
+        None => HoldSource::Watching(watch),
+    })
 }
 
 #[cfg(test)]
@@ -572,7 +602,7 @@ mod tests {
         bind
     }
 
-    const EXE: &str = "/opt/Thalvi/thalvi-desktop";
+    const EXE: &str = "/proc/self/exe";
 
     fn hold(name: &str) -> (HoldKind, HoldKey) {
         (HoldKind::Dictate, HoldKey::parse(name).unwrap())
@@ -632,7 +662,7 @@ mod tests {
     #[test]
     fn the_keys_are_bound_in_one_batch_that_quotes_the_path_for_the_shell() {
         for (exe, quoted) in [
-            (EXE, "'/opt/Thalvi/thalvi-desktop'"),
+            ("/opt/Thalvi/thalvi-desktop", "'/opt/Thalvi/thalvi-desktop'"),
             (
                 "/home/me/Apps/Thalvi 1.0.AppImage",
                 "'/home/me/Apps/Thalvi 1.0.AppImage'",

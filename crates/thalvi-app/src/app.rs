@@ -450,6 +450,13 @@ fn held(source: Result<HoldSource, HostError>, keeping: bool) -> Held {
                 ..Held::default()
             }
         }
+        Ok(HoldSource::Refused { reason, watch }) if !keeping => Held {
+            watch: Some(watch),
+            refusal: Some(format!(
+                "{reason} The hold keys work once that is fixed and the desktop reloads its config; the wake word still works meanwhile."
+            )),
+            ..Held::default()
+        },
         Ok(HoldSource::Refused { reason, .. }) => held(Err(reason), keeping),
         Err(error) => Held {
             refusal: Some(if keeping {

@@ -451,6 +451,10 @@ impl Publisher {
         matches!(&self.view.borrow().mode, Mode::Failed(failure) if failure.headline == "Status overlay unavailable")
     }
 
+    fn hold_failed(&self) -> bool {
+        matches!(&self.view.borrow().mode, Mode::Failed(failure) if failure.headline == "Hold key unavailable")
+    }
+
     fn mode(&self, mode: Mode) {
         self.update(|view| view.mode = mode);
     }
@@ -1070,12 +1074,13 @@ impl<S: Rig> Runner<S> {
     async fn open_microphone(&mut self) {
         let mut requests = Requests {
             listening_off: self.paused,
+            hold_problem: self.hold_problem.take(),
             ..Requests::default()
         };
         requests.read_queued(&mut self.control);
         self.paused = requests.listening_off;
         self.stopping |= requests.quit;
-        self.hold_problem = requests.hold_problem.or(self.hold_problem.take());
+        self.hold_problem = requests.hold_problem;
         if let Some(model) = requests.reload {
             self.reload_speech_model(model);
         }
@@ -1232,7 +1237,12 @@ impl<S: Rig> Runner<S> {
             },
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
-            Control::HoldKeyWorks => {}
+            Control::HoldKeyWorks => {
+                self.hold_problem = None;
+                if self.publisher.hold_failed() {
+                    self.publisher.mode(Mode::Idle);
+                }
+            }
             Control::Overlay(failure) => self.overlay(failure),
             Control::ReloadSpeechModel(model) => self.reload_speech_model(model),
             Control::RemoveChat(reply) => {
@@ -1441,6 +1451,7 @@ impl<S: Rig> Runner<S> {
                 config,
                 key,
                 publisher,
+                hold_problem,
                 ..
             } = &mut *self;
             let Some(Session {
@@ -1454,6 +1465,7 @@ impl<S: Rig> Runner<S> {
             else {
                 return Flow::Continue;
             };
+            requests.hold_problem = hold_problem.take();
             let outcome = Box::pin(drive(
                 engine.capture(frames, window),
                 control,
@@ -1509,7 +1521,7 @@ impl<S: Rig> Runner<S> {
         if let Some(config) = requests.pending.take() {
             self.pending = Some(config);
         }
-        self.hold_problem = requests.hold_problem.or(self.hold_problem.take());
+        self.hold_problem = requests.hold_problem;
         if requests.quit {
             // Nothing is delivered after a quit; what was dictated is already kept.
             return Flow::Quit;
@@ -1837,7 +1849,11 @@ impl Requests {
                 self.hold_problem = Some(notice);
                 false
             }
-            Some(Control::HoldKeyWorks | Control::Overlay(_)) => false,
+            Some(Control::HoldKeyWorks) => {
+                self.hold_problem = None;
+                false
+            }
+            Some(Control::Overlay(_)) => false,
             Some(Control::RemoveChat(reply)) => {
                 let _ = reply.send(Err(
                     "Wait for the current dictation to finish before removing the chat model."
