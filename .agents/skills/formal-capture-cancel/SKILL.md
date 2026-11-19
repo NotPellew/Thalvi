@@ -15,7 +15,7 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `4d534dfaabb70a47994790f785055ee38c6b0a55`. The source hashes describe this commit.
+Sync commit: `62459a0b49dd84374a0a1e0be971135a9de41832`. The source hashes describe this commit.
 The previous sync was `c7e6524ccdc225b4cf8f099ab6a5e2f2da2bc999` on main.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
@@ -88,7 +88,7 @@ that change merged with the cleanup change below is what the sync commit's runne
 
 Opt-in dictation cleanup (#465) adds `Engine::clean`, the same cancellation-first `bounded` shape
 as `Engine::write`. A submit is cleaned before its confirmation is shown (`Prepare`, then
-`CleanupReturns`, then the ending). A paste is cleaned after the ending cue; one `cleaning` stage
+`CleanupReturns`, then the ending). A paste is cleaned after recognizer release, alongside the ending cue; one `cleaning` stage
 stands for both orders, and it is never on together with `writing`. `CleanupReturns` is its own
 await: a cancel there yields a cancelled result, so the runner admits nothing. A cleanup that
 finishes or falls back returns to the capture, and delivery still meets `FinishEmpty`. The 3 s
@@ -109,7 +109,8 @@ feedback state; `CloseReturns` advances without waiting for it, cancelling the o
 when a stop was observed before release. The runner's final drain still fences delivery.
 A stop after admission may cut the cue short but cannot retract a paste. Cancelled and
 error endings retain their joined cue/release path, abstracted as non-accepted outcomes.
-The `engine.rs` hash describes this working change atop `d967339`.
+The hashes include the accepted-cue change at `59d6547`; the CPU replay runs its
+capture within a `LocalSet`, as the desktop runner does.
 
 The five checked invariants have these exact meanings:
 
@@ -175,7 +176,7 @@ Temurin JRE `21.0.9+10` in the same user cache, verifying archive SHA-256
 Other platforms need a user-installed Java on PATH. No system package install
 is performed. Downloads require network access only on the first run.
 
-A faithful run here explores 87,418 distinct states (243,481 generated) with no
+A faithful run here explores 98,912 distinct states (293,297 generated) with no
 error; a warm full check takes about 2 s, and the self-test about 10 s. The extra
 states are the dictation-cleanup stage, which a submit takes before its confirmation.
 Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
