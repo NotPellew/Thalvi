@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use super::gnome::{Clipboard, Gnome};
 use super::hyprland::{Hyprland, Window};
 use super::{
-    App, AppMatchLimit, Delivered, HoldSource, Host, HostError, OverlayEvent, OverlayFrame,
-    PasteText, RequestServer, WebUrl, WindowApp, channel,
+    App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, OverlayEvent,
+    OverlayFrame, PasteText, RequestServer, WebUrl, WindowApp, channel,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 
@@ -231,7 +231,7 @@ impl Desktop {
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
         on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
-        on_problem: impl Fn(String) + Send + Sync + 'static,
+        on_problem: impl Fn(HoldReport) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         match Session::detect()? {
             Session::Hyprland => Hyprland::watch_hold_keys(keys, on_change, on_problem),

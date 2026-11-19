@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    App, AppMatchLimit, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText,
-    RequestServer, WebUrl, WindowApp,
+    App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, MAYBE_PASTED, Modifier,
+    PasteText, RequestServer, WebUrl, WindowApp,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 pub use overlay::{OverlayPlan, OverlaySurface, OverlayWaker};
@@ -141,7 +141,7 @@ impl Windows {
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
         on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
-        _on_problem: impl Fn(String) + Send + Sync + 'static,
+        _on_problem: impl Fn(HoldReport) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         win32::watch_hold_keys(keys.to_vec(), Box::new(on_change)).map(HoldSource::Watching)
     }

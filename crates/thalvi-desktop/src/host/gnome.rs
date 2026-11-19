@@ -9,7 +9,8 @@ use std::path::Path;
 
 use super::command::{CommandRunner, SystemRunner, tool};
 use super::{
-    App, AppMatchLimit, Delivered, HoldSource, Host, HostError, PasteText, WebUrl, WindowApp,
+    App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, PasteText, WebUrl,
+    WindowApp,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 
@@ -48,7 +49,7 @@ impl Gnome {
     pub fn watch_hold_keys(
         _keys: &[(HoldKind, HoldKey)],
         _on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
-        _on_problem: impl Fn(String) + Send + Sync + 'static,
+        _on_problem: impl Fn(HoldReport) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         Ok(HoldSource::Unavailable(
             "GNOME Wayland does not tell Thalvi when a key is let go, so holding a key to dictate or write is unavailable. The wake word still works.",

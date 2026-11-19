@@ -26,7 +26,7 @@ use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
-use thalvi_desktop::host::{Desktop, Host, WindowApp};
+use thalvi_desktop::host::{Desktop, HoldReport, Host, WindowApp};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
 use thalvi_desktop::recognizer::Recognizer;
@@ -61,6 +61,8 @@ pub enum Control {
     Apply(Box<DesktopConfig>),
     /// The desktop refused to report the hold key; the notice says so in plain words.
     HoldKeyFailed(String),
+    /// The desktop can report the hold keys again.
+    HoldKeyWorks,
     /// The status overlay failed, or recovered (`None`). Shown while nothing else has failed.
     Overlay(Option<Failure>),
     /// Stops for an update, but only if nothing is going on.
@@ -225,10 +227,13 @@ impl EngineLink {
 
     /// Tells the user about a hold key problem found after the keys were set up, such as binds
     /// Hyprland dropped.
-    pub fn hold_problems(&self) -> impl Fn(String) + Send + Sync + 'static {
+    pub fn hold_problems(&self) -> impl Fn(HoldReport) + Send + Sync + 'static {
         let control = self.control.clone();
         move |notice| {
-            let _ = control.send(Control::HoldKeyFailed(notice));
+            let _ = control.send(match notice {
+                HoldReport::Problem(notice) => Control::HoldKeyFailed(notice),
+                HoldReport::Working => Control::HoldKeyWorks,
+            });
         }
     }
 
@@ -1227,6 +1232,7 @@ impl<S: Rig> Runner<S> {
             },
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
+            Control::HoldKeyWorks => {}
             Control::Overlay(failure) => self.overlay(failure),
             Control::ReloadSpeechModel(model) => self.reload_speech_model(model),
             Control::RemoveChat(reply) => {
@@ -1831,7 +1837,7 @@ impl Requests {
                 self.hold_problem = Some(notice);
                 false
             }
-            Some(Control::Overlay(_)) => false,
+            Some(Control::HoldKeyWorks | Control::Overlay(_)) => false,
             Some(Control::RemoveChat(reply)) => {
                 let _ = reply.send(Err(
                     "Wait for the current dictation to finish before removing the chat model."

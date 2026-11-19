@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::hold::{HoldKey, HoldKind};
 use crate::host::command::{CommandRunner, tool};
-use crate::host::{HoldWatch, HostError};
+use crate::host::{HoldReport, HoldSource, HoldWatch, HostError};
 
 /// What the user is told when Hyprland's reloads can no longer be followed.
 const RELOADS_NOT_FOLLOWED: &str = "Thalvi cannot follow Hyprland's config reloads. The hold keys stop working after a reload until Thalvi is restarted.";
@@ -249,7 +249,7 @@ struct Shared<R> {
     binds: Vec<Bind>,
     /// False once the watch is dropped, after which the binds are no longer to be kept.
     live: Mutex<bool>,
-    tell: Box<dyn Fn(String) + Send + Sync>,
+    tell: Box<dyn Fn(HoldReport) + Send + Sync>,
 }
 
 impl<R: CommandRunner> Shared<R> {
@@ -320,9 +320,9 @@ impl<R: CommandRunner> Shared<R> {
             .collect::<Vec<_>>()
             .join("; ");
         if let Err(error) = self.run.run("hyprctl", &["--batch", &batch], None) {
-            (self.tell)(format!(
+            (self.tell)(HoldReport::Problem(format!(
                 "Thalvi could not remove its hold key binds from Hyprland: {error} They stay until Hyprland reloads its config."
-            ));
+            )));
         }
     }
 
@@ -333,9 +333,9 @@ impl<R: CommandRunner> Shared<R> {
             return;
         }
         if let Err(error) = self.ensure() {
-            (self.tell)(format!(
+            (self.tell)(HoldReport::Problem(format!(
                 "{error} The hold keys do not work until that is fixed and Hyprland reloads its config again."
-            ));
+            )));
         }
     }
 
@@ -438,8 +438,8 @@ pub(super) fn bind<R: CommandRunner + 'static>(
     exe: &Path,
     keys: &[(HoldKind, HoldKey)],
     events: io::Result<Events>,
-    tell: impl Fn(String) + Send + Sync + 'static,
-) -> Result<HoldWatch, HostError> {
+    tell: impl Fn(HoldReport) + Send + Sync + 'static,
+) -> Result<HoldSource, HostError> {
     let shared = Arc::new(Shared {
         run,
         installed,
@@ -454,18 +454,18 @@ pub(super) fn bind<R: CommandRunner + 'static>(
         std::thread::spawn(move || {
             follow(reader, || shared.rebind());
             if shared.is_live() {
-                (shared.tell)(RELOADS_NOT_FOLLOWED.to_owned());
+                (shared.tell)(HoldReport::Problem(RELOADS_NOT_FOLLOWED.to_owned()));
             }
         });
         Some(close)
     } else {
-        (shared.tell)(RELOADS_NOT_FOLLOWED.to_owned());
+        (shared.tell)(HoldReport::Problem(RELOADS_NOT_FOLLOWED.to_owned()));
         None
     };
-    Ok(HoldWatch::new(HoldBinds {
+    Ok(HoldSource::Watching(HoldWatch::new(HoldBinds {
         shared,
         close_events,
-    }))
+    })))
 }
 
 #[cfg(test)]
@@ -597,10 +597,21 @@ mod tests {
             keys,
             Err(io::ErrorKind::NotFound.into()),
             move |notice| {
-                let _ = told.send(notice);
+                if let HoldReport::Problem(notice) = notice {
+                    let _ = told.send(notice);
+                }
             },
-        );
+        )
+        .and_then(watching);
         (watch, notices)
+    }
+
+    fn watching(source: HoldSource) -> Result<HoldWatch, HostError> {
+        match source {
+            HoldSource::Watching(watch) => Ok(watch),
+            HoldSource::Refused { reason, .. } => Err(reason),
+            HoldSource::Unavailable(reason) => panic!("Hyprland has hold keys: {reason}"),
+        }
     }
 
     fn defaults() -> [(HoldKind, HoldKey); 2] {
@@ -1038,9 +1049,12 @@ mod tests {
             &defaults(),
             Events::on(ours),
             move |notice| {
-                let _ = told.send(notice);
+                if let HoldReport::Problem(notice) = notice {
+                    let _ = told.send(notice);
+                }
             },
         )
+        .and_then(watching)
         .unwrap();
         Following {
             watch,
@@ -1109,9 +1123,12 @@ mod tests {
             &defaults(),
             Err(io::ErrorKind::NotFound.into()),
             move |notice| {
-                let _ = told.send(notice);
+                if let HoldReport::Problem(notice) = notice {
+                    let _ = told.send(notice);
+                }
             },
         )
+        .and_then(watching)
         .unwrap();
         assert_eq!(notices.try_recv().unwrap(), RELOADS_NOT_FOLLOWED);
         assert_eq!(hypr.bound().len(), 4);

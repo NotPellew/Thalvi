@@ -450,6 +450,7 @@ fn held(source: Result<HoldSource, HostError>, keeping: bool) -> Held {
                 ..Held::default()
             }
         }
+        Ok(HoldSource::Refused { reason, .. }) => held(Err(reason), keeping),
         Err(error) => Held {
             refusal: Some(if keeping {
                 format!("{error} The keys that were set before still work.")
