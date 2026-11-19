@@ -103,6 +103,13 @@ kept them, and cancellation still wins. No await, queue step, cancellation write
 added, so model actions are unchanged. The replay's `ImmediateCues` takes the new argument. The
 `engine.rs` hash describes the commit that adds this paragraph.
 
+Hold-key recovery (#566) adds `Control::HoldKeyWorks`, which `Requests::ends` answers false, like
+`Overlay`: it never sets `ended` and neither admits nor blocks delivery. The runner now hands its
+pending hold notice into `Requests` before a capture's drains and takes it back after, so a
+recovery queued during the capture clears it; that notice is shown only after settling and is not a
+delivery path. `drive`, `Runner::capture` and `Settling::settle` are unchanged, so the model actions
+are unchanged. The `runner.rs` hash describes the commit that adds this paragraph.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
