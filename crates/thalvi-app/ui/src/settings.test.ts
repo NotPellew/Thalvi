@@ -1239,7 +1239,7 @@ describe("the Recognition page", () => {
   });
 
   it.each([
-    ["realtime", "Meta realtime ASR", ["Name", "Address", "API key", "Model"]],
+    ["realtime", "Realtime transcription (WebSocket)", ["Name", "Address", "API key", "Model"]],
     ["open_ai", "OpenAI transcriptions", ["Name", "Address", "API key", "Model", "Request", "Language"]],
     ["on_device", "On this computer 2", ["Name", "Show models for", "Speech model"]],
     ["extra", "Extra recognizer", ["Name", "Address", "API key", "Model", "API"]],
@@ -1258,7 +1258,7 @@ describe("the Recognition page", () => {
   });
 
   it.each([
-    ["realtime", [["Name", "How this server is listed when something fails."], ["Address", "A ws:// or wss:// Meta realtime server."], ["API key", "Saved in the config. Never shown again."], ["Model", "The model named in each request."]]],
+    ["realtime", [["Name", "How this server is listed when something fails."], ["Address", "The server's ws:// or wss:// address. Thalvi's own recognizer uses port 8012."], ["API key", "Only if the server needs one. Saved, never shown."], ["Model", "The model the server should use. Thalvi's own recognizer accepts any name."]]],
     ["open_ai", [["Name", "How this server is listed when something fails."], ["Address", "Where each capture is sent for transcription."], ["API key", "Saved in the config. Never shown again."], ["Model", "The model named in each request."], ["Request", "Transcriptions, or Chat with audio."], ["Language", "A two-letter code such as de. Empty detects it."]]],
     ["on_device", [["Name", "How this server is listed when something fails."], ["Show models for", "Filters this list by each card's languages."], ["Speech model", "Downloads on first use. A pick applies next."]]],
     ["extra", [["Name", "How this server is listed when something fails."], ["Address", "Where the extra transcription is sent."], ["API key", "Saved in the config. Never shown again."], ["Model", "The model named in each request."], ["API", "Which transcription API the endpoint speaks."]]],
@@ -1268,11 +1268,23 @@ describe("the Recognition page", () => {
     expect(Array.from(editorEl().querySelectorAll<HTMLElement>(".row")).map((row) => [row.querySelector(".what > :first-child")?.textContent, row.querySelector(".what > small")?.textContent ?? null])).toEqual(hints);
   });
 
+  it.each([
+    ["explanation", () => editorEl().querySelector("h4 + p")?.textContent, "Words appear while you speak. Connect Thalvi's own recognizer, which runs on a computer with an NVIDIA GPU, or another server with the same WebSocket protocol for realtime transcription."],
+    ["default name", () => control("Name", "input").value, "Realtime transcription (WebSocket)"],
+    ["Address hint", () => rowOf("Address").querySelector(".what > small")?.textContent, "The server's ws:// or wss:// address. Thalvi's own recognizer uses port 8012."],
+    ["API key hint", () => rowOf("API key").querySelector(".what > small")?.textContent, "Only if the server needs one. Saved, never shown."],
+    ["Model hint", () => rowOf("Model").querySelector(".what > small")?.textContent, "The model the server should use. Thalvi's own recognizer accepts any name."],
+  ] as const)("says what a streaming server can be and how to fill it in: the %s", async (_what, shown, text) => {
+    await openSeveral();
+    await addServer("realtime");
+    expect(shown()).toBe(text);
+  });
+
   it("numbers a default name that is taken", async () => {
-    await open({ ...several(), stt: { entries: [{ ...SERVER, name: "Meta realtime ASR" }, { ...META, name: "Extra recognizer" }] } });
+    await open({ ...several(), stt: { entries: [{ ...SERVER, name: "Realtime transcription (WebSocket)" }, { ...META, name: "Extra recognizer" }] } });
     goTo("recognition");
     await addServer("realtime");
-    expect(control("Name", "input").value).toBe("Meta realtime ASR 2");
+    expect(control("Name", "input").value).toBe("Realtime transcription (WebSocket) 2");
     await addServer("extra");
     expect(control("Name", "input").value).toBe("Extra recognizer 2");
   });
@@ -1659,6 +1671,22 @@ describe("the fake backend's address check", () => {
     const backend = fakeBackend(new URLSearchParams());
     await expect(backend.checkSpeechEntry(good)).resolves.toBeUndefined();
     await expect(backend.checkSpeechEntry(bad)).rejects.toThrow(`the address must start with ${wanted}.`);
+  });
+});
+
+describe("the Recognition page against the fake backend", () => {
+  it("never calls a streaming server Meta realtime, in the form or in the saved row", async () => {
+    mountSettings(root, fakeBackend(new URLSearchParams()));
+    await settle();
+    goTo("recognition");
+    const shown = (): string => [recognition().textContent, ...Array.from(recognition().querySelectorAll("input"), (input) => input.value)].join("\n");
+    await addServer("realtime");
+    expect(shown()).not.toContain("Meta realtime");
+    type(control("Address", "input"), "ws://127.0.0.1:8012");
+    type(control("Model", "input"), "nemotron");
+    await saveServer();
+    expect(names(listOf("realtime"))).toContain("Realtime transcription (WebSocket) 2");
+    expect(shown()).not.toContain("Meta realtime");
   });
 });
 

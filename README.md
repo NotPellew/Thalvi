@@ -80,30 +80,48 @@ config is broken, a message box names the problem and the file.
 
 ### Speech recognition
 
-Settings → Recognition keeps a list of speech servers. A fresh install has one,
+Settings → Recognition keeps your speech recognizers. A fresh install has one,
 **On this computer**, with Nemotron Streaming, so it recognizes without a
-server; add a server to use one. **Live dictation** uses exactly one of them, and **Use** switches to another at once; it applies from the next
-capture, and a capture already running keeps its recognizer. At the top of
-Live dictation, **Next dictation** names the entry (and, on this computer, the
-model) that will handle the next dictation and whether it is ready. The entry
-in use is the live recognizer, marked **Live**: it shows your words and hears the
-ending phrases, and it has no **Use** button. IDs and addresses are
-under each entry's collapsed **Details**. The kinds are:
+server. At the top, the **Live recognizer** drop-down ("Shows your words and
+hears ending phrases.") picks the one live entry; switching applies from the
+next capture, and a capture already running keeps its recognizer. Under it,
+`Next dictation: <name> · <how> · <state>` names the entry (with the model on
+this computer, or how text arrives for a server) and whether it is ready,
+followed by an `Extra: …` status line.
 
-- **Live as you speak — Meta realtime ASR:** shows your words as you speak,
-  through a recognizer that speaks Meta's realtime ASR protocol, such as the
-  self-hosted one below, which the app connects to itself (address, model, API
-  key).
-- **After you stop — OpenAI transcriptions:** sends each capture to an
-  OpenAI-compatible `/v1/audio/transcriptions` endpoint when you release the
-  dictation key, and the text streams back once the recording is sent. A
-  wake-word capture ends after a pause in speech (address, model, API key). Set
-  **Request** to Chat with audio for a server that takes the recording only on
-  `/v1/chat/completions` (no streaming); set **Language** to a two-letter code
-  such as `de` to stop the server guessing it.
-- **On this computer:** dictates without a speech server or a network; the default.
-  Use **Show models for** to filter the list of models (each model recognizes the
+Below that, entries are grouped by kind — each with a **+** button that opens
+an add form at the top of the group — followed by **Word list**. Each row shows
+the name and where it runs (a server's host and whether a key is saved, or the
+on-device model), **Live** on the live entry or an **Extra** switch on the
+others, and **Edit**. **Edit** opens the form in place of the row, with
+**Remove** (which asks first when a key is saved), **Cancel** and **Save**; the
+live entry cannot be removed ("Choose another Live recognizer first."). The
+groups are:
+
+- **Streaming servers** ("Words appear while you speak."): connects over
+  WebSocket (`ws://` or `wss://`) to Thalvi's own recognizer
+  (`speech/nemotron-asr.sh`, which runs on a computer with an NVIDIA GPU;
+  default `ws://127.0.0.1:8012`) or another server with the same WebSocket
+  protocol for realtime transcription. A new one is named "Realtime
+  transcription (WebSocket)". Fields: **Name**, **Address**, **API key** (only
+  if the server needs one), and **Model** (required; Thalvi's own recognizer
+  accepts any name).
+- **After-you-stop servers** ("Sends each capture once you stop."): sends each
+  capture to an OpenAI-compatible `/v1/audio/transcriptions` endpoint when you
+  release the dictation key, and the text streams back once the recording is
+  sent. A wake-word capture ends after a pause in speech (**Name**,
+  **Address**, **API key**, **Model**). Set **Request** to Chat with audio for
+  a server that takes the recording only on `/v1/chat/completions` (no
+  streaming); set **Language** to a two-letter code such as `de` to stop the
+  server guessing it.
+- **On this computer** ("A downloaded model; audio stays here."): dictates
+  without a speech server or a network; the default. Open **Edit** and use
+  **Show models for** to filter the list of models (each model recognizes the
   languages on its card), then pick a model.
+- **Extra-only servers** ("Only check the live text; need a chat model."):
+  transcribes each capture again through an OpenAI-style or Meta transcription
+  API (**Name**, **Address**, **API key**, **Model**, **API**) for the chat
+  model to merge with the live text; it never shows your words itself.
 
 An existing config
 with `stt.engine`, `stt.model`, `stt.secondary` and `server` becomes entries
@@ -154,10 +172,10 @@ under OpenMDW-1.1, exported to ONNX by Thalvi. Parakeet is NVIDIA's
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), in sherpa-onnx's int8 export.
 
 **Extra recognizers** (none switched on by default) hear each accepted capture
-besides the recognizer you chose. Any recognizer can be one: a realtime speech
-server, an OpenAI-compatible endpoint or the model on this computer, switched on with
-"Also transcribe with" on its row (any entry but the one in use), or an OpenAI-style
-or Meta transcription API listed under Extra recognizers. The recognizer you chose
+besides the recognizer you chose. Any entry other than the live recognizer can
+be one — a streaming server, an after-you-stop server, an on-device model, or
+an OpenAI-style or Meta transcription API under **Extra-only servers** —
+switched on with the **Extra** switch on its row. The recognizer you chose
 stays live: it shows the words, hears
 the ending phrases and decides what happens to the text (paste, submit, task,
 write). A live-kind extra hears the same audio from the start of the capture, so its
@@ -165,9 +183,8 @@ text is ready about when the capture ends; its partials are never shown and its 
 decides nothing. A second on-device model stays loaded and adds its memory and
 processing. If an extra cannot connect, load or keep up, only it is left out of that
 capture's merge, with a notice; the live capture is never slowed or stopped.
-Each extra has a switch and says where
-its audio goes ("Audio goes to" the address's host), and the group says "Off. Dictation
-pastes the live text." until one is on, then which are on. Every extra hears the same capture, and the chat model of **Writing**
+Each server row shows the address's host, and the status line under **Live
+recognizer** says "Extra: none" until one is on, then names which are on. Every extra hears the same capture, and the chat model of **Writing**
 (same `url`, `model` and key, its own fixed prompt) merges the live text and the
 extras' texts into one, choosing between what the recognizers heard; the overlay says
 "Merging…" meanwhile, and cancel works as ever. The merged text is pasted only if
@@ -177,17 +194,18 @@ from the end of the capture run out (the extras get five of them), the live text
 pasted and the overlay says why. An extra that answers too late is left out of the
 merge and still recorded, in the capture's `text.txt` and the metrics. "Write that
 out" and the write key write out the merged text, with a second chat call.
-Extras can be switched on only while Writing has an endpoint, and the endpoint
-cannot be removed while one is on; without one, the group says so and **Go to the
-endpoint setting** moves to it. Switching one off keeps its address and key.
+Extra switches can be turned on only while Writing has an endpoint, and the endpoint
+cannot be removed while one is on; without one, the page says "Extra switches
+need a chat model." with **Go to the endpoint setting**. Switching one off keeps its address and key.
 An upload extra is stored as an entry of kind `extra`; an old `second_pass` entry loads as
 one, and is written as `extra` the next time the settings are saved. A live-kind
 entry is an extra with `"extra": true`, which the active entry can't be.
 
 ### A self-hosted recognizer
 
-`speech/nemotron-asr.sh` installs a live recognizer on your own GPU, which
-the app reaches as a Meta realtime ASR entry. It runs NVIDIA's
+`speech/nemotron-asr.sh` installs a streaming recognizer on your own NVIDIA
+GPU, which you add under **Streaming servers** in Settings → Recognition. It
+runs NVIDIA's
 [Nemotron unified ASR 0.6B](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b)
 (OpenMDW licence) live with about 0.56 s of lookahead, finds the language
 itself (English, German, Spanish and 22 more European languages) and
@@ -204,14 +222,14 @@ weights plus NeMo. `SPEECH_DIR`, `HOST`, `PORT` (default `8012`) and
 `ENDPOINT_MS` (silence that ends a stretch of speech, default 600) set where it
 lives, listens and how it cuts. It has no authentication, so keep `HOST` at
 `127.0.0.1` or a private address such as the machine's tailnet IP. It prints
-what to enter in Settings → Recognition: a **Live as you speak** entry with
-address `ws://127.0.0.1:8012`, model `nemotron-labs-unified-asr-0.6b` and no
-API key.
+what to enter in Settings → Recognition under **Streaming servers** (**+**):
+address `ws://127.0.0.1:8012` (or `ws://$HOST:$PORT`), model
+`nemotron-labs-unified-asr-0.6b`, and leave **API key** empty.
 
-With it, Settings → Recognition shows a **Word list**: names and terms, one per
-line, whose spelling recognition should favour (such as "Cybrex2"). The list
-is used by local recognition and sent to direct realtime speech servers at
-each connection. A model that ignores the list says so on the row.
+Settings → Recognition also has a **Word list**: names and terms, added one at
+a time, whose spelling recognition should favour (such as "Cybrex2"). The list
+is used by on-device recognition and sent to streaming servers at each
+connection. A recognizer that ignores the list says so on the row.
 
 ### Microphone
 
@@ -434,7 +452,7 @@ endpoint (Glimmer, Baseten, llama.cpp, Meta): `writing.url`, `model` and `api_ke
 in the config. Switching sources keeps the saved endpoint and downloaded model.
 The address, model and key of a manual endpoint are under **Details**, which stays
 open until both the address and the model are set; a saved key is shown only as
-"key set". A speech server's address, model and key fold the same way.
+"key set".
 The model gets the **Writing prompt**
 (`prompt`) as its instructions and the recognized words as the message: no window,
 app or other context. The default prompt follows what you ask for (an email, a tone,
