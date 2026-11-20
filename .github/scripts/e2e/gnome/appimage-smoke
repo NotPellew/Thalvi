@@ -60,12 +60,15 @@ copy_models() {
   mkdir -p "$dst"
   (
     shopt -s nullglob
+    local directory
     local files=("$src"/nemotron_160ms.* "$src"/melspectrogram.onnx "$src"/embedding_model.onnx \
       "$src"/hey_thalvi*.onnx "$src"/hey_mycroft*.onnx "$src"/kws_gigaspeech_3m.*)
-    (( ${#files[@]} )) && cp -a "${files[@]}" "$dst/"
-    [[ -d $src/openwakeword ]] && cp -a "$src/openwakeword" "$dst/"
-    [[ -d $src/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01 ]] &&
-      cp -a "$src/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01" "$dst/"
+    cp -a "${files[@]}" "$dst/"
+    for directory in openwakeword sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01; do
+      if [[ -d $src/$directory ]]; then
+        cp -a "$src/$directory" "$dst/"
+      fi
+    done
   )
 }
 
@@ -89,8 +92,6 @@ copy_evidence() {
   done
   local metrics=$run/home/.local/share/thalvi/recordings/metrics.jsonl
   [[ -f $metrics ]] && cp -a "$metrics" "$out/metrics.jsonl"
-  # The cookie authenticates this run's X server. Keep it out of the evidence directory.
-  rm -f "$out/x11.auth" "$out/"*x11.auth*
 }
 
 save_models() {
