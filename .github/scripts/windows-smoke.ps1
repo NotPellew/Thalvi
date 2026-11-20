@@ -112,7 +112,7 @@ public static class Windows {
   [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
   [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
-  [DllImport("user32.dll")] static extern bool AttachThreadInput(uint attach, uint attachTo, bool attach);
+  [DllImport("user32.dll")] static extern bool AttachThreadInput(uint sourceThread, uint targetThread, bool attach);
   [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr window);
   public static List<string> Of(uint wanted) {
     var found = new List<string>();
