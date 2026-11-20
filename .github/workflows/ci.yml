@@ -309,12 +309,41 @@ jobs:
   formal:
     name: formal
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 60
+    env:
+      EVENT: ${{ github.event_name }}
+      BASE: ${{ github.event.pull_request.base.sha }}
+      HEAD: ${{ github.event.pull_request.head.sha }}
+      SCOPE: ${{ inputs.scope || 'all' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version-file: .python-version
+      - id: plan
+        run: python3 .github/scripts/formal-checks.py --plan >> "$GITHUB_OUTPUT"
+      - if: contains(steps.plan.outputs.skills, 'formal-hold-keys')
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
+        with:
+          components: rustfmt, clippy
+      - if: contains(steps.plan.outputs.skills, 'formal-hold-keys')
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: contains(steps.plan.outputs.skills, 'formal-hold-keys')
+        run: |
+          cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+      - if: contains(steps.plan.outputs.skills, 'formal-hold-keys')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libvulkan-dev glslc spirv-headers
+      - if: steps.plan.outputs.skills != ''
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/thalvi-formal
+          key: thalvi-formal-${{ runner.os }}-${{ hashFiles('.agents/skills/formal-capture-cancel/scripts/check.py', '.agents/skills/formal-config-save/scripts/check.py', '.agents/skills/formal-hold-keys/scripts/check.py') }}
       - run: .github/scripts/gates formal
 
   dependencies:
