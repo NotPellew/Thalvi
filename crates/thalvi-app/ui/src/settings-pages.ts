@@ -1346,7 +1346,6 @@ function speech(context: PageContext): SpeechRows {
 
   /** Applies a change to the entries and shows it; `where` says how it went. */
   function change(edit: (list: SpeechEntry[]) => void, where: HTMLElement, redraw: () => void): Promise<void> {
-    where.textContent = "";
     forgetNotes();
     say(problem, "");
     return apply((next) => {
@@ -1437,6 +1436,7 @@ function speech(context: PageContext): SpeechRows {
   /** Clears what the last change said, so "Applied." only ever describes the latest one. */
   function forgetNotes(): void {
     rowNote = null;
+    liveApplied.textContent = "";
     for (const { applied } of groups) applied.textContent = "";
   }
 
