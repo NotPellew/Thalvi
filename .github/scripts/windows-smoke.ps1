@@ -1,12 +1,12 @@
-# Installs the built desktop app, checks its Whisper helpers, starts it, opens Settings, and saves a
-# screenshot of the desktop.
+# Installs the built desktop app, checks its Whisper helpers, starts it, opens Settings, feeds a
+# dictation fixture into Notepad, and saves screenshots of the desktop.
 param([Parameter(Mandatory)][string]$Installer, [Parameter(Mandatory)][string]$OutDir)
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
 $config = Join-Path $env:APPDATA 'thalvi\desktop.json'
 New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null
-Set-Content $config '{"server":"ws://127.0.0.1:1","stt":{"engine":"server"}}'
+Set-Content $config '{"stt":{"entries":[{"kind":"on_device","id":"ci","name":"On this computer","active":true,"model":"nemotron_160ms"}]},"recordings":{"metrics":true}}'
 
 Start-Process $Installer -ArgumentList '/S' -Wait
 $exe = Join-Path $env:LOCALAPPDATA 'Programs\Thalvi\thalvi-desktop.exe'
@@ -108,6 +108,12 @@ public static class Windows {
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window, int command);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] static extern bool AttachThreadInput(uint attach, uint attachTo, bool attach);
+  [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr window);
   public static List<string> Of(uint wanted) {
     var found = new List<string>();
     EnumWindows((window, data) => {
@@ -121,6 +127,29 @@ public static class Windows {
       return true;
     }, IntPtr.Zero);
     return found;
+  }
+  public static bool Focus(uint wanted) {
+    var found = new List<IntPtr>();
+    EnumWindows((window, data) => {
+      uint process;
+      GetWindowThreadProcessId(window, out process);
+      if (process == wanted && IsWindowVisible(window)) found.Add(window);
+      return true;
+    }, IntPtr.Zero);
+    if (found.Count == 0) return false;
+    IntPtr window = found[0];
+    if (IsIconic(window)) ShowWindow(window, 9);
+    uint ignored;
+    uint foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out ignored);
+    uint targetThread = GetWindowThreadProcessId(window, out ignored);
+    uint current = GetCurrentThreadId();
+    if (foregroundThread != 0) AttachThreadInput(current, foregroundThread, true);
+    if (targetThread != 0) AttachThreadInput(current, targetThread, true);
+    BringWindowToTop(window);
+    bool ok = SetForegroundWindow(window);
+    if (targetThread != 0) AttachThreadInput(current, targetThread, false);
+    if (foregroundThread != 0) AttachThreadInput(current, foregroundThread, false);
+    return ok;
   }
 }
 '@
@@ -136,6 +165,155 @@ function Save-Screen([string]$Name) {
   $bitmap.Dispose()
 }
 
+function Read-Thalvi {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$ArgumentList)
+  $output = & $exe @ArgumentList 2>&1 | Out-String
+  $line = @($output -split '\r?\n' | Where-Object { $_.Trim().StartsWith('{') } | Select-Object -Last 1)
+  if (-not $line) { throw "thalvi-desktop $($ArgumentList -join ' ') printed no JSON: $output" }
+  return $line | ConvertFrom-Json
+}
+function Test-FileFeedReady($State) {
+  if ($State.ok -ne $true -or $State.paused -eq $true -or $State.recognizer.model -ne 'nemotron_160ms') {
+    return $false
+  }
+  return $State.recognizer.status -eq 'ready' -or
+    ($State.state -eq 'failed' -and $State.failure.headline -match '^(No microphone found|Microphone not connected)')
+}
+
+function Invoke-FileDelivery {
+  . (Join-Path $PSScriptRoot 'e2e/windows/transcript.ps1')
+  $PSNativeCommandUseErrorActionPreference = $false
+  $script:owned = $null
+  $script:actual = ''
+  $script:readyState = ''
+  $script:readError = ''
+
+  function Read-NotepadText([int]$ProcessId, [switch]$PrepareFocus) {
+    $reader = Join-Path $PSScriptRoot 'e2e/windows/read-notepad.ps1'
+    $args = @("-ProcessId", $ProcessId)
+    if ($PrepareFocus) { $args += "-PrepareFocus" }
+    $output = & powershell.exe -NoProfile -NonInteractive -File $reader @args 2>&1 | Out-String
+    $line = @($output -split '\r?\n' | Where-Object { $_.Trim().StartsWith('{') } | Select-Object -Last 1)
+    if (-not $line) { return [pscustomobject]@{ ok = $false; text = ''; error = $output } }
+    return $line | ConvertFrom-Json
+  }
+
+  try {
+    $wav = Join-Path $PSScriptRoot 'e2e/fixtures/dictation-feed.wav'
+    $expectedFile = Join-Path $PSScriptRoot 'e2e/fixtures/dictation.txt'
+    if (-not (Test-Path -LiteralPath $wav)) { throw "the dictation fixture is missing: $wav" }
+    if (-not (Test-Path -LiteralPath $expectedFile)) { throw "the expected transcript is missing: $expectedFile" }
+    $wav = (Resolve-Path -LiteralPath $wav).Path
+    $expected = Get-Content -LiteralPath $expectedFile -Raw
+
+    try {
+      Wait-Until {
+        $state = Read-Thalvi state
+        $script:readyState = $state | ConvertTo-Json -Compress
+        return $state.ok -eq $true -and $state.state -ne 'loading'
+      } 'the app to finish loading Nemotron' 1500
+    } catch {
+      if ($_.Exception.Message -notlike 'timed out waiting for*') { throw }
+      throw "timed out waiting for the app to finish loading Nemotron. Last state: $script:readyState"
+    }
+    $download = Read-Thalvi model-download speech nemotron_160ms
+    if ($download.ok -ne $true) {
+      $reason = [string]$download.error
+      if ($reason -notlike '*already being downloaded*') {
+        throw "thalvi-desktop model-download speech nemotron_160ms was refused: $reason"
+      }
+      Wait-Until {
+        $listed = Read-Thalvi models
+        $model = @($listed.models) | Where-Object { $_.kind -eq 'speech' -and $_.name -eq 'nemotron_160ms' } | Select-Object -First 1
+        $model.downloaded -eq $true
+      } 'the Nemotron model to finish downloading' 1500
+    }
+    try {
+      Wait-Until {
+        $state = Read-Thalvi state
+        $script:readyState = $state | ConvertTo-Json -Compress
+        Test-FileFeedReady $state
+      } 'the Nemotron recognizer to be ready' 300
+    } catch {
+      if ($_.Exception.Message -notlike 'timed out waiting for*') { throw }
+      throw "timed out waiting for the Nemotron recognizer to be ready. Last state: $script:readyState"
+    }
+
+    $seen = @(Get-Process -Name notepad -ErrorAction SilentlyContinue | ForEach-Object Id)
+    Start-Process notepad.exe | Out-Null
+    Wait-Until {
+      $candidate = @(Get-Process -Name notepad -ErrorAction SilentlyContinue) |
+        Where-Object { $seen -notcontains $_.Id -and $_.ProcessName -eq 'notepad' -and ([Windows]::Of([uint32]$_.Id) -match 'visible ') } |
+        Select-Object -First 1
+      if ($null -eq $candidate) { return $false }
+      $script:owned = $candidate
+      return $true
+    } 'an owned Notepad window' 30
+    try {
+      Wait-Until {
+        [void][Windows]::Focus([uint32]$script:owned.Id)
+        $read = Read-NotepadText $script:owned.Id -PrepareFocus
+        if ($read.ok -eq $true) {
+          if (-not [string]::IsNullOrWhiteSpace($read.text)) { throw "Notepad was not empty before dictation: '$($read.text)'" }
+          return $true
+        }
+        $script:readError = [string]$read.error
+        return $false
+      } "Notepad's editor to have focus" 30
+    } catch {
+      if ($_.Exception.Message -notlike 'timed out waiting for*') { throw }
+      throw "Notepad's editor did not take focus. Last reader error: $script:readError"
+    }
+    Save-Screen 'notepad'
+
+    $fed = Read-Thalvi feed $wav
+    if ($fed.ok -ne $true) { throw "thalvi-desktop feed was refused: $($fed | ConvertTo-Json -Compress)" }
+    try {
+      Wait-Until {
+        $read = Read-NotepadText $script:owned.Id
+        if ($read.ok -eq $true) {
+          $script:actual = [string]$read.text
+          $script:readError = ''
+          return (ConvertTo-DictationComparable $script:actual) -eq (ConvertTo-DictationComparable $expected)
+        }
+        $script:readError = [string]$read.error
+        return $false
+      } 'Notepad to show the dictation' 180
+    } catch {
+      if ($_.Exception.Message -notlike 'timed out waiting for*') { throw }
+      try { Assert-DictationText -Actual $script:actual -Expected $expected } catch {
+        $detail = $_.Exception.Message
+        if ($script:readError) { $detail = "$detail Last reader error: $script:readError" }
+        throw $detail
+      }
+      throw
+    }
+    Assert-DictationText -Actual $script:actual -Expected $expected
+  } finally {
+    try {
+      $metrics = Join-Path $env:LOCALAPPDATA 'thalvi\recordings\metrics.jsonl'
+      $kept = Join-Path $OutDir 'metrics.jsonl'
+      if (Test-Path -LiteralPath $metrics) {
+        Copy-Item -LiteralPath $metrics -Destination $kept -Force
+      } else {
+        Set-Content -LiteralPath $kept -Value 'metrics.jsonl was not written' -Encoding utf8
+      }
+      Set-Content -LiteralPath (Join-Path $OutDir 'notepad.txt') -Value $script:actual -Encoding utf8
+      Save-Screen 'delivery'
+    } finally {
+      if ($null -ne $script:owned) {
+        Stop-Process -Id $script:owned.Id -Force -ErrorAction SilentlyContinue
+        try { [void]$script:owned.WaitForExit(5000) } catch {}
+      }
+      $beep = 'The file-input smoke test does not measure start-beep, end-beep, or hold-release timing.'
+      Write-Output $beep
+      if ($env:GITHUB_STEP_SUMMARY) {
+        Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $beep -Encoding utf8
+      }
+    }
+  }
+}
+
 $app = Start-Process $exe -PassThru `
   -RedirectStandardOutput (Join-Path $OutDir 'app.log') -RedirectStandardError (Join-Path $OutDir 'app.err')
 try {
@@ -144,16 +322,13 @@ try {
   Get-Content $log
 
   Wait-Until { [Windows]::Of($app.Id) -contains 'hidden Thalvi settings' } 'the app to create its Settings window' 30
-  # On the runner a relaunch soon after start can go unanswered, so this asks again.
-  Wait-Until {
-    Start-Process $exe -Wait
-    Start-Sleep -Seconds 1
-    [Windows]::Of($app.Id) -contains 'visible Thalvi settings'
-  } 'the Settings window' 45
-  Start-Sleep -Seconds 3
+  $settings = Read-Thalvi show recognition
+  if ($settings.took_effect -ne $true) { throw "Recognition Settings request was refused: $($settings | ConvertTo-Json -Compress)" }
+  Wait-Until { [Windows]::Of($app.Id) -contains 'visible Thalvi settings' } 'the Settings window' 45
   Save-Screen 'settings'
   if ($app.HasExited) { throw "the app exited with $($app.ExitCode)" }
   'The app is running and its Settings window is open.'
+  Invoke-FileDelivery
 } finally {
   'Windows at the end:'
   [Windows]::Of($app.Id)
