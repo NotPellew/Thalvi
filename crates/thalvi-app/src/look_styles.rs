@@ -1149,9 +1149,9 @@ impl SettingsStyle {
             "--check-bg",
             pick(
                 look,
-                "var(--line)",
-                "#040a0e",
-                "linear-gradient(180deg, #05090d, #0d161c)",
+                "var(--line)".to_owned(),
+                tint(s.surface, self.defaults.dark.surface, [4, 10, 14], 0.8),
+                "linear-gradient(180deg, #05090d, #0d161c)".to_owned(),
             ),
         );
         tokens.set(
@@ -1434,6 +1434,7 @@ mod tests {
     fn every_look_gets_its_colours_and_neon_pairs_light_and_dark() {
         let value = response(&config("{}"));
         assert_eq!(value["looks"]["holo"]["--neon"], "#6bf8ff");
+        assert_eq!(value["looks"]["holo"]["--check-bg"], "rgba(4, 10, 14, 0.8)");
         assert_eq!(value["looks"]["gunmetal"]["--deep"], "#5c5c60");
         assert_eq!(
             value["looks"]["neon"]["--bg"],

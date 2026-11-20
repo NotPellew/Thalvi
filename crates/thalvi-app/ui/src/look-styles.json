@@ -397,7 +397,7 @@
       "--chamfer": "7px",
       "--chat-notice-inset": "4px",
       "--check-bezel": "1px",
-      "--check-bg": "#040a0e",
+      "--check-bg": "rgba(4, 10, 14, 0.8)",
       "--check-bg-on": "rgba(107, 248, 255, 0.12)",
       "--check-dot": "transparent",
       "--check-dot-blur": "1px",
