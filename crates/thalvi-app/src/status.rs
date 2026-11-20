@@ -84,6 +84,10 @@ pub enum Status {
         target: Option<String>,
         route: CaptureRoute,
     },
+    FinalPass {
+        target: Option<String>,
+        route: CaptureRoute,
+    },
     Done {
         target: Option<String>,
         route: CaptureRoute,
@@ -340,6 +344,10 @@ impl View {
                     pause_ms: u64::try_from(self.pauses.get(*route).as_millis())
                         .unwrap_or(u64::MAX),
                     copies: self.copies,
+                },
+                EngineState::FinalPass { route } => Status::FinalPass {
+                    target,
+                    route: *route,
                 },
                 EngineState::Merging { route } => Status::Merging {
                     target,

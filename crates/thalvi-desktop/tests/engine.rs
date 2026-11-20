@@ -263,10 +263,17 @@ impl Rig {
         let notices = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&notices);
         let (key, hold) = HoldInput::new();
-        let (extras, extra_servers): (Vec<_>, Vec<_>) = config
-            .stt
-            .entries
-            .streaming_extras()
+        let entries = &config.stt.entries;
+        let streaming: Vec<_> = match entries.final_pass() {
+            Some(thalvi_desktop::entries::FinalEntry::Live(entry))
+                if !matches!(entry.kind, thalvi_desktop::entries::LiveKind::OpenAi(_)) =>
+            {
+                vec![entry]
+            }
+            _ => entries.streaming_extras().collect(),
+        };
+        let (extras, extra_servers): (Vec<_>, Vec<_>) = streaming
+            .into_iter()
             .map(|entry| {
                 let (recognizer, control) = FakeRecognizer::new();
                 (
@@ -2224,20 +2231,44 @@ enum Reply {
 
 /// A secondary transcription endpoint; reports how many frames each uploaded WAV holds.
 async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<usize>) {
+    serve_logged([reply], |body| {
+        let riff = body.windows(4).position(|w| w == b"RIFF").unwrap();
+        let data = u32::from_le_bytes(body[riff + 40..riff + 44].try_into().unwrap());
+        // 80 ms at 24 kHz, 16 bits.
+        usize::try_from(data).unwrap() / 3840
+    })
+    .await
+}
+
+async fn serve_logged<T: Send + 'static>(
+    replies: impl IntoIterator<Item = Reply>,
+    log: impl Fn(&[u8]) -> T + Clone + Send + Sync + 'static,
+) -> (String, tokio::sync::mpsc::UnboundedReceiver<T>) {
     use axum::Router;
     use axum::body::to_bytes;
     use axum::extract::Request;
     use axum::http::StatusCode;
 
+    let replies = Arc::new(std::sync::Mutex::new(
+        replies
+            .into_iter()
+            .collect::<std::collections::VecDeque<_>>(),
+    ));
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let app = Router::new().fallback(move |request: Request| {
         let tx = tx.clone();
+        let log = log.clone();
+        let reply = {
+            let mut replies = replies.lock().unwrap();
+            if replies.len() == 1 {
+                replies[0]
+            } else {
+                replies.pop_front().unwrap()
+            }
+        };
         async move {
             let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
-            let riff = body.windows(4).position(|w| w == b"RIFF").unwrap();
-            let data = u32::from_le_bytes(body[riff + 40..riff + 44].try_into().unwrap());
-            // 80 ms at 24 kHz, 16 bits.
-            let _ = tx.send(usize::try_from(data).unwrap() / 3840);
+            let _ = tx.send(log(&body));
             match reply {
                 Reply::Json(json) => (StatusCode::OK, json),
                 Reply::Status(code) => (StatusCode::from_u16(code).unwrap(), "{}"),
@@ -7828,6 +7859,453 @@ async fn cue_metrics_mark_only_stream_rebuilds() {
                     );
                 }
             }
+        })
+        .await;
+}
+
+fn with_final_pass(endpoint: &str, phrases: &[&str]) -> serde_json::Value {
+    let mut config: serde_json::Value = serde_json::from_str(&with_extras(
+        "http://127.0.0.1:1",
+        &[("Final", endpoint, false)],
+    ))
+    .unwrap();
+    config.as_object_mut().unwrap().remove("writing");
+    config["stt"]["entries"][1]["final_pass"] = json!(true);
+    config["stt"]["phrases"] = json!(phrases);
+    config
+}
+
+struct FinalCapture {
+    outcome: CaptureOutcome,
+    note: Option<String>,
+    at: u64,
+}
+
+/// Treats an accepted engine result as a delivered capture for metrics, the way the runner does.
+fn final_captures(
+    rig: &Rig,
+    mut engine: TestEngine,
+    mut frames: FakeFrames,
+    triggers: &[WakeTrigger],
+) -> (
+    JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<FinalCapture>,
+) {
+    let origin = tokio::time::Instant::now() - ms(rig.now());
+    let triggers = triggers.to_vec();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let worker = tokio::task::spawn_local(async move {
+        for trigger in triggers {
+            assert_eq!(engine.listen(&mut frames).await.unwrap(), trigger);
+            let outcome = engine.capture(&mut frames, None).await;
+            let (route, cancelled) = match &outcome {
+                CaptureOutcome::Accepted(request) => (Some(request.route), false),
+                CaptureOutcome::Cancelled { .. } => (None, true),
+                CaptureOutcome::Failed { .. } => (None, false),
+            };
+            let note = engine.settle_final_pass(route, cancelled);
+            let at = u64::try_from(origin.elapsed().as_millis()).unwrap();
+            tx.send(FinalCapture { outcome, note, at }).unwrap();
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(11), engine.listen(&mut frames)).await;
+        engine.finish().await;
+    });
+    (worker, rx)
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_pass_replaces_hold_and_wake_text_and_sends_the_word_list() {
+    LocalSet::new()
+        .run_until(async {
+            for held in [false, true] {
+                let dir = record_dir("final-replaced");
+                let reply = if held {
+                    r#"{"text":"Thalvi paste that"}"#
+                } else {
+                    r#"{"text":"Run tests. Submit. Submit."}"#
+                };
+                let (url, mut uploads) =
+                    serve_logged([Reply::After(80, reply)], <[u8]>::to_vec).await;
+                let words: &[&str] = if held { &[] } else { &["Cybrex2", "Thalvi"] };
+                let (mut rig, engine, frames) = Rig::recording(
+                    &with_final_pass(&url, words).to_string(),
+                    Recorder::in_dir(ALL, &dir).unwrap(),
+                );
+                let trigger = if held {
+                    WakeTrigger::Hold
+                } else {
+                    WakeTrigger::Capture
+                };
+                let (worker, mut captures) = final_captures(&rig, engine, frames, &[trigger]);
+                if held {
+                    rig.hold().await;
+                    rig.say(800, Say::Final("live text")).await;
+                    rig.release(1000).await;
+                    // Live recognition has its own release tail; it is outside the final-pass request.
+                    rig.finals(" ").await;
+                } else {
+                    rig.open().await;
+                    rig.feed_until(1000, Kind::Quiet).await;
+                    rig.finals("Run test submit").await;
+                    assert!(matches!(rig.state(), EngineState::Capturing { .. }));
+                    rig.feed_until(3499, Kind::Quiet).await;
+                    rig.at(3500).await;
+                }
+                let route = if held {
+                    CaptureRoute::Paste
+                } else {
+                    CaptureRoute::Submit
+                };
+                rig.state_is(EngineState::FinalPass { route }).await;
+                let body = uploads.recv().await.unwrap();
+                let header = String::from_utf8_lossy(
+                    &body[..body.windows(4).position(|w| w == b"RIFF").unwrap()],
+                );
+                if held {
+                    assert!(!header.contains("name=\"prompt\""));
+                } else {
+                    assert!(header.contains("name=\"prompt\"\r\n\r\nCybrex2, Thalvi\r\n"));
+                    rig.state_is(EngineState::PendingEnding {
+                        route,
+                        text: "Run tests".to_owned(),
+                        waiting_for_quiet: false,
+                    })
+                    .await;
+                    assert!(captures.try_recv().is_err(), "confirmation is still up");
+                }
+                let expected = if held {
+                    "Thalvi paste that"
+                } else {
+                    "Run tests"
+                };
+                let capture = captures.recv().await.unwrap();
+                assert_eq!(capture.outcome, accepted(route, expected));
+                assert_eq!(capture.note, None);
+                finished(worker).await;
+                let metrics = read_lines(&dir.join("metrics.jsonl"));
+                let event = metrics
+                    .iter()
+                    .find(|line| line["event"] == "final_pass")
+                    .unwrap();
+                assert_eq!(event["outcome"], "replaced");
+                assert_eq!(event["model"], "m");
+                assert!(
+                    event["request_ms"].as_f64().unwrap()
+                        <= event["release_to_paste_ms"].as_f64().unwrap()
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_pass_falls_back_and_keeps_late_text_without_affecting_the_next_capture() {
+    LocalSet::new()
+        .run_until(async {
+            for (reply, outcome, reason) in [
+                (Reply::After(2400, A), "timeout", "took too long"),
+                (Reply::Status(500), "http_status", "returned HTTP 500"),
+                (
+                    Reply::Json("{}"),
+                    "bad_reply",
+                    "returned an unreadable transcription",
+                ),
+                (
+                    Reply::Json(DISAGREES),
+                    "disagreed",
+                    "heard a different ending",
+                ),
+                (
+                    Reply::Json(r#"{"text":"no ending"}"#),
+                    "disagreed",
+                    "heard a different ending",
+                ),
+            ] {
+                let dir = record_dir(outcome);
+                let (url, mut requests) = serve_logged([reply, Reply::Json(B)], |_| ()).await;
+                let (mut rig, engine, frames) = Rig::recording(
+                    &with_final_pass(&url, &[]).to_string(),
+                    Recorder::in_dir(ALL, &dir).unwrap(),
+                );
+                let (worker, mut captures) =
+                    final_captures(&rig, engine, frames, &[WakeTrigger::Capture; 2]);
+                live_words(&mut rig).await;
+                requests.recv().await.unwrap();
+                let first = captures.recv().await.unwrap();
+                assert_eq!(first.outcome, accepted(CaptureRoute::Paste, "live words"));
+                assert_eq!(
+                    first.note.unwrap(),
+                    format!("Final {reason}; pasted what Realtime speech server heard.")
+                );
+                if outcome == "timeout" {
+                    assert_eq!(first.at, 5500);
+                }
+                rig.at(rig.now().max(3800)).await;
+                let next = rig.now();
+                rig.server.connect_again();
+                rig.wake_word().await;
+                rig.server.ready();
+                rig.at(next + 230).await;
+                rig.feed_until(next + 1000, Kind::Quiet).await;
+                rig.finals("live again paste that").await;
+                rig.feed_until(next + 3500, Kind::Quiet).await;
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(3), captures.recv())
+                        .await
+                        .expect("the next capture should finish")
+                        .unwrap()
+                        .outcome,
+                    accepted(CaptureRoute::Paste, "B words")
+                );
+                finished(worker).await;
+                let metrics = read_lines(&dir.join("metrics.jsonl"));
+                let outcomes: Vec<_> = metrics
+                    .iter()
+                    .filter(|line| line["event"] == "final_pass")
+                    .map(|line| line["outcome"].as_str().unwrap())
+                    .collect();
+                assert_eq!(outcomes, [outcome, "replaced"]);
+                if outcome == "timeout" {
+                    let text =
+                        std::fs::read_to_string(dictation_dirs(&dir)[0].join("text.txt")).unwrap();
+                    assert!(
+                        text.contains("live (Realtime speech server): live words"),
+                        "{text}"
+                    );
+                    assert!(
+                        text.contains("final pass (Final): A words paste that"),
+                        "{text}"
+                    );
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_pass_unreachable_pastes_live_and_cancel_during_the_pass_pastes_nothing() {
+    LocalSet::new()
+        .run_until(async {
+            let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let unreachable = format!("http://{}/v1", unused.local_addr().unwrap());
+            drop(unused);
+            let (stalling, mut uploads) = serve_logged([Reply::Stall], |_| ()).await;
+            for (endpoint, expected) in [(unreachable, "unreachable"), (stalling, "cancelled")] {
+                let dir = record_dir(expected);
+                let (mut rig, engine, frames) = Rig::recording(
+                    &with_final_pass(&endpoint, &[]).to_string(),
+                    Recorder::in_dir(ALL, &dir).unwrap(),
+                );
+                let (worker, mut captures) =
+                    final_captures(&rig, engine, frames, &[WakeTrigger::Capture]);
+                live_words(&mut rig).await;
+                if expected == "cancelled" {
+                    uploads.recv().await.unwrap();
+                    rig.state_is(EngineState::FinalPass {
+                        route: CaptureRoute::Paste,
+                    })
+                    .await;
+                    rig.handle.cancel();
+                }
+                let capture = captures.recv().await.unwrap();
+                if expected == "cancelled" {
+                    assert!(matches!(capture.outcome, CaptureOutcome::Cancelled { .. }));
+                    assert_eq!(capture.note, None);
+                } else {
+                    assert_eq!(capture.outcome, accepted(CaptureRoute::Paste, "live words"));
+                    assert_eq!(
+                        capture.note.as_deref(),
+                        Some(
+                            "Final could not be reached; pasted what Realtime speech server heard."
+                        )
+                    );
+                }
+                finished(worker).await;
+                let lines = read_lines(&dir.join("metrics.jsonl"));
+                let event = lines
+                    .iter()
+                    .find(|line| line["event"] == "final_pass")
+                    .unwrap();
+                assert_eq!(event["outcome"], expected);
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_pass_is_skipped_for_scratch_task_and_empty_captures() {
+    LocalSet::new()
+        .run_until(async {
+            for (utterances, expected, route, text) in [
+                (
+                    vec!["bad draft", "scratch that", "good draft paste that"],
+                    "skipped_scratch",
+                    CaptureRoute::Paste,
+                    "good draft",
+                ),
+                (
+                    vec!["open google.com do that"],
+                    "skipped_task",
+                    CaptureRoute::Task,
+                    "open google.com",
+                ),
+                (vec!["paste that"], "skipped_empty", CaptureRoute::Paste, ""),
+            ] {
+                let dir = record_dir(expected);
+                let (url, mut uploads) = serve_logged([Reply::Json(A)], |_| ()).await;
+                let (mut rig, engine, frames) = Rig::recording(
+                    &with_final_pass(&url, &[]).to_string(),
+                    Recorder::in_dir(ALL, &dir).unwrap(),
+                );
+                let (worker, mut captures) =
+                    final_captures(&rig, engine, frames, &[WakeTrigger::Capture]);
+                rig.open().await;
+                for said in utterances {
+                    rig.feed_until(rig.now() + 80, Kind::Quiet).await;
+                    rig.finals(said).await;
+                }
+                rig.feed_until(rig.now() + 2500, Kind::Quiet).await;
+                let capture = captures.recv().await.unwrap();
+                assert_eq!(capture.outcome, accepted(route, text));
+                assert_eq!(capture.note, None);
+                assert!(uploads.try_recv().is_err());
+                finished(worker).await;
+                let lines = read_lines(&dir.join("metrics.jsonl"));
+                let event = lines
+                    .iter()
+                    .find(|line| line["event"] == "final_pass")
+                    .unwrap();
+                assert_eq!(event["outcome"], expected);
+                assert!(event["request_ms"].is_null());
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_pass_is_cleaned_before_submit_confirmation_and_pauses_extras() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut final_requests) = serve_logged(
+                [Reply::After(
+                    100,
+                    r#"{"choices":[{"message":{"content":"better dictation submit"}}]}"#,
+                )],
+                |body| serde_json::from_slice::<serde_json::Value>(body).unwrap(),
+            )
+            .await;
+            let (extra, mut uploads) = serve(Reply::Json(A)).await;
+            let (writing, mut chat_requests, _) =
+                chat(Chat::Stream(says!("Cleaned final pass."))).await;
+            let mut config = with_final_pass(&url, &["Cybrex2", "Thalvi"]);
+            config["stt"]["entries"][1] = json!({
+                "kind": "open_ai", "id": "final", "name": "Final", "active": false,
+                "model": "asr", "address": url, "request": "chat", "final_pass": true
+            });
+            config["stt"]["entries"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "kind": "extra", "id": "extra", "name": "Extra", "active": true,
+                    "model": "asr", "address": extra
+                }));
+            config["writing"] = json!({"url": writing, "model": "chat", "clean_dictation": true});
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let (worker, mut captures) =
+                final_captures(&rig, engine, frames, &[WakeTrigger::Capture]);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words submit").await;
+            rig.feed_until(3500, Kind::Quiet).await;
+            let body = final_requests.recv().await.unwrap();
+            assert_eq!(
+                body["messages"][0],
+                json!({"role": "system", "content":"Cybrex2, Thalvi"})
+            );
+            assert_eq!(body["messages"][1]["content"][0]["type"], "input_audio");
+            let cleanup = request(&mut chat_requests).await;
+            assert_eq!(cleanup.body["messages"][0]["content"], CLEANUP_PROMPT);
+            assert_eq!(cleanup.body["messages"][1]["content"], "better dictation");
+            rig.state_is(EngineState::PendingEnding {
+                route: CaptureRoute::Submit,
+                text: "Cleaned final pass.".to_owned(),
+                waiting_for_quiet: false,
+            })
+            .await;
+            assert_eq!(
+                captures.recv().await.unwrap().outcome,
+                accepted(CaptureRoute::Submit, "Cleaned final pass.")
+            );
+            assert!(uploads.try_recv().is_err());
+            assert!(chat_requests.try_recv().is_err());
+            finished(worker).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_streaming_final_pass_connects_at_the_end_and_collects_all_sentences() {
+    LocalSet::new()
+        .run_until(async {
+            let mut config = with_final_pass("http://127.0.0.1:1", &[]);
+            config["stt"]["entries"][1] = json!({
+                "kind": "realtime", "id": "final", "name": "Final", "active": false,
+                "model": "asr", "address": "ws://127.0.0.1:1", "final_pass": true
+            });
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let (worker, mut captures) =
+                final_captures(&rig, engine, frames, &[WakeTrigger::Capture]);
+            rig.open().await;
+            rig.extras[0].ready();
+            rig.feed_until(1000, Kind::Quiet).await;
+            assert!(rig.extra_sent(0).is_empty(), "no audio sent during speech");
+            rig.finals("live words paste that").await;
+            rig.feed_until(3500, Kind::Quiet).await;
+            let extra = &rig.extras[0];
+            extra.emit(Ok(RecognizerEvent::Final("First sentence.".to_owned())));
+            extra.emit(Ok(RecognizerEvent::Partial("Second".to_owned())));
+            rig.at(3700).await;
+            assert!(
+                captures.try_recv().is_err(),
+                "still waiting for the second final"
+            );
+            extra.emit(Ok(RecognizerEvent::Final(
+                "Second sentence paste that.".to_owned(),
+            )));
+            assert_eq!(
+                captures.recv().await.unwrap().outcome,
+                accepted(CaptureRoute::Paste, "First sentence. Second sentence")
+            );
+            let sent = rig.extra_sent(0);
+            assert_eq!(&sent[..sent.len() - 10], rig.sent());
+            finished(worker).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_pass_hold_deadline_includes_the_live_recognizers_release_tail() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut uploads) =
+                serve_logged([Reply::After(1900, r#"{"text":"late words"}"#)], |_| ()).await;
+            let (mut rig, engine, frames) = Rig::new(&with_final_pass(&url, &[]).to_string());
+            let (worker, mut captures) = final_captures(&rig, engine, frames, &[WakeTrigger::Hold]);
+            rig.hold().await;
+            rig.say(800, Say::Final("live words")).await;
+            rig.release(1000).await;
+            rig.at(1200).await;
+            rig.finals(" ").await;
+            uploads.recv().await.unwrap();
+            rig.at(2999).await;
+            assert!(captures.try_recv().is_err());
+            rig.at(3000).await;
+            let capture = captures
+                .try_recv()
+                .expect("the two seconds started at release");
+            assert_eq!(capture.outcome, accepted(CaptureRoute::Paste, "live words"));
+            assert_eq!(capture.at, 3000);
+            finished(worker).await;
         })
         .await;
 }

@@ -233,6 +233,7 @@ impl View {
             Status::StartingChat { again: false, .. } => self.working("STARTING MODEL…"),
             Status::StartingChat { again: true, .. } => self.working("RESTARTING MODEL…"),
             Status::Transcribing { .. } => self.working("TRANSCRIBING…"),
+            Status::FinalPass { .. } => self.working("FINAL PASS…"),
             Status::Merging { .. } => self.working("MERGING…"),
             Status::CleaningUp { .. } => self.working("CLEANING UP…"),
             Status::Working { .. } => self.working("WORKING"),

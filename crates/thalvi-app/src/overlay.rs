@@ -66,6 +66,7 @@ impl Visibility {
             | Status::StartingChat { .. }
             | Status::Working { .. }
             | Status::Transcribing { .. }
+            | Status::FinalPass { .. }
             | Status::Merging { .. }
             | Status::CleaningUp { .. }
             | Status::Loading {

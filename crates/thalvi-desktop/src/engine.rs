@@ -4,6 +4,7 @@
 //! wake detectors never cross a thread and every timer follows the runtime's clock.
 
 pub mod fakes;
+mod final_pass;
 mod streaming;
 
 use std::collections::VecDeque;
@@ -44,6 +45,7 @@ use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
 use crate::wake_stats::{Latency, LatencySummary, NearMisses};
 use crate::writing::{self, Destination, Endpoint, Piece, Writing, WritingError};
+use final_pass::{FinalPass, Record as FinalPassRecord};
 pub use streaming::StreamingExtra;
 use streaming::Streams;
 
@@ -230,6 +232,9 @@ pub enum EngineState {
     },
     /// The extra recognizers' texts are being merged with the live text, as far as they arrive in time.
     Merging {
+        route: CaptureRoute,
+    },
+    FinalPass {
         route: CaptureRoute,
     },
     TranscribingLive {
@@ -441,7 +446,7 @@ pub struct Parts<R, W, C> {
     pub spotter: Option<Box<dyn KeywordSpotter>>,
     /// Why there is no spotter, for the first capture to tell the user once.
     pub spotter_off: Option<String>,
-    /// The live entries switched on as extras, each with its own recognizer.
+    /// Recognizers for the enabled streaming extras, or for a streaming final pass.
     pub extras: Vec<StreamingExtra<R>>,
 }
 
@@ -466,6 +471,10 @@ pub struct Engine<R, W, C> {
     limits: CaptureLimits,
     /// The extras that are switched on and the chat endpoint that merges their texts; none when no extra is.
     merging: Option<Merging>,
+    final_pass: Option<Arc<FinalPass<R>>>,
+    final_tasks: JoinSet<()>,
+    final_record: Option<FinalPassRecord>,
+    final_dictation: Option<Dictation>,
     streaming: Vec<StreamingExtra<R>>,
     /// The streaming extras of the capture in progress.
     streams: Streams,
@@ -596,6 +605,7 @@ struct Live<S> {
     heard: Heard,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
     release: Release,
+    capture_end: Option<Instant>,
     /// The release of the hold that opened this capture; frames queued after it are not speech
     /// of the hold.
     cutoff: Option<Cutoff>,
@@ -1092,7 +1102,12 @@ where
             state: state_rx,
             level: level_rx,
         };
-        let merging = Merging::of(config, parts.extras.iter().map(|extra| &extra.entry));
+        let merging = if config.stt.entries.final_pass().is_none() {
+            Merging::of(config, parts.extras.iter().map(|extra| &extra.entry))
+        } else {
+            None
+        };
+        let final_pass = FinalPass::of(config, &parts.extras).map(Arc::new);
         let engine = Self {
             recognizer: parts.recognizer,
             wake: parts.wake,
@@ -1106,6 +1121,10 @@ where
             scripts: config.scripts.clone(),
             limits: config.capture_limits,
             merging,
+            final_pass,
+            final_tasks: JoinSet::new(),
+            final_record: None,
+            final_dictation: None,
             streaming: parts.extras,
             streams: Streams::default(),
             recorded_only: Vec::new(),
@@ -1178,6 +1197,24 @@ where
         self.merge_note.take()
     }
 
+    /// Records the final pass once delivery has settled and returns its fallback notice, if any.
+    pub fn settle_final_pass(
+        &mut self,
+        delivered: Option<CaptureRoute>,
+        cancelled: bool,
+    ) -> Option<String> {
+        let record = self.final_record.take()?;
+        let dictation = self.final_dictation.take()?;
+        record.emit(
+            &self.recorder,
+            self.final_pass.as_ref()?.label(),
+            &dictation,
+            delivered,
+            cancelled,
+            self.speech.name(),
+        )
+    }
+
     /// What the cleanup of the capture that just ended told the user, if it fell back to the raw
     /// words: the delivery that follows would otherwise replace the notice on the overlay.
     pub fn take_cleanup_note(&mut self) -> Option<String> {
@@ -1200,6 +1237,7 @@ where
     pub async fn finish(mut self) {
         while self.ending_cues.join_next().await.is_some() {}
         drop(self.recorded_only);
+        drop(self.final_tasks);
         self.recorder.finish().await;
     }
 
@@ -1529,6 +1567,8 @@ where
                 }),
             );
         }
+        self.final_dictation = self.final_pass.as_ref().map(|_| woke.dictation.clone());
+        self.final_record = None;
         self.streams = self
             .merging
             .as_ref()
@@ -1545,6 +1585,7 @@ where
             }
             Err((done, decided)) => self.conclude(done, decided, None, &woke.dictation).await,
         };
+        self.skip_unfinished_final_pass(&outcome);
         self.drop_streams();
         let pressed = u64::from(self.key.take().is_some()) + self.key.take_lost();
         if pressed > 0 {
@@ -1603,6 +1644,13 @@ where
 
     fn publish(&self, live: &Live<R::Session>) {
         self.set_state(match live.text.pending() {
+            Some(pending) if self.final_pass.is_some() && pending.route == CaptureRoute::Submit => {
+                EngineState::Capturing {
+                    committed: pending.text.clone(),
+                    partial: live.partial.clone(),
+                    notice: live.notice.clone(),
+                }
+            }
             Some(pending) => EngineState::PendingEnding {
                 route: pending.route,
                 text: pending.text.clone(),
@@ -1809,6 +1857,7 @@ where
             heard: Heard::default(),
             cues: FuturesUnordered::new(),
             release: held.map_or(Release::Over, |_| Release::Down),
+            capture_end: None,
             cutoff: held.map(|held| held.release.clone()),
             watch: Self::watch_for(&mut self.spotter, self.pauses, held.is_some()),
             spot: SpotStats::default(),
@@ -1820,9 +1869,11 @@ where
 
     /// Whether the frames sent are kept: for an upload extra, the recordings or a buffering recognizer.
     fn keeps_sent(&self, buffers_audio: bool) -> bool {
-        self.merging
-            .as_ref()
-            .is_some_and(|merging| !merging.uploads.is_empty())
+        self.final_pass.is_some()
+            || self
+                .merging
+                .as_ref()
+                .is_some_and(|merging| !merging.uploads.is_empty())
             || self.recorder.kinds().audio
             || buffers_audio
     }
@@ -2155,7 +2206,9 @@ where
         let now = Instant::now();
         let since = live.text.quiet_since();
         let without_ending = live.text.pending().is_some_and(|p| p.without_ending);
+        let ended = live.text.ready_at();
         let request = live.text.poll_ready(now)?;
+        live.capture_end = live.capture_end.or(ended);
         self.ending_state(if without_ending {
             "accepted_without_ending"
         } else {
@@ -2223,6 +2276,7 @@ where
                     .finish_audio()
                     .await
                     .map_err(|error| Stop::Failed(error.into()))?;
+                live.capture_end = Some(now);
                 live.release = Release::Tail(now);
                 self.set_state(EngineState::TranscribingLive {
                     route: CaptureRoute::Paste,
@@ -2401,7 +2455,7 @@ where
         if let Some(live) = live.as_mut() {
             self.close_spotting(live);
         }
-        let (session, sent, scratched, recoverable_text, has_endings) = match live {
+        let (session, mut sent, scratched, recoverable_text, has_endings, ended) = match live {
             // Dropping the rest stops any cue still playing.
             Some(live) => (
                 Some(live.session),
@@ -2409,8 +2463,13 @@ where
                 live.text.scratched(),
                 recoverable(&live.text),
                 live.text.has_endings(),
+                live.cutoff
+                    .as_ref()
+                    .and_then(Cutoff::released_at)
+                    .or(live.capture_end)
+                    .unwrap_or(decided),
             ),
-            None => (None, Vec::new(), false, None, true),
+            None => (None, Vec::new(), false, None, true, decided),
         };
         if !sent.is_empty() {
             self.recorder
@@ -2452,35 +2511,24 @@ where
                 } else {
                     self.drop_streams();
                 }
+                let final_work =
+                    self.start_final_pass(&request, &mut sent, dictation, ended, scratched);
                 if self.end_with(Cue::Accepted, decided, session, true).await {
-                    let merged = match merging {
+                    let resolved = match merging {
                         Some(merging) => {
                             self.merge(&merging, request, &sent, has_endings, dictation)
                                 .await
                         }
-                        None => CaptureOutcome::Accepted(request),
+                        None => match final_work {
+                            Some(work) => self.wait_final_pass(request, work, has_endings).await,
+                            None => CaptureOutcome::Accepted(request),
+                        },
                     };
-                    match merged {
-                        CaptureOutcome::Accepted(request)
-                            if request.route == CaptureRoute::Write =>
-                        {
-                            self.write(request.text).await
-                        }
-                        // A submit is cleaned before its confirmation is shown, so this is a paste.
-                        CaptureOutcome::Accepted(request)
-                            if request.route == CaptureRoute::Paste
-                                && self
-                                    .writing
-                                    .as_ref()
-                                    .is_some_and(writing::Writing::clean_dictation)
-                                && has_words(&request.text) =>
-                        {
-                            // `decided` is the dictation final; cleanup can overlap the ending cue.
-                            self.clean(request, decided).await
-                        }
-                        outcome => outcome,
-                    }
+                    self.finish_transcript(resolved, decided).await
                 } else {
+                    if let Some(work) = final_work {
+                        self.final_record = Some(work.cancel());
+                    }
                     self.drop_streams();
                     CaptureOutcome::cancelled_with(request.text)
                 }
@@ -2501,6 +2549,40 @@ where
             },
         );
         outcome
+    }
+
+    async fn finish_transcript(
+        &mut self,
+        outcome: CaptureOutcome,
+        decided: Instant,
+    ) -> CaptureOutcome {
+        match outcome {
+            CaptureOutcome::Accepted(request)
+                if self.final_pass.is_some() && request.route == CaptureRoute::Submit =>
+            {
+                self.confirm_final_submit(request).await
+            }
+            CaptureOutcome::Accepted(request) if request.route == CaptureRoute::Write => {
+                self.write(request.text).await
+            }
+            // A submit is cleaned before its confirmation is shown.
+            CaptureOutcome::Accepted(request)
+                if request.route == CaptureRoute::Paste
+                    && self
+                        .writing
+                        .as_ref()
+                        .is_some_and(writing::Writing::clean_dictation)
+                    && has_words(&request.text) =>
+            {
+                let cleanup_start = if self.final_pass.is_some() {
+                    Instant::now()
+                } else {
+                    decided
+                };
+                self.clean(request, cleanup_start).await
+            }
+            outcome => outcome,
+        }
     }
 
     /// Plays `cue` while releasing `session`: closed when the capture was accepted, cancelled
@@ -2850,7 +2932,7 @@ where
 
     fn judge(&self, answer: Answer) -> Judged {
         let (outcome, agreed) = match &answer.heard {
-            Ok(raw) => match self.agreed(raw, answer.route, answer.has_endings) {
+            Ok(raw) => match self.agreed(raw, answer.route, answer.has_endings, false) {
                 Some(agreed) => ("ok", Some(agreed)),
                 None => ("error", None),
             },
@@ -2886,6 +2968,7 @@ where
     /// the text that will be sent. Paste is cleaned after its pause, in [`Self::conclude`].
     fn cleans_before_confirm(&self, pending: &PendingEnding) -> bool {
         pending.route == CaptureRoute::Submit
+            && self.final_pass.is_none()
             && self
                 .writing
                 .as_ref()
@@ -2920,6 +3003,29 @@ where
                 self.publish(live);
                 None
             }
+        }
+    }
+
+    async fn confirm_final_submit(&mut self, request: CaptureRequest) -> CaptureOutcome {
+        let outcome = if self.writing.as_ref().is_some_and(Writing::clean_dictation)
+            && has_words(&request.text)
+        {
+            self.clean(request, Instant::now()).await
+        } else {
+            CaptureOutcome::Accepted(request)
+        };
+        let CaptureOutcome::Accepted(request) = outcome else {
+            return outcome;
+        };
+        self.set_state(EngineState::PendingEnding {
+            route: request.route,
+            text: request.text.clone(),
+            waiting_for_quiet: false,
+        });
+        tokio::select! {
+            biased;
+            _ = self.cancel.changed() => CaptureOutcome::cancelled_with(request.text),
+            () = tokio::time::sleep(self.pauses.get(request.route)) => CaptureOutcome::Accepted(request),
         }
     }
 
@@ -3265,7 +3371,13 @@ where
 
     /// An extra's transcript without its ending phrase, when it ends the way the user did.
     /// A capture without endings (a hold) agrees with the whole transcript as dictated text.
-    fn agreed(&self, raw: &str, route: CaptureRoute, has_endings: bool) -> Option<String> {
+    fn agreed(
+        &self,
+        raw: &str,
+        route: CaptureRoute,
+        has_endings: bool,
+        require_ending: bool,
+    ) -> Option<String> {
         if !has_endings {
             let mut parser = CaptureSession::without_endings();
             return match parser.on_final(raw, Instant::now(), false) {
@@ -3276,7 +3388,7 @@ where
         let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
         let mut text = match parser.on_final(raw, Instant::now(), false).ok()? {
             FinalStep::Armed(pending) if pending.route == route => pending.text,
-            FinalStep::Continue { .. } if !parser.scratched() => {
+            FinalStep::Continue { .. } if !require_ending && !parser.scratched() => {
                 return Some(parser.text()).filter(|text| !text.is_empty());
             }
             _ => return None,
@@ -3285,11 +3397,25 @@ where
         loop {
             let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
             match parser.on_final(&text, Instant::now(), false) {
-                Ok(FinalStep::Armed(pending)) if pending.route == route => text = pending.text,
+                Ok(FinalStep::Armed(pending))
+                    if pending.route == route && pending.text.len() < text.len() =>
+                {
+                    text = pending.text;
+                }
                 _ => break,
             }
         }
-        (!text.is_empty()).then_some(text)
+        if require_ending {
+            if let Some(before) = text
+                .strip_suffix('.')
+                .filter(|before| !before.ends_with('.'))
+            {
+                text.truncate(before.len());
+            }
+            has_words(&text).then_some(text)
+        } else {
+            (!text.is_empty()).then_some(text)
+        }
     }
 }
 
@@ -3299,6 +3425,34 @@ mod tests {
     use crate::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
     use crate::hold::KeyState;
     use crate::recognizer::FakeRecognizer;
+
+    #[test]
+    fn a_task_ending_that_arms_itself_stops_stripping_when_text_is_unchanged() {
+        let config = DesktopConfig::from_json_str("{}").unwrap();
+        let (engine, _) = Engine::new(
+            Parts {
+                recognizer: FakeRecognizer::new().0,
+                wake: FakeWake::new().0,
+                cues: FakeCuePlayer::new().0,
+                gate: InputGate::default(),
+                chat: None,
+                http: reqwest::Client::new(),
+                hold: watch::channel(KeyState::default()).1,
+                notice: Box::new(|_| {}),
+                spotter: None,
+                spotter_off: None,
+                extras: Vec::new(),
+            },
+            &config,
+            Recorder::disabled(),
+        );
+        assert_eq!(
+            engine
+                .agreed("open google.com do that", CaptureRoute::Task, true, false)
+                .as_deref(),
+            Some("open google.com"),
+        );
+    }
 
     #[tokio::test]
     async fn dictation_wakes_when_its_score_crosses() {

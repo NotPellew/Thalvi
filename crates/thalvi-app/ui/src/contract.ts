@@ -34,6 +34,7 @@ export type Status =
   | { state: "thinking"; target: string | null } // the writing model is reasoning and has written no text yet; cancellable
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "transcribing"; target: string | null; route: Route; cancellable: boolean }
+  | { state: "finalPass"; target: string | null; route: Route }
   | { state: "merging"; target: string | null; route: Route } // extra recognizers' texts are being merged with the live text; cancellable
   | { state: "cleaningUp"; target: string | null } // a dictation is being cleaned before it is pasted; cancellable
   | { state: "done"; target: string | null; route: Route; notice: string }
@@ -73,6 +74,8 @@ interface EntryBase {
   name: string;
   /** The one live entry in use; for an extra recognizer, whether it is switched on. */
   active: boolean;
+  /** Only the selected non-live entry carries this flag. */
+  final_pass?: true;
 }
 
 interface LiveBase extends EntryBase {

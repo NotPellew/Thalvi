@@ -1117,7 +1117,7 @@ describe("the Recognition page", () => {
       ["Streaming servers", "Words appear while you speak.", "Add a streaming server", null],
       ["After-you-stop servers", "Sends each capture once you stop.", "Add an after-you-stop server", "None yet."],
       ["On this computer", "A downloaded model; audio stays here.", "Add an on-device model", null],
-      ["Extra-only servers", "Only check the live text; need a chat model.", "Add an extra-only server", null],
+      ["Extra-only servers", "Send finished audio for a final pass or as an extra.", "Add an extra-only server", null],
       ["Word list", "Names and terms, added one at a time.", null, null],
     ]);
     const live = recognition().querySelector(".grp") as HTMLElement;
@@ -1442,6 +1442,43 @@ describe("Extra switches", () => {
     expect(savedEntry(stub, name)).toMatchObject(off);
     expect(savedEntry(stub, name)).not.toHaveProperty("extra");
     expect(others(stub.applied().at(-1))).toEqual(several().stt.entries.filter((entry) => entry.name !== name));
+  });
+
+  it("moves the final pass between rows and resumes the same extras when switched off", async () => {
+    const stub = await openSeveral();
+    const finalOf = (name: string) => entryNamed(name).querySelector<HTMLInputElement>(".final-pass input");
+    const pick = async (name: string) => {
+      const toggle = finalOf(name);
+      if (!toggle) throw new Error(`Missing final-pass switch for ${name}`);
+      flip(toggle);
+      await settle();
+    };
+    expect(finalOf("Realtime speech server")).toBeNull();
+    await pick("OpenAI");
+    expect(savedEntry(stub, "OpenAI")).toMatchObject({ active: true, final_pass: true });
+    expect(extrasText()).toBe("Paused while a final pass is set");
+    expect(recognition().textContent).toContain("Final pass: OpenAI.");
+    expect(recognition().textContent).toContain("The final pass uses this word list.");
+    await pick("Meta");
+    expect(finalOf("OpenAI")?.checked).toBe(false);
+    expect(savedEntry(stub, "OpenAI")).not.toHaveProperty("final_pass");
+    expect(savedEntry(stub, "Meta")).toMatchObject({ active: false, final_pass: true });
+    await pick("Meta");
+    expect(savedEntry(stub, "Meta")).not.toHaveProperty("final_pass");
+    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
+  });
+
+  it("can select a final pass without a chat model", async () => {
+    const stub = await open({ ...several(), writing: null, stt: {
+      entries: several().stt.entries.map((entry) => entry.kind === "extra" ? { ...entry, active: false } : entry),
+    } });
+    goTo("recognition");
+    const toggle = entryNamed("OpenAI").querySelector<HTMLInputElement>(".final-pass input");
+    if (!toggle) throw new Error("Missing final-pass switch");
+    expect(toggle.disabled).toBe(false);
+    flip(toggle);
+    await settle();
+    expect(savedEntry(stub, "OpenAI")).toMatchObject({ active: false, final_pass: true });
   });
 
   it("shows a switch that was refused as still off", async () => {
