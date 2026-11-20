@@ -7721,6 +7721,72 @@ async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, mut engine, mut frames) = Rig::new("{}");
+            rig.cues.mutes(&rig.gate);
+            rig.cues.set_length(Cue::Accepted, ms(10_000));
+            let (delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::task::spawn_local(async move {
+                for _ in 0..2 {
+                    assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                    let outcome = engine.capture(&mut frames, None).await;
+                    delivered.send(outcome).unwrap();
+                }
+                engine
+            });
+            rig.hold().await;
+            rig.say(1000, Say::Partial("first words")).await;
+            rig.release(1200).await;
+            rig.say(1250, Say::Final("first words")).await;
+            assert_eq!(
+                deliveries.try_recv().unwrap(),
+                accepted(CaptureRoute::Paste, "first words")
+            );
+            assert!(
+                !rig.gate.is_enabled(),
+                "the first ending cue is still playing"
+            );
+
+            rig.at(1300).await;
+            rig.press().await;
+            rig.server.ready();
+            settle().await;
+            assert!(
+                rig.gate.is_enabled(),
+                "the next hold hears from the press while the old end cue is cut"
+            );
+            assert!(rig.cue_log().contains(&(1300, CueLog::Cut(Cue::Accepted))));
+            assert_eq!(
+                rig.started(Cue::Wake),
+                [0, 1300],
+                "the new start cue does not wait behind the old end cue"
+            );
+            rig.at(1350).await;
+            rig.feed.send(quiet(55));
+            settle().await;
+            rig.at(1530).await;
+            assert!(
+                tags(&rig.sent()).contains(&55),
+                "words over the second start cue reach recognition"
+            );
+            rig.say(1600, Say::Partial("second words")).await;
+            rig.release(1800).await;
+            rig.say(1850, Say::Final("second words")).await;
+            assert_eq!(
+                deliveries.try_recv().unwrap(),
+                accepted(CaptureRoute::Paste, "second words")
+            );
+            let engine = finished(task).await;
+            rig.handle.cancel();
+            settle().await;
+            engine.finish().await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn cue_metrics_mark_only_stream_rebuilds() {
     LocalSet::new()
         .run_until(async {
