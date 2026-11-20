@@ -1242,6 +1242,13 @@ where
         let mut misses = NearMisses::new(self.capture_threshold);
         let mut latency = Latency::default();
         let heard = self.scan(frames, &mut misses, &mut latency).await;
+        if heard.is_ok() && !self.ending_cues.is_empty() {
+            self.ending_cues.abort_all();
+            while self.ending_cues.join_next().await.is_some() {}
+            if matches!(heard, Ok(WakeTrigger::Hold)) && !self.gate.is_enabled() {
+                self.gate.set_enabled(true);
+            }
+        }
         self.listening = ListenState::Stopped;
         if let Some(summary) = latency.finish() {
             self.latency_line(summary);
