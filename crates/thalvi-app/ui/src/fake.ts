@@ -1,7 +1,8 @@
 // Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the status to the n-th of the script and `?look=holo` or `?look=gunmetal` picks the look.
 
-import type { AudioStatus, Backend, ChatModelInfo, Draft, HistoryEntry, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, ChatModelInfo, Draft, HistoryEntry, LookStyles, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
+import fixture from "./look-styles.json";
 import { applyPatch } from "./patch.ts";
 
 const UNIFIED_LANGUAGES = [
@@ -219,6 +220,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
     onAudio: (listener) => audioListeners.push(listener),
     onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
+    // Generated from what the desktop resolves; a Rust test keeps it in step.
+    getLookStyles: () => Promise.resolve(fixture as LookStyles),
+    settingsReady: () => Promise.resolve(),
     saveSettings: (patch) => {
       // A setting the patch removed is back at its default.
       const next: Settings = Object.assign({ writing: null, microphone: null }, applyPatch(saved, patch));
