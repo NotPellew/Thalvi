@@ -8086,9 +8086,8 @@ async fn final_pass_falls_back_and_keeps_late_text_without_affecting_the_next_ca
 async fn final_pass_unreachable_pastes_live_and_cancel_during_the_pass_pastes_nothing() {
     LocalSet::new()
         .run_until(async {
-            let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let unreachable = format!("http://{}/v1", unused.local_addr().unwrap());
-            drop(unused);
+            // Port 0 fails immediately, including on Windows with the clock paused.
+            let unreachable = "http://127.0.0.1:0/v1".to_owned();
             let (stalling, mut uploads) = serve_logged([Reply::Stall], |_| ()).await;
             for (endpoint, expected) in [(unreachable, "unreachable"), (stalling, "cancelled")] {
                 let dir = record_dir(expected);
