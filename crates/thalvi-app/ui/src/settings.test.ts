@@ -1223,14 +1223,15 @@ describe("the Recognition page", () => {
     expect(where(text)).toBe(expected);
   });
 
+  const liveChoice = async () => { use("Cybrex2"); await settle(); };
   it.each([
-    ["an Extra switch", async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
-    ["a removal", async () => { edit("Meta"); within(editorEl(), "Remove").click(); await settle(); }, () => listOf("extra").parentElement],
-    ["a saved edit", async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, () => entryNamed("Cybrex2")],
-  ] as const)("after a Live choice, shows only the Applied. of %s", async (_case, act, owner) => {
+    ["a Live choice", "an Extra switch", liveChoice, async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
+    ["a Live choice", "a removal", liveChoice, async () => { edit("Meta"); within(editorEl(), "Remove").click(); await settle(); }, () => listOf("extra").parentElement],
+    ["a Live choice", "a saved edit", liveChoice, async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, () => entryNamed("Cybrex2")],
+    ["an Extra switch", "another Extra switch", async () => { flip(tickOf("On this computer")); await settle(); }, async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
+  ] as const)("after %s, shows only the Applied. of %s", async (_first, _then, before, act, owner) => {
     await openSeveral();
-    use("Cybrex2");
-    await settle();
+    await before();
     await act();
     const shown = Array.from(recognition().querySelectorAll<HTMLElement>(".applied")).filter((node) => node.textContent === APPLIED_TEXT);
     expect(shown).toHaveLength(1);
