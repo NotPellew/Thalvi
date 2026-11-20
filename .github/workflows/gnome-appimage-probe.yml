@@ -1,0 +1,50 @@
+name: GNOME AppImage runner probe
+
+on:
+  push:
+    branches: [ci/gnome-appimage-probe]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gnome-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Record runner and install GNOME rig prerequisites
+        run: |
+          mkdir -p probe-out
+          cat /etc/os-release | tee probe-out/os-release
+          ls -l /dev/fuse /dev/dri | tee probe-out/devices || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             bwrap dbus-x11 ffmpeg fuse3 gir1.2-gtk-3.0 gnome-shell             libasound2-plugins libayatana-appindicator3-1 libegl-mesa0 libgl1-mesa-dri             libgtk-3-0t64 libwebkit2gtk-4.1-0 libxdo3 pipewire python3-gi             wireplumber wl-clipboard x11-utils xdotool xwayland
+          gnome-shell --version | tee probe-out/gnome-version
+          if ! bwrap --unshare-user --ro-bind / / true 2>probe-out/userns-before; then
+            cat probe-out/userns-before
+            grep -qiE 'permission denied|operation not permitted' probe-out/userns-before
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --unshare-user --ro-bind / / true
+          fi
+          if [[ ! -e /dev/fuse ]]; then sudo modprobe fuse; fi
+          test -c /dev/fuse
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: 14651410884
+          run-id: 44778107715
+          repository: NotPellew/Thalvi
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/gnome-probe-package
+      - name: Start the mounted AppImage inside headless software GNOME
+        run: |
+          .github/scripts/gnome-appimage-probe             "$RUNNER_TEMP/gnome-probe-package/Thalvi_0.1.3_amd64.AppImage" "$PWD/probe-out"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: gnome-runner-proof
+          path: probe-out
+          retention-days: 7

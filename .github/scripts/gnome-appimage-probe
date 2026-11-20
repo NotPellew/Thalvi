@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+image=$1
+out=$2
+repo=$(git rev-parse --show-toplevel)
+probe=$(mktemp -d /var/tmp/t603.XXXXXX)
+rig=$probe/thalvi-desktop-rig
+mount_pid=
+mount_dir=
+run=
+
+cleanup() {
+  rc=$?
+  trap - EXIT
+  set +e
+  if [[ -n "$run" ]]; then
+    timeout 8 "$rig" ctl "$run" quit > "$out/quit.json" 2>/dev/null
+    "$rig" down "$run"
+  fi
+  if [[ -d "$probe/rig" ]]; then
+    for candidate in "$probe"/rig/run-*; do
+      [[ -d "$candidate/out" ]] || continue
+      cp -a "$candidate/out" "$out/${candidate##*/}"
+    done
+  fi
+  if [[ -n "$mount_dir" ]] && findmnt -rn -M "$mount_dir" >/dev/null; then
+    fusermount3 -u "$mount_dir" || fusermount3 -uz "$mount_dir" || rc=1
+  fi
+  if [[ -n "$mount_pid" ]]; then
+    kill "$mount_pid" 2>/dev/null || true
+    wait "$mount_pid" 2>/dev/null || true
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
+wait_for() {
+  local deadline=$((SECONDS + $1)) label=$2
+  shift 2
+  until "$@"; do
+    if (( SECONDS >= deadline )); then echo "Timed out waiting for $label" >&2; return 1; fi
+    sleep .2
+  done
+}
+
+printf '%s  %s\n' 9338965c0ba481d85665569342d3c70b94f7831fb4b5c92d667faa0ca0c852c8 "$image" | sha256sum -c
+cp "$image" "$probe/Thalvi.AppImage"
+chmod +x "$probe/Thalvi.AppImage"
+image=$probe/Thalvi.AppImage
+sha256sum "$image" > "$out/package.sha256"
+
+cp "$repo/.agents/skills/verify-thalvi/scripts/thalvi-gnome-rig.py" "$probe/"
+python3 - "$repo/.agents/skills/verify-thalvi/scripts/thalvi-desktop-rig" "$rig" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+edits = [
+    ('  local r=$1 node\n  node=$(render_node)\n', '  local r=$1\n'),
+    ('    --dev-bind "$(render_source "$node")" "$node" \\\n', ''),
+    ('    --setenv WLR_RENDER_DRM_DEVICE "$node" \\\n', '    --setenv LIBGL_ALWAYS_SOFTWARE 1 \\\n'),
+    ('  local node\n  node=$(render_node)\n  render_source "$node" > /dev/null  # dies here, in the main shell, on a bad THALVI_RIG_RENDER or an unusable primary node\n',
+     '  [ "$gnome" = 1 ] || die "this probe needs GNOME"\n'),
+    ('  # A new network namespace', '''  if [[ -n ${THALVI_PROBE_MOUNT:-} ]]; then
+    printf '%s\\0' --ro-bind "$THALVI_PROBE_MOUNT" "$THALVI_PROBE_APPDIR"
+  fi
+  # A new network namespace'''),
+]
+for old, new in edits:
+    if text.count(old) != 1:
+        raise SystemExit(f"Probe no longer matches the stock rig: {old!r}")
+    text = text.replace(old, new)
+Path(sys.argv[2]).write_text(text)
+PY
+chmod +x "$rig"
+export THALVI_RIG_BASE=$probe/rig
+"$rig" up --gnome --offline --size 1280x720 | tee "$out/rig-up"
+run=$(sed -n 's/^RUN_DIR=//p' "$out/rig-up")
+test -n "$run"
+"$rig" proof "$run" > "$out/isolation.txt"
+"$rig" sh "$run" sh -ec 'test "$XDG_CURRENT_DESKTOP" = GNOME; test "$XDG_SESSION_TYPE" = wayland; test ! -e /dev/dri; test ! -e /dev/snd'
+
+"$image" --appimage-mount > "$out/appimage-mount" 2> "$out/appimage-mount.err" &
+mount_pid=$!
+mounted() {
+  mount_dir=$(sed -n '/^\//{p;q}' "$out/appimage-mount")
+  [[ -n "$mount_dir" && -x "$mount_dir/AppRun" ]] && mountpoint -q "$mount_dir"
+}
+wait_for 15 'FUSE AppImage mount' mounted || { cat "$out/appimage-mount.err" >&2; exit 1; }
+export THALVI_PROBE_MOUNT=$mount_dir THALVI_PROBE_APPDIR=$probe/mounted
+mkdir "$THALVI_PROBE_APPDIR"
+"$rig" sh "$run" findmnt -rn -M "$THALVI_PROBE_APPDIR" -o TARGET,SOURCE,FSTYPE,OPTIONS > "$out/sandbox-mount"
+grep -E 'fuse\.[^ ]+ ro,' "$out/sandbox-mount"
+
+{
+  printf '#!/usr/bin/env bash\nexport APPDIR=%q APPIMAGE=%q ARGV0=%q\n' "$THALVI_PROBE_APPDIR" "$image" "$image"
+  printf 'exec "$APPDIR/AppRun" "$@"\n'
+} > "$probe/launch"
+chmod +x "$probe/launch"
+"$rig" app-start "$run" "$probe/launch" --tag mounted
+responding() {
+  timeout 8 "$rig" ctl "$run" state > "$out/app-state.json" 2>/dev/null &&
+    jq -e '.ok == true' "$out/app-state.json" >/dev/null
+}
+wait_for 60 'private AppImage socket' responding
+python3 - "$(cat "$run/app.pid")" "$mount_dir/usr/bin/thalvi-desktop" <<'PY' | tee "$out/executable-proof"
+import os
+import subprocess
+import sys
+
+holder, binary = int(sys.argv[1]), sys.argv[2]
+children = {}
+for line in subprocess.check_output(["ps", "-eo", "pid=,ppid="], text=True).splitlines():
+    pid, ppid = map(int, line.split())
+    children.setdefault(ppid, []).append(pid)
+todo = [holder]
+while todo:
+    pid = todo.pop()
+    todo.extend(children.get(pid, ()))
+    try:
+        if os.path.samefile(f"/proc/{pid}/exe", binary):
+            print(os.readlink(f"/proc/{pid}/exe"))
+            break
+    except OSError:
+        pass
+else:
+    raise SystemExit("No launched process uses the mounted AppImage executable")
+PY
+timeout 8 "$rig" ctl "$run" show recognition | tee "$out/show-recognition.json" | jq -e .took_effect
+visible_recognition() {
+  timeout 8 "$rig" gnome "$run" windows > "$out/windows.txt" && grep -qi 'Thalvi settings' "$out/windows.txt"
+}
+wait_for 25 'mapped Settings window' visible_recognition
+timeout 12 "$rig" shot "$run" recognition
