@@ -16,6 +16,7 @@ import urllib.request
 
 SKILL = Path(__file__).resolve().parents[1]
 ROOT = SKILL.parents[2]
+MODEL = 'CaptureCancel'
 CACHE = (Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'thalvi-formal').resolve()
 TLC_NAME = 'tla2tools-1.7.4.jar'
 TLC_URL = 'https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar'
@@ -110,10 +111,38 @@ def run(java, jar, evidence, label, scenario='all', flags=(), invariant=None, mu
     return violation.group(1) if violation else None
 
 
+def chart(java, jar):
+    """Dumps the faithful model's states under TypeOK alone and draws chart.mmd from view.py."""
+    scratch = Path(tempfile.mkdtemp(prefix='thalvi-formal-chart-', dir='/var/tmp'))
+    shutil.copyfile(SKILL / f'{MODEL}.tla', scratch / f'{MODEL}.tla')
+    config = re.sub(r'^INVARIANTS? .*$', 'INVARIANT TypeOK', (SKILL / f'{MODEL}.cfg').read_text(),
+                    flags=re.M)
+    (scratch / f'{MODEL}.cfg').write_text(config)
+    dot = scratch / 'states.dot'
+    command = [java, '-Xmx1g', '-XX:+UseParallelGC', '-cp', str(jar),
+               'tlc2.TLC', '-workers', '1', '-seed', '1', '-cleanup', '-deadlock',
+               '-dump', 'dot,actionlabels', str(dot), '-metadir', str(scratch / 'states'), MODEL]
+    with (scratch / 'tlc.txt').open('w') as log:
+        subprocess.run(command, cwd=scratch, stdout=log, stderr=subprocess.STDOUT,
+                       timeout=600, check=False)
+    if 'Model checking completed. No error has been found.' not in (scratch / 'tlc.txt').read_text():
+        print(f'CHART failed: TLC did not finish the state dump; read {scratch / "tlc.txt"}')
+        return 2
+    drawn = subprocess.run([sys.executable, '-I', str(SKILL / 'scripts' / 'chart.py'),
+                            '--dot', str(dot), '--view', str(SKILL / 'view.py'),
+                            '--out', str(SKILL / 'chart.mmd')], check=False)
+    shutil.rmtree(scratch)
+    return drawn.returncode
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--self-test', action='store_true', help='check guard-removal negative controls')
+    parser.add_argument('command', nargs='?', choices=['chart'],
+                        help='draw chart.mmd from the model for review; never a verdict')
     args = parser.parse_args()
+    if args.command == 'chart':
+        return chart(java_command(), fetch(TLC_NAME, TLC_URL, TLC_SHA))
     source_check()
     jar = fetch(TLC_NAME, TLC_URL, TLC_SHA)
     java = java_command()

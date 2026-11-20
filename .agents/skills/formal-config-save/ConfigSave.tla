@@ -205,6 +205,25 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+Values == Ops \cup {"f0", "empty", "none"}
+Config == [form : [Fields -> Values], switch : BOOLEAN]
+
+\* The shape of every variable; the chart command checks only this.
+TypeOK ==
+    /\ pc \in [Ops -> 1..10]
+    /\ failed \in [Ops -> BOOLEAN]
+    /\ mem \in Config
+    /\ engine \in [Fields -> Values]
+    /\ path \in 1..MaxInode
+    /\ tmp \in 0..MaxInode
+    /\ inodes \in [1..MaxInode -> Config]
+    /\ nextInode \in 2..(MaxInode + 1)
+    /\ fd \in [Ops -> 0..MaxInode]
+    /\ content \in [Ops -> Config]
+    /\ lock \in Ops \cup {"nobody"}
+    /\ lastField \in [Fields -> FormSaves \cup {"f0"}]
+    /\ lastSwitch \in BOOLEAN
+
 File == inodes[path]
 
 \* Store::save "replaces the file in one step": the file is always a whole save.

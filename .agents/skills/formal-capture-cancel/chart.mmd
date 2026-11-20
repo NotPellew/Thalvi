@@ -1,0 +1,37 @@
+stateDiagram-v2
+  state "dictation cleanup of a submit" as s1
+  state "ending cue plays, recognizer releases" as s2
+  state "explicit write request" as s3
+  state "listening [a stop was seen]" as s4
+  state "listening, model still loading" as s5
+  state "merging the streaming texts" as s6
+  state "nothing goes out" as s7
+  state "reading controls queued before the capture" as s8
+  state "settling [a stop was seen]" as s9
+  state "text goes out" as s10
+  [*] --> s8
+  s1 --> listening: cleanup returns
+  s1 --> s9: cleanup returns
+  s2 --> s3: recognizer released
+  s2 --> s6: recognizer released
+  s2 --> settling: recognizer released
+  s2 --> s9: recognizer released
+  s3 --> settling: write request returns
+  s3 --> s9: write request returns
+  listening --> s4: reads a control
+  listening --> s1: submit needs cleanup
+  listening --> s2: user ends the dictation
+  s4 --> s9: capture cancelled
+  s5 --> s9: capture cancelled
+  s5 --> settling: load fails
+  s5 --> listening: model ready
+  s6 --> s3: merge returns
+  s6 --> settling: merge returns
+  s6 --> s9: merge returns
+  s8 --> listening: no controls left
+  s8 --> s5: no controls left
+  s8 --> s7: no controls left
+  settling --> s7: no controls left
+  settling --> s10: no controls left
+  settling --> s9: reads a queued control
+  s9 --> s7: no controls left

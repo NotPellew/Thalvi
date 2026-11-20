@@ -194,6 +194,14 @@ Next == (\E c \in Commands : Send(c)) \/ DrainOne \/ PreEmpty \/ Receive
         \/ CueReturns \/ CloseReturns
         \/ SecondaryReturns \/ WritingReturns \/ FinishEmpty
 Spec == Init /\ [][Next]_vars
+\* The shape of every variable; the chart command checks only this.
+TypeOK == /\ phase \in {"pre", "active", "cleaning", "ending", "secondary", "writing", "finish", "done"}
+          /\ queue \in Seq(Commands) /\ Len(queue) <= MaxControls /\ sent \in 0..MaxControls
+          /\ \A b \in {off, quit, preEnds, ended, intentOff, stopRequested, cancelPending, cueDone,
+                       cueAccepted, closeDone, secondary, writing, cleaning, delivered, extras,
+                       merged, starting} : b \in BOOLEAN
+          /\ result \in {"none", "failed", "cancelled", "accepted"}
+          /\ extra \in {"none", "open", "released", "late"}
 NoDeliveryAfterStop == delivered => ~stopRequested
 \* No extra remains owned by the finished capture: cancellation was requested or ownership handed on.
 ExtrasNeverLeftOpen == phase = "done" => extra # "open"
