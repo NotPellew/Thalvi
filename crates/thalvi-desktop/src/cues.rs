@@ -291,6 +291,10 @@ impl CueEngine {
                 }
                 _ => (self.output.build()?, true),
             };
+            if matches!(*playback.phase(), Phase::Cancelled) {
+                *cache = Some(kept);
+                return Ok(());
+            }
             let _muted = (mic == Mic::Muted).then(|| Muted::new(&self.gate));
             let rate = kept.speaker.rate();
             *kept
