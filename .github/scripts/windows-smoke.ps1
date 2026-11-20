@@ -259,10 +259,10 @@ function Invoke-FileDelivery {
         }
         $script:readError = [string]$read.error
         return $false
-      } "Notepad's editor to have focus" 30
+      } "Notepad's focused editor to be readable" 30
     } catch {
       if ($_.Exception.Message -notlike 'timed out waiting for*') { throw }
-      throw "Notepad's editor did not take focus. Last reader error: $script:readError"
+      throw "Could not read Notepad's focused editor. Last reader error: $script:readError"
     }
     Save-Screen 'notepad'
 

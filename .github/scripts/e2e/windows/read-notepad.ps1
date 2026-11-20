@@ -45,6 +45,8 @@ function Get-EditorText($Element) {
     $pattern = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
     return $pattern.Current.Value
   } catch {}
+  $editWindow = [SmokeFocus]::FocusedEditWindow([uint32]$ProcessId)
+  if ($editWindow -ne [IntPtr]::Zero) { return [SmokeFocus]::ReadEditText($editWindow) }
   throw 'Notepad editor exposed neither TextPattern nor ValuePattern'
 }
 
@@ -53,6 +55,7 @@ try {
   Add-Type -AssemblyName UIAutomationTypes
   Add-Type @'
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class SmokeFocus {
@@ -67,6 +70,9 @@ public static class SmokeFocus {
   [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   private static extern int GetClassName(IntPtr window, StringBuilder name, int length);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr capacity,
+    StringBuilder text, uint flags, uint timeout, out UIntPtr length);
   public static uint ForegroundProcess() {
     uint process;
     GetWindowThreadProcessId(GetForegroundWindow(), out process);
@@ -85,6 +91,19 @@ public static class SmokeFocus {
     GetClassName(info.Focus, name, name.Capacity);
     return string.Equals(name.ToString(), "Edit", StringComparison.OrdinalIgnoreCase)
       ? info.Focus : IntPtr.Zero;
+  }
+  public static string ReadEditText(IntPtr window) {
+    const uint WM_GETTEXT = 0x000D, SMTO_ABORTIFHUNG = 0x0002, SMTO_ERRORONEXIT = 0x0020;
+    var text = new StringBuilder(4096);
+    UIntPtr length;
+    if (SendMessageTimeoutW(window, WM_GETTEXT, (UIntPtr)text.Capacity, text,
+        SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, 1000, out length) == IntPtr.Zero) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Reading the Notepad edit control failed");
+    }
+    if (length.ToUInt64() >= (ulong)(text.Capacity - 1)) {
+      throw new InvalidOperationException("Notepad text exceeds the smoke test buffer");
+    }
+    return text.ToString();
   }
 }
 '@
