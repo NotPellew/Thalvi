@@ -1,0 +1,345 @@
+name: desktop smoke probe
+
+# Disposable qualification for issues #568 and #573. A green job records that
+# these commands returned; it is not acceptance of either issue.
+# Push only. No repository write permission.
+on:
+  push:
+    branches:
+      - ci/desktop-smoke-probe
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-smoke-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-noble-apt:
+    name: noble apt inventory
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      hyprland_suitable: ${{ steps.apt.outputs.hyprland_suitable }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: host
+        name: host os and devices
+        run: |
+          set -euo pipefail
+          echo "---- os ----"
+          cat /etc/os-release
+          uname -a
+          echo "---- apparmor userns (read) ----"
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          echo "---- identity ----"
+          id
+          echo "---- /dev/dri ----"
+          dri=false
+          if [ -d /dev/dri ] && [ -n "$(ls -A /dev/dri 2>/dev/null || true)" ]; then
+            ls -l /dev/dri
+            dri=true
+          else
+            echo "absent /dev/dri nodes"
+          fi
+          echo "---- /sys/class/drm ----"
+          if [ -d /sys/class/drm ]; then
+            ls -l /sys/class/drm || true
+            for n in /sys/class/drm/renderD*; do
+              [ -e "$n" ] || continue
+              echo "$n vendor=$(cat "$n/device/vendor" 2>/dev/null || echo unreadable) device=$(cat "$n/device/device" 2>/dev/null || echo unreadable)"
+            done
+          else
+            echo "absent /sys/class/drm"
+          fi
+          echo "---- /dev/kvm ----"
+          if [ -e /dev/kvm ]; then
+            ls -l /dev/kvm
+          else
+            echo "absent /dev/kvm"
+          fi
+          echo "---- vkms module (not loaded) ----"
+          modinfo vkms || echo "modinfo vkms: unavailable"
+          {
+            echo "### Noble host devices"
+            echo "dri_present=$dri"
+            echo "kvm_present=$( [ -e /dev/kvm ] && echo true || echo false )"
+            echo "This inventory does not claim the rig can start."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - id: apt
+        name: apt availability and versions
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          pkgs=(hyprland kwin-wayland bubblewrap grim wtype foot wayland-utils pipewire wireplumber python3 python3-pil dbus mesa-utils mesa-vulkan-drivers)
+          {
+            echo "### apt-cache policy"
+            for p in "${pkgs[@]}"; do
+              echo "## $p"
+              apt-cache policy "$p" || true
+            done
+          } | tee "$RUNNER_TEMP/apt-policy.txt"
+          suitable=false
+          if apt-cache show hyprland >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends \
+              hyprland kwin-wayland bubblewrap wayland-utils pipewire wireplumber python3 dbus mesa-utils mesa-vulkan-drivers
+            {
+              echo "### installed versions"
+              dpkg-query -W -f '${Package} ${Version}\n' hyprland kwin-wayland bubblewrap wayland-utils pipewire wireplumber python3 dbus mesa-utils mesa-vulkan-drivers || true
+              echo "### Hyprland --version"
+              Hyprland --version || true
+              echo "### hyprctl --help (batch flag)"
+              hyprctl --help || true
+              echo "### kwin_wayland --help (virtual flag)"
+              kwin_wayland --help || true
+            } | tee "$RUNNER_TEMP/apt-versions.txt"
+            batch=no
+            virtual=no
+            hyprctl --help 2>&1 | grep -q -- '--batch' && batch=yes
+            kwin_wayland --help 2>&1 | grep -q -- '--virtual' && virtual=yes
+            ver=$(Hyprland --version 2>&1 || true)
+            printf '%s\n' "$ver" > "$RUNNER_TEMP/hyprland-version.txt"
+            floor=no
+            if python3 - "$RUNNER_TEMP/hyprland-version.txt" <<'PY'
+          import re, sys
+          text = open(sys.argv[1], errors="replace").read()
+          match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+          if not match:
+              sys.exit(1)
+          got = tuple(int(part) for part in match.groups())
+          sys.exit(0 if got >= (0, 53, 3) else 2)
+          PY
+            then
+              floor=yes
+            fi
+            echo "batch=$batch virtual=$virtual version_at_least_0.53.3=$floor"
+            echo "bindrti is flags on keyword bind, not a hyprctl subcommand. .socket2.sock exists only while Hyprland is running."
+            if [ "$batch" = yes ] && [ "$virtual" = yes ] && [ "$floor" = yes ]; then
+              suitable=true
+            fi
+          else
+            echo "hyprland: not in the Noble apt cache"
+          fi
+          echo "hyprland_suitable=$suitable" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Noble apt"
+            echo "hyprland_suitable=$suitable"
+            echo "Suitable means the Noble archive can install Hyprland >= 0.53.3 whose hyprctl help lists --batch, plus kwin_wayland --virtual."
+            echo "It does not mean thalvi-desktop-rig up --mic or proof passed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: rig on noble when apt is suitable
+        if: steps.apt.outputs.hyprland_suitable == 'true'
+        run: |
+          set -euo pipefail
+          export THALVI_RIG_RENDER=software
+          export THALVI_RIG_BASE=/var/tmp/thalvi-rig-probe
+          H=.agents/skills/verify-thalvi/scripts/thalvi-desktop-rig
+          mkdir -p "$THALVI_RIG_BASE"
+          log=$RUNNER_TEMP/noble-up.txt
+          cleanup() {
+            local d
+            for d in "$THALVI_RIG_BASE"/run-*; do
+              [ -d "$d" ] || continue
+              "$H" down "$d" || true
+            done
+          }
+          trap cleanup EXIT
+          set +e
+          timeout --signal=TERM --kill-after=10s 180s "$H" up --mic >"$log" 2>&1
+          status=$?
+          set -e
+          echo "noble up --mic exit=$status"
+          cat "$log" || true
+          if [ "$status" -ne 0 ] && grep -E -q 'apparmor_restrict_unprivileged_userns|No permissions to create|user namespace|setting up uid map' "$log"; then
+            echo "---- userns restriction before ----"
+            sysctl kernel.apparmor_restrict_unprivileged_userns || true
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            echo "---- userns restriction after ----"
+            sysctl kernel.apparmor_restrict_unprivileged_userns || true
+            cleanup || true
+            set +e
+            timeout --signal=TERM --kill-after=10s 180s "$H" up --mic >"$log" 2>&1
+            status=$?
+            set -e
+            echo "noble up --mic retry exit=$status"
+            cat "$log" || true
+          fi
+          run_dir=$(sed -n 's/^RUN_DIR=//p' "$log" | tail -1 || true)
+          if [ "$status" -eq 0 ]; then
+            test -n "$run_dir"
+            test -f "$run_dir/out/inner.sig"
+            echo "---- sockets under $run_dir/rt ----"
+            find "$run_dir/rt" -name '.socket.sock' -o -name '.socket2.sock' || true
+            timeout --signal=TERM --kill-after=10s 60s "$H" proof "$run_dir"
+            echo "---- isolation.txt ----"
+            cat "$run_dir/out/isolation.txt"
+          fi
+          echo "PROBE RESULT: noble rig exit=$status. Route not claimed."
+          {
+            echo "### Noble rig"
+            echo "up --mic exit=$status"
+            echo "Route not claimed."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  linux-arch-rig:
+    name: arch container rig
+    needs: linux-noble-apt
+    if: ${{ !cancelled() && (needs.linux-noble-apt.result != 'success' || needs.linux-noble-apt.outputs.hyprland_suitable != 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    # Index digest of docker.io/library/archlinux:latest observed 2026-11-20.
+    # amd64 manifest: sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae
+    # Privileged so bwrap can make namespaces and, only if that is what fails,
+    # so the job can run the issue's apparmor sysctl. Host /dev/dri is not
+    # passed: --device /dev/dri aborts the job when the node is absent.
+    container:
+      image: docker.io/library/archlinux@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: container devices and packages
+        run: |
+          set -euo pipefail
+          cat /etc/os-release
+          uname -a
+          id
+          echo "---- /dev/dri inside container ----"
+          if [ -d /dev/dri ]; then ls -l /dev/dri; else echo "absent /dev/dri"; fi
+          echo "---- /sys/class/drm inside container ----"
+          if [ -d /sys/class/drm ]; then ls -l /sys/class/drm || true; else echo "absent /sys/class/drm"; fi
+          echo "---- apparmor userns (read) ----"
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          if ! pacman -Syu --needed --noconfirm hyprland kwin bubblewrap wayland-utils pipewire wireplumber python dbus mesa; then
+            echo "---- pacman search after install failure ----"
+            pacman -Ss 'kwin|hyprland|bubblewrap|wayland-utils|vulkan-swrast' || true
+            exit 1
+          fi
+          echo "### installed"
+          pacman -Q hyprland kwin bubblewrap wayland-utils pipewire wireplumber python dbus mesa
+          {
+            echo "### versions"
+            Hyprland --version || true
+            echo "### hyprctl --help"
+            hyprctl --help || true
+            echo "### kwin_wayland --help"
+            kwin_wayland --help || true
+          } | tee "$RUNNER_TEMP/arch-versions.txt"
+
+      - name: rig up --mic and proof
+        run: |
+          set -euo pipefail
+          export THALVI_RIG_RENDER=software
+          export THALVI_RIG_BASE=/var/tmp/thalvi-rig-probe
+          H=.agents/skills/verify-thalvi/scripts/thalvi-desktop-rig
+          mkdir -p "$THALVI_RIG_BASE"
+          log=$RUNNER_TEMP/arch-up.txt
+          useradd --create-home --groups video,render thalvi-probe
+          chown thalvi-probe "$THALVI_RIG_BASE"
+          probe=(runuser -u thalvi-probe -- env "THALVI_RIG_RENDER=$THALVI_RIG_RENDER" "THALVI_RIG_BASE=$THALVI_RIG_BASE")
+          cleanup() {
+            local d
+            for d in "$THALVI_RIG_BASE"/run-*; do
+              [ -d "$d" ] || continue
+              "${probe[@]}" "$H" down "$d" || true
+            done
+          }
+          trap cleanup EXIT
+          set +e
+          timeout --signal=TERM --kill-after=10s 180s "${probe[@]}" "$H" up --mic >"$log" 2>&1
+          status=$?
+          set -e
+          echo "arch up --mic exit=$status"
+          cat "$log" || true
+          if [ "$status" -ne 0 ] && grep -E -q 'apparmor_restrict_unprivileged_userns|No permissions to create|user namespace|setting up uid map' "$log"; then
+            echo "---- userns restriction before ----"
+            sysctl kernel.apparmor_restrict_unprivileged_userns || true
+            sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            echo "---- userns restriction after ----"
+            sysctl kernel.apparmor_restrict_unprivileged_userns || true
+            cleanup || true
+            set +e
+            timeout --signal=TERM --kill-after=10s 180s "${probe[@]}" "$H" up --mic >"$log" 2>&1
+            status=$?
+            set -e
+            echo "arch up --mic retry exit=$status"
+            cat "$log" || true
+          fi
+          run_dir=$(sed -n 's/^RUN_DIR=//p' "$log" | tail -1 || true)
+          if [ "$status" -eq 0 ]; then
+            test -n "$run_dir"
+            test -f "$run_dir/out/inner.sig"
+            echo "---- sockets under $run_dir/rt ----"
+            find "$run_dir/rt" \( -name '.socket.sock' -o -name '.socket2.sock' \) || true
+            timeout --signal=TERM --kill-after=10s 60s "${probe[@]}" "$H" proof "$run_dir"
+            echo "---- isolation.txt ----"
+            cat "$run_dir/out/isolation.txt"
+          fi
+          echo "PROBE RESULT: arch rig exit=$status. Route not claimed."
+          {
+            echo "### Arch rig"
+            echo "up --mic exit=$status under THALVI_RIG_RENDER=software"
+            echo "Route not claimed. A zero exit is the command result, not acceptance of #568."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  windows-endpoints:
+    name: windows endpoint probe
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: enumerate existing endpoints
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          Write-Output ("build={0} display={1} product={2}" -f $cv.CurrentBuild, $cv.DisplayVersion, $cv.ProductName)
+          function Show-AudioEndpoints([string]$Kind) {
+            $root = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$Kind"
+            Write-Output "---- $Kind ----"
+            if (-not (Test-Path -LiteralPath $root)) {
+              Write-Output "absent $root"
+              return
+            }
+            $active = 0
+            $total = 0
+            foreach ($item in @(Get-ChildItem -LiteralPath $root)) {
+              $total++
+              $props = Get-ItemProperty -LiteralPath $item.PSPath
+              $state = $props.DeviceState
+              if ($state -eq 1) { $active++ }
+              Write-Output ("state={0} endpoint={1}" -f $state, $item.PSChildName)
+            }
+            Write-Output ("count={0} active={1}" -f $total, $active)
+          }
+          Show-AudioEndpoints 'Render'
+          Show-AudioEndpoints 'Capture'
+          Write-Output '---- Win32_SoundDevice ----'
+          try {
+            $sound = @(Get-CimInstance Win32_SoundDevice -ErrorAction Stop)
+          } catch {
+            $sound = @()
+            Write-Output ("Win32_SoundDevice unavailable: {0}" -f $_.Exception.Message)
+          }
+          if ($sound.Count -eq 0) { Write-Output 'none' }
+          foreach ($device in $sound) {
+            Write-Output ("name={0} status={1}" -f $device.Name, $device.Status)
+          }
+          Write-Output 'No virtual-audio driver is installed by this probe.'
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Windows audio endpoint inventory complete. No driver was installed.'
