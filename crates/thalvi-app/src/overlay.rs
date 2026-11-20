@@ -45,9 +45,12 @@ pub enum Visibility {
 
 impl Visibility {
     /// Shown from the wake word until the delivery has been confirmed, and briefly for a failure,
-    /// which `dismiss_error` can hide sooner; never when `enabled` is off.
+    /// which `dismiss_error` can hide sooner. Final Submit still shows the exact text when disabled.
     #[must_use]
     pub fn of(status: &Status, enabled: bool) -> Self {
+        if status.requires_final_preview() {
+            return Self::Show;
+        }
         if !enabled {
             return Self::Hide;
         }
@@ -784,6 +787,7 @@ mod tests {
                     waiting_for_quiet: false,
                     pause_ms: 700,
                     copies: false,
+                    final_confirmation: false,
                 },
                 Visibility::Show,
             ),
@@ -896,6 +900,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2500,
             copies: false,
+            final_confirmation: false,
         };
         overlay.take(
             Message::Status(Box::new(pending), Visibility::Show),

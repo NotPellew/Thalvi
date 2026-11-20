@@ -47,6 +47,9 @@ pub enum Status {
         pause_ms: u64,
         /// The action is a copy to the clipboard, whatever the route.
         copies: bool,
+        /// The exact text behind a final-pass Submit must be visible during review.
+        #[serde(skip)]
+        final_confirmation: bool,
     },
     /// The writing model is putting the dictation into proper text; `text` is what has come in so far.
     Writing {
@@ -108,6 +111,19 @@ pub enum Status {
         #[serde(skip)]
         downloading: bool,
     },
+}
+
+impl Status {
+    /// Whether the overlay must show these exact words before they are sent.
+    pub(crate) const fn requires_final_preview(&self) -> bool {
+        matches!(
+            self,
+            Self::Pending {
+                final_confirmation: true,
+                ..
+            }
+        )
+    }
 }
 
 /// What a failure stopped, which decides what the overlay's label may claim.
@@ -344,6 +360,16 @@ impl View {
                     pause_ms: u64::try_from(self.pauses.get(*route).as_millis())
                         .unwrap_or(u64::MAX),
                     copies: self.copies,
+                    final_confirmation: false,
+                },
+                EngineState::ConfirmingSubmit { text, pause } => Status::Pending {
+                    target,
+                    route: CaptureRoute::Submit,
+                    text: text.clone(),
+                    waiting_for_quiet: false,
+                    pause_ms: u64::try_from(pause.as_millis()).unwrap_or(u64::MAX),
+                    copies: self.copies,
+                    final_confirmation: true,
                 },
                 EngineState::FinalPass { route } => Status::FinalPass {
                     target,
@@ -493,6 +519,7 @@ mod tests {
                     waiting_for_quiet: true,
                     pause_ms: 2500,
                     copies: false,
+                    final_confirmation: false,
                 },
             ),
             (
@@ -504,6 +531,7 @@ mod tests {
                     waiting_for_quiet: false,
                     pause_ms: 700,
                     copies: false,
+                    final_confirmation: false,
                 },
             ),
             (
@@ -515,6 +543,7 @@ mod tests {
                     waiting_for_quiet: false,
                     pause_ms: 700,
                     copies: false,
+                    final_confirmation: false,
                 },
             ),
             (
@@ -838,6 +867,7 @@ mod tests {
                     waiting_for_quiet: false,
                     pause_ms: 2500,
                     copies: true,
+                    final_confirmation: false,
                 },
                 json!({"state": "pending", "target": "kitty", "route": "submit", "text": "hi",
                        "waitingForQuiet": false, "pauseMs": 2500, "copies": true}),

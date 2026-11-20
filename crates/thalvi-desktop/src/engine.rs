@@ -230,6 +230,11 @@ pub enum EngineState {
         /// The quiet pause has not started because the user is still speaking.
         waiting_for_quiet: bool,
     },
+    /// The finished text is being shown before Submit can send it.
+    ConfirmingSubmit {
+        text: String,
+        pause: Duration,
+    },
     /// The extra recognizers' texts are being merged with the live text, as far as they arrive in time.
     Merging {
         route: CaptureRoute,
@@ -3017,15 +3022,19 @@ where
         let CaptureOutcome::Accepted(request) = outcome else {
             return outcome;
         };
-        self.set_state(EngineState::PendingEnding {
-            route: request.route,
+        let submit = CaptureRoute::Submit;
+        let pause = self
+            .pauses
+            .get(submit)
+            .max(EndingPauses::default().get(submit));
+        self.set_state(EngineState::ConfirmingSubmit {
             text: request.text.clone(),
-            waiting_for_quiet: false,
+            pause,
         });
         tokio::select! {
             biased;
             _ = self.cancel.changed() => CaptureOutcome::cancelled_with(request.text),
-            () = tokio::time::sleep(self.pauses.get(request.route)) => CaptureOutcome::Accepted(request),
+            () = tokio::time::sleep(pause) => CaptureOutcome::Accepted(request),
         }
     }
 

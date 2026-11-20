@@ -132,7 +132,8 @@ cancel during live release aborts the task there. A late answer may reach opt-in
 but it cannot re-enter the capture. `FinalReturns` abstracts a reply, fallback or observed cancel;
 a skipped request does not need to await it. For submit, optional cleanup and the confirmation
 of the settled text follow the final pass, with separate cancellation-first awaits
-(`FinalCleanupReturns`, `ConfirmReturns`). An accepted result still crosses `FinishEmpty`.
+(`FinalCleanupReturns`, `ConfirmReturns`). `ConfirmingSubmit` starts a review interval even
+with zero spoken pause. An accepted result still crosses `FinishEmpty`.
 The model checks delivery admission. It does not check correctness of recognition or a reply's time.
 
 The five checked invariants have these exact meanings:

@@ -2242,7 +2242,7 @@ function microphone({ settings, backend, controls, microphones, live, audio, app
 function overlay({ settings, controls, apply }: PageContext): HTMLElement[] {
   return [
     group("Overlay"),
-    row("Show the overlay", "A small pill at the top while capturing.",
+    row("Show the overlay", "Final pass always previews Submit.",
       controls.toggle(settings.overlay.show, (value) =>
         apply((next) => {
           next.overlay.show = value;

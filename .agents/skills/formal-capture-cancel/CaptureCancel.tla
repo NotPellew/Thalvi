@@ -200,6 +200,7 @@ FinalCleanupReturns == /\ phase = "finalCleanup"
                                       stopRequested, cancelPending, cueDone, cueAccepted,
                                       closeDone, secondary, writing, cleaning, delivered, extraVars>>
 
+\* ConfirmingSubmit always opens a review interval. Time spent waiting stutters here.
 ConfirmReturns == /\ phase = "confirm" /\ phase' = "finish"
                   /\ result' = IF cancelPending THEN "cancelled" ELSE "accepted"
                   /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,

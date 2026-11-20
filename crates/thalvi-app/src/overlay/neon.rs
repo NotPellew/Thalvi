@@ -433,7 +433,7 @@ fn draft(view: &View) -> Option<Draft> {
             notice: true,
             ..words(notice, "", false)
         }),
-        _ if !view.show_draft => None,
+        _ if !view.show_draft && !view.status.requires_final_preview() => None,
         Status::Capturing {
             committed, partial, ..
         } => Some(words(
@@ -762,6 +762,7 @@ mod tests {
             waiting_for_quiet,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: false,
         };
         let writing = Status::Writing {
             target: None,
@@ -942,6 +943,7 @@ mod tests {
             waiting_for_quiet,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: false,
         };
         let working = Status::Working {
             target: None,

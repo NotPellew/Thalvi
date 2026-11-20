@@ -272,8 +272,9 @@ impl View {
 
     /// The line `status` shows with the draft switch as it is now.
     fn line_of(&self, status: &Status) -> Line {
+        let required = status.requires_final_preview();
         let words = |committed: &str, partial: &str, caret| {
-            if self.show_draft {
+            if self.show_draft || required {
                 Line::Words {
                     committed: committed.to_owned(),
                     partial: partial.to_owned(),
@@ -489,6 +490,7 @@ mod tests {
             waiting_for_quiet: quiet,
             pause_ms: 2500,
             copies: false,
+            final_confirmation: false,
         };
         let mut view = View::new(false);
         view.set_status(pending(false), 1.0);
@@ -672,6 +674,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: false,
         };
         let writing = Status::Writing {
             target: None,
@@ -717,6 +720,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: false,
         };
         let capturing = Status::Capturing {
             target: None,
@@ -779,6 +783,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: false,
         };
         let working = Status::Working {
             target: None,

@@ -934,6 +934,7 @@ mod tests {
             waiting_for_quiet: true,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: false,
         };
         let centre = |status: &Status, draft| {
             let loud = drawn(Finish::Gunmetal, &shown(status.clone(), draft, 1.0, 1.0));

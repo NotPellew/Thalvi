@@ -7965,10 +7965,9 @@ async fn final_pass_replaces_hold_and_wake_text_and_sends_the_word_list() {
                     assert!(!header.contains("name=\"prompt\""));
                 } else {
                     assert!(header.contains("name=\"prompt\"\r\n\r\nCybrex2, Thalvi\r\n"));
-                    rig.state_is(EngineState::PendingEnding {
-                        route,
+                    rig.state_is(EngineState::ConfirmingSubmit {
                         text: "Run tests".to_owned(),
-                        waiting_for_quiet: false,
+                        pause: ms(2500),
                     })
                     .await;
                     assert!(captures.try_recv().is_err(), "confirmation is still up");
@@ -8225,10 +8224,9 @@ async fn final_pass_is_cleaned_before_submit_confirmation_and_pauses_extras() {
             let cleanup = request(&mut chat_requests).await;
             assert_eq!(cleanup.body["messages"][0]["content"], CLEANUP_PROMPT);
             assert_eq!(cleanup.body["messages"][1]["content"], "better dictation");
-            rig.state_is(EngineState::PendingEnding {
-                route: CaptureRoute::Submit,
+            rig.state_is(EngineState::ConfirmingSubmit {
                 text: "Cleaned final pass.".to_owned(),
-                waiting_for_quiet: false,
+                pause: ms(2500),
             })
             .await;
             assert_eq!(
@@ -8237,6 +8235,40 @@ async fn final_pass_is_cleaned_before_submit_confirmation_and_pauses_extras() {
             );
             assert!(uploads.try_recv().is_err());
             assert!(chat_requests.try_recv().is_err());
+            finished(worker).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_submit_can_be_reviewed_and_cancelled_with_no_spoken_pause() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut uploads) = serve(Reply::Json(r#"{"text":"Final words submit"}"#)).await;
+            let mut config = with_final_pass(&url, &[]);
+            config["ending_pause"]["submit"] = json!(0);
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let (worker, mut captures) =
+                final_captures(&rig, engine, frames, &[WakeTrigger::Capture]);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words submit").await;
+            uploads.recv().await.unwrap();
+            rig.state_is(EngineState::ConfirmingSubmit {
+                text: "Final words".to_owned(),
+                pause: ms(2500),
+            })
+            .await;
+            rig.at(rig.now() + 2000).await;
+            assert!(
+                captures.try_recv().is_err(),
+                "the final text is still up for review"
+            );
+            rig.handle.cancel();
+            assert!(matches!(
+                captures.recv().await.unwrap().outcome,
+                CaptureOutcome::Cancelled { .. }
+            ));
             finished(worker).await;
         })
         .await;

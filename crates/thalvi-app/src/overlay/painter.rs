@@ -129,6 +129,42 @@ mod tests {
     }
 
     #[test]
+    fn final_submit_text_is_visible_even_with_the_overlay_and_draft_disabled() {
+        use crate::overlay::Visibility;
+        use crate::status::{Mode, View as StatusView};
+        use thalvi_desktop::engine::EngineState;
+
+        for look in [Look::Gunmetal, Look::Holo, Look::Neon] {
+            let mut painter = Painter::new(1.0, look, true).unwrap();
+            let mut view = View::new(false);
+            view.set_draft(false);
+            let mut preview = |text: &str| {
+                let status = StatusView {
+                    mode: Mode::Idle,
+                    engine: EngineState::ConfirmingSubmit {
+                        text: text.to_owned(),
+                        pause: Duration::from_millis(2500),
+                    },
+                    target: None,
+                    copies: false,
+                    pauses: Default::default(),
+                    loading: None,
+                    wake_words: true,
+                }
+                .status();
+                assert_eq!(Visibility::of(&status, false), Visibility::Show);
+                view.set_status(status, 0.0);
+                painter.draw(&view, 0.0).bgra.clone()
+            };
+            assert_ne!(
+                preview("Send thirty dollars"),
+                preview("Send two dollars"),
+                "{look:?}"
+            );
+        }
+    }
+
+    #[test]
     fn each_look_shows_each_state_in_its_tone() {
         let pending = Status::Pending {
             target: None,
@@ -137,6 +173,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2500,
             copies: false,
+            final_confirmation: false,
         };
         let done = Status::Done {
             target: None,
@@ -306,6 +343,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: false,
         }
     }
 
