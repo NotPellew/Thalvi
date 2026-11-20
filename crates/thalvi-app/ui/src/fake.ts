@@ -52,7 +52,7 @@ const SETTINGS: Settings = {
   },
   stt: {
     entries: [
-      { kind: "realtime", id: "realtime", name: "Meta realtime ASR", active: false, address: "wss://asr.example", model: "nemotron", has_key: true },
+      { kind: "realtime", id: "realtime", name: "Realtime transcription (WebSocket)", active: false, address: "wss://asr.example", model: "nemotron", has_key: true },
       { kind: "open_ai", id: "gateway", name: "LLM Gateway", active: false, address: "https://gw.example/v1", model: "whisper-1", request: "transcriptions", language: "", has_key: true },
       { kind: "on_device", id: "on-device", name: "On this computer", active: true, model: "nemotron_160ms" },
       { kind: "extra", id: "extra", name: "Extra recognizer", active: false, address: "https://extra.example/v1", model: "whisper-1", api: "openai" },

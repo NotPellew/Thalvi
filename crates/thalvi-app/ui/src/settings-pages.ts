@@ -955,8 +955,8 @@ const KINDS: Record<SpeechEntry["kind"], Kind> = {
     hint: "Words appear while you speak.",
     terms: "streaming servers · speech servers",
     add: "Add a streaming server",
-    about: "Streams your audio to a Meta realtime ASR server, so words appear while you speak.",
-    name: "Meta realtime ASR",
+    about: "Words appear while you speak. Connect Thalvi's own recognizer, which runs on a computer with an NVIDIA GPU, or another server with the same WebSocket protocol for realtime transcription.",
+    name: "Realtime transcription (WebSocket)",
   },
   open_ai: {
     title: "After-you-stop servers",
@@ -1597,13 +1597,13 @@ function speech(context: PageContext): SpeechRows {
       sized(row("Address", hint, controls.draftText("address" in working ? working.address : "", (value) => {
         if ("address" in working) working.address = value;
       }, { placeholder })), "half");
-    const modelRow = (size: "half" | "third"): HTMLElement =>
-      sized(row("Model", "The model named in each request.", controls.draftText("model" in working ? (working.model ?? "") : "", (value) => {
+    const modelRow = (size: "half" | "third", hint = "The model named in each request."): HTMLElement =>
+      sized(row("Model", hint, controls.draftText("model" in working ? (working.model ?? "") : "", (value) => {
         if (working.kind === "realtime" || working.kind === "open_ai" || working.kind === "extra") working.model = value;
       })), size);
     const key: { input?: HTMLInputElement } = {};
     let clearKey = false;
-    const keyRow = (): HTMLElement => {
+    const keyRow = (hint = "Saved in the config. Never shown again."): HTMLElement => {
       const saved = hasKey(working);
       const field = controls.draftText("", () => undefined, {
         type: "password",
@@ -1619,14 +1619,18 @@ function speech(context: PageContext): SpeechRows {
         field.field.focus();
       }, "quiet");
       clear.hidden = !saved;
-      return sized(row("API key", "Saved in the config. Never shown again.", {
+      return sized(row("API key", hint, {
         node: el("div", { class: "stack wide" }, field.node, clear, cleared),
         field: field.field,
       }), "half");
     };
     switch (working.kind) {
       case "realtime":
-        rows.push(address("A ws:// or wss:// Meta realtime server.", "ws://127.0.0.1:8012"), keyRow(), modelRow("half"));
+        rows.push(
+          address("The server's ws:// or wss:// address. Thalvi's own recognizer uses port 8012.", "ws://127.0.0.1:8012"),
+          keyRow("Only if the server needs one. Saved, never shown."),
+          modelRow("half", "The model the server should use. Thalvi's own recognizer accepts any name."),
+        );
         break;
       case "open_ai":
         rows.push(
