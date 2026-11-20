@@ -139,6 +139,9 @@ pub trait CuePlayer {
     /// hears nothing while it plays.
     fn play(&self, cue: Cue, mic: Mic)
     -> impl Future<Output = Result<Option<CueTiming>, CueError>>;
+
+    /// The latest cue's first-sample timing if it was called at or after `since`.
+    fn timing_since(&self, since: std::time::Instant) -> Option<CueTiming>;
 }
 
 /// Plays cues on the default output through [`CueEngine`].
@@ -167,6 +170,10 @@ impl Drop for StopOnDrop {
 }
 
 impl CuePlayer for CpalCuePlayer {
+    fn timing_since(&self, since: std::time::Instant) -> Option<CueTiming> {
+        self.0.timing_since(since)
+    }
+
     async fn play(&self, cue: Cue, mic: Mic) -> Result<Option<CueTiming>, CueError> {
         let called = std::time::Instant::now();
         let engine = Arc::clone(&self.0);
@@ -548,11 +555,10 @@ struct CueEnd {
     result: Result<Option<CueTiming>, CueError>,
 }
 
-fn cue_metric(metrics: &Metrics, event: Event, end: &CueEnd) {
+fn cue_metric(metrics: &Metrics, event: Event, end: &CueEnd, outcome: &str) {
     if !end.played {
         return;
     }
-    let outcome = if end.result.is_ok() { "ok" } else { "error" };
     let mut fields = json!({"cue": cue_name(end.cue)});
     // `duration_ms` is play to drained; these tell our code, the device and the user's wait apart.
     if let Ok(Some(timing)) = &end.result {
@@ -1634,7 +1640,8 @@ where
     }
 
     fn cue_metric(&self, event: Event, end: &CueEnd) {
-        cue_metric(&self.recorder.metrics(), event, end);
+        let outcome = if end.result.is_ok() { "ok" } else { "error" };
+        cue_metric(&self.recorder.metrics(), event, end, outcome);
     }
 
     /// Reports a cue that failed to play; the capture goes on without it.
@@ -2523,16 +2530,30 @@ where
         let mut cancel = self.cancel.clone();
         let gate = self.gate.clone();
         let state = self.state.clone();
+        let cues = Rc::clone(&self.cues);
         self.ending_cues.spawn_local(async move {
-            let started = Instant::now();
-            tokio::select! {
-                biased;
-                _ = cancel.changed() => metrics.metric(
-                    Event::EndCue, "cancelled", Some(started.elapsed()), json!({"cue": cue_name(cue)})),
-                end = played => {
-                    cue_metric(&metrics, Event::EndCue, &end);
-                    if let Err(error) = end.result {
-                        notice(&format!("{error} The capture continues."));
+            {
+                let called = std::time::Instant::now();
+                let started = Instant::now();
+                tokio::pin!(played);
+                tokio::select! {
+                    biased;
+                    _ = cancel.changed() => {
+                        let end = CueEnd {
+                            cue,
+                            played: true,
+                            took: started.elapsed(),
+                            waited: started.saturating_duration_since(decided),
+                            result: Ok(cues.timing_since(called)),
+                        };
+                        cue_metric(&metrics, Event::EndCue, &end, "cancelled");
+                    }
+                    end = &mut played => {
+                        let outcome = if end.result.is_ok() { "ok" } else { "error" };
+                        cue_metric(&metrics, Event::EndCue, &end, outcome);
+                        if let Err(error) = end.result {
+                            notice(&format!("{error} The capture continues."));
+                        }
                     }
                 }
             }

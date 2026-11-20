@@ -383,6 +383,11 @@ impl FakeCuePlayer {
 }
 
 impl CuePlayer for FakeCuePlayer {
+    fn timing_since(&self, _: std::time::Instant) -> Option<CueTiming> {
+        matches!(self.log.borrow().last(), Some((_, CueLog::Started(_))))
+            .then(|| self.script.borrow().timing)
+    }
+
     async fn play(&self, cue: Cue, mic: Mic) -> Result<Option<CueTiming>, CueError> {
         let (length, fails, timing, gate) = {
             let script = self.script.borrow();

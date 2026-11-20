@@ -178,15 +178,17 @@ struct Playback {
     phase: Mutex<Phase>,
     changed: Condvar,
     /// The instant of the callback that wrote the first sample, and the device delay it reported.
-    first_sample: OnceLock<(Instant, Option<Duration>)>,
+    first_sample: OnceLock<(Instant, Option<Duration>, bool)>,
+    called: Instant,
 }
 
 impl Playback {
-    fn new() -> Self {
+    fn new(called: Instant) -> Self {
         Self {
             phase: Mutex::new(Phase::Playing),
             changed: Condvar::new(),
             first_sample: OnceLock::new(),
+            called,
         }
     }
 
@@ -237,7 +239,7 @@ pub struct CueEngine {
     cues: Cues,
     gate: InputGate,
     serial: Mutex<()>,
-    current: Mutex<Option<Arc<Playback>>>,
+    last: Mutex<Option<Arc<Playback>>>,
     output: Box<dyn Output + Send + Sync>,
     kept: Mutex<Option<Kept>>,
 }
@@ -250,7 +252,7 @@ impl CueEngine {
             cues,
             gate,
             serial: Mutex::new(()),
-            current: Mutex::new(None),
+            last: Mutex::new(None),
             output: Box::new(CpalOutput),
             kept: Mutex::new(None),
         }
@@ -280,7 +282,7 @@ impl CueEngine {
     /// Why the cue could not be played.
     pub fn play(&self, cue: Cue, mic: Mic, called: Instant) -> Result<Option<CueTiming>, CueError> {
         let mut timing = None;
-        self.play_gated(cue, |playback| {
+        self.play_gated(cue, called, |playback| {
             let id = self.output.default_device()?;
             let mut cache = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
             let (kept, rebuilt) = match cache.take() {
@@ -300,6 +302,7 @@ impl CueEngine {
                 position: 0,
                 channels: kept.channels,
                 rate,
+                rebuilt,
                 playback: Arc::clone(playback),
             });
             let limit =
@@ -314,21 +317,36 @@ impl CueEngine {
                 .voice
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = None;
-            timing = playback.first_sample.get().map(|&(at, output)| CueTiming {
-                start: at.saturating_duration_since(called),
-                output,
-                rebuilt,
-            });
+            timing = playback
+                .first_sample
+                .get()
+                .map(|&(at, output, rebuilt)| CueTiming {
+                    start: at.saturating_duration_since(called),
+                    output,
+                    rebuilt,
+                });
             *cache = Some(kept);
             result.and(paused)
         })?;
         Ok(timing)
     }
 
+    /// The most recent cue's first sample, if that cue was called at or after `since`.
+    pub(crate) fn timing_since(&self, since: Instant) -> Option<CueTiming> {
+        let last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        let playback = last.as_ref()?;
+        let &(at, output, rebuilt) = playback.first_sample.get()?;
+        (playback.called >= since).then_some(CueTiming {
+            start: at.saturating_duration_since(playback.called),
+            output,
+            rebuilt,
+        })
+    }
+
     /// Cuts the cue that is playing short; `play` then returns `Ok`.
     pub fn stop(&self) {
         if let Some(playback) = self
-            .current
+            .last
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
@@ -340,17 +358,16 @@ impl CueEngine {
     fn play_gated(
         &self,
         cue: Cue,
+        called: Instant,
         run: impl FnOnce(&Arc<Playback>) -> Result<(), CueError>,
     ) -> Result<(), CueError> {
         if !self.cues.enabled(cue) {
             return Ok(());
         }
         let _turn = self.serial.lock().unwrap_or_else(PoisonError::into_inner);
-        let playback = Arc::new(Playback::new());
-        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&playback));
-        let result = run(&playback);
-        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        result
+        let playback = Arc::new(Playback::new(called));
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&playback));
+        run(&playback)
     }
 }
 
@@ -501,6 +518,7 @@ struct Voice {
     position: usize,
     channels: usize,
     rate: u32,
+    rebuilt: bool,
     playback: Arc<Playback>,
 }
 
@@ -518,10 +536,10 @@ impl Voice {
         }
         let stamp = info.timestamp();
         if start == 0 {
-            let _ = self
-                .playback
-                .first_sample
-                .set((Instant::now(), output_delay(stamp)));
+            let _ =
+                self.playback
+                    .first_sample
+                    .set((Instant::now(), output_delay(stamp), self.rebuilt));
         }
         if start < self.samples.len() && self.position >= self.samples.len() {
             let latency = output_delay(stamp).unwrap_or_default();
@@ -616,7 +634,11 @@ mod tests {
             let playback = &voice.as_ref().unwrap().playback;
             playback
                 .first_sample
-                .set((Instant::now(), Some(Duration::ZERO)))
+                .set((
+                    Instant::now(),
+                    Some(Duration::ZERO),
+                    voice.as_ref().unwrap().rebuilt,
+                ))
                 .unwrap();
             playback.set(Phase::Drained(Instant::now()));
             Ok(())
@@ -686,10 +708,18 @@ mod tests {
     #[test]
     fn two_cues_share_one_output_and_leave_it_paused() {
         let (engine, output) = fake_engine();
-        let first = engine
-            .play(Cue::Wake, Mic::Open, Instant::now())
-            .unwrap()
-            .unwrap();
+        let called = Instant::now();
+        let first = engine.play(Cue::Wake, Mic::Open, called).unwrap().unwrap();
+        assert_eq!(
+            engine.timing_since(called),
+            Some(first),
+            "a completed cue keeps its first-sample timing"
+        );
+        assert_eq!(
+            engine.timing_since(called + Duration::from_secs(1)),
+            None,
+            "an old cue's timing cannot belong to a new call"
+        );
         let second = engine
             .play(Cue::Accepted, Mic::Muted, Instant::now())
             .unwrap()
@@ -911,7 +941,7 @@ mod tests {
         let epoch_before = gate.state().1;
         let ran = AtomicBool::new(false);
         engine
-            .play_gated(Cue::Wake, |_| {
+            .play_gated(Cue::Wake, Instant::now(), |_| {
                 ran.store(true, Ordering::SeqCst);
                 Ok(())
             })
@@ -924,7 +954,7 @@ mod tests {
     fn stop_ends_the_cue_that_is_playing_and_input_returns() {
         let gate = InputGate::default();
         let engine = CueEngine::new(Cues::default(), gate.clone());
-        let result = engine.play_gated(Cue::Wake, |playback| {
+        let result = engine.play_gated(Cue::Wake, Instant::now(), |playback| {
             engine.stop();
             playback.wait(Duration::from_secs(5))
         });
@@ -934,7 +964,7 @@ mod tests {
 
     #[test]
     fn playback_ends_after_the_last_sample_sounds_not_when_it_is_handed_over() {
-        let playback = Playback::new();
+        let playback = Playback::new(Instant::now());
         playback.set(Phase::Drained(Instant::now() + Duration::from_millis(60)));
         let started = Instant::now();
         assert_eq!(playback.wait(Duration::from_secs(5)), Ok(()));
@@ -943,7 +973,7 @@ mod tests {
 
     #[test]
     fn a_device_that_stops_consuming_audio_is_reported_instead_of_hanging() {
-        let playback = Playback::new();
+        let playback = Playback::new(Instant::now());
         assert_eq!(
             playback.wait(Duration::from_millis(30)),
             Err(CueError::Stalled)
@@ -987,7 +1017,7 @@ mod tests {
             ),
         ];
         for (name, phases, expected) in cases {
-            let playback = Playback::new();
+            let playback = Playback::new(Instant::now());
             for phase in phases {
                 playback.set(phase);
             }
@@ -1002,7 +1032,7 @@ mod tests {
 
     #[test]
     fn an_output_error_while_playing_is_reported() {
-        let playback = Playback::new();
+        let playback = Playback::new(Instant::now());
         let error = cpal::Error::new(ErrorKind::DeviceNotAvailable);
         playback.set(Phase::Failed(error.clone()));
         assert_eq!(

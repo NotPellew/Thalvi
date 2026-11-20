@@ -222,6 +222,10 @@ async fn settings_apply_reports_presses_during_successful_and_failed_rebuilds() 
 
 struct ImmediateCues;
 impl CuePlayer for ImmediateCues {
+    fn timing_since(&self, _: std::time::Instant) -> Option<CueTiming> {
+        None
+    }
+
     async fn play(&self, _: Cue, _: Mic) -> Result<Option<CueTiming>, CueError> {
         Ok(None)
     }
