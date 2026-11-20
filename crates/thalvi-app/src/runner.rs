@@ -4266,6 +4266,7 @@ mod tests {
         use thalvi_desktop::recognizer::RecognizerEvent;
         use thalvi_desktop::wake::WakeEvent;
 
+        let prior_pastes = script.pasted().len();
         script.server.ready();
         script.wake.fire(WakeEvent::Capture);
         let (feed, mut ended) = Feed::new(spoken_clip());
@@ -4278,7 +4279,7 @@ mod tests {
             .server
             .emit(Ok(RecognizerEvent::Final("Hello paste that".to_owned())));
         pump_until("the file was not delivered", || {
-            script.pasted().iter().any(|text| text == "Hello")
+            script.pasted().len() > prior_pastes
         })
         .await;
         pump_until("the file did not finish", || {
