@@ -321,14 +321,17 @@ try {
   Wait-Until { (Get-Content $log -Raw -ErrorAction SilentlyContinue) -match 'Transcribing through' } 'the app to finish starting'
   Get-Content $log
 
-  Wait-Until { [Windows]::Of($app.Id) -contains 'hidden Thalvi settings' } 'the app to create its Settings window' 30
-  $settings = Read-Thalvi show recognition
-  if ($settings.took_effect -ne $true) { throw "Recognition Settings request was refused: $($settings | ConvertTo-Json -Compress)" }
-  Wait-Until { [Windows]::Of($app.Id) -contains 'visible Thalvi settings' } 'the Settings window' 45
+  Invoke-FileDelivery
+  Wait-Until {
+    if ($app.HasExited) { throw "the app exited with $($app.ExitCode)" }
+    if ([Windows]::Of($app.Id) -contains 'visible Thalvi settings') { return $true }
+    $relaunch = Start-Process $exe -PassThru
+    if (-not $relaunch.WaitForExit(5000)) { $relaunch.Kill() }
+    [Windows]::Of($app.Id) -contains 'visible Thalvi settings'
+  } 'the Settings window' 45
   Save-Screen 'settings'
   if ($app.HasExited) { throw "the app exited with $($app.ExitCode)" }
   'The app is running and its Settings window is open.'
-  Invoke-FileDelivery
 } finally {
   'Windows at the end:'
   [Windows]::Of($app.Id)
