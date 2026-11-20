@@ -343,8 +343,10 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/thalvi-formal
-          key: thalvi-formal-${{ runner.os }}-${{ hashFiles('.agents/skills/formal-capture-cancel/scripts/check.py', '.agents/skills/formal-config-save/scripts/check.py', '.agents/skills/formal-hold-keys/scripts/check.py') }}
+          key: thalvi-formal-${{ runner.os }}-${{ hashFiles('.agents/skills/formal-capture-cancel/scripts/check.py', '.agents/skills/formal-config-save/scripts/check.py') }}
       - run: .github/scripts/gates formal
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
   dependencies:
     name: dependencies
