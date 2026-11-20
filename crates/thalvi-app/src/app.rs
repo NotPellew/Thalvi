@@ -154,6 +154,10 @@ pub struct AppState {
     pub updates: Updates,
     /// Set when the engine is about to close for an update, which is not a failure to show.
     restarting: AtomicBool,
+    /// Set by the settings window once it wears its look's styles.
+    pub(crate) settings_ready: AtomicBool,
+    /// Set when Settings was asked for before the window was ready to be shown.
+    pub(crate) settings_wanted: AtomicBool,
 }
 
 /// What starting the app made: the state, whether it is the first start, and what the update
@@ -224,6 +228,8 @@ impl AppState {
             hold_unavailable: held.unavailable,
             updates,
             restarting: AtomicBool::new(false),
+            settings_ready: AtomicBool::new(false),
+            settings_wanted: AtomicBool::new(false),
         };
         Ok(Started {
             state,
@@ -558,6 +564,8 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::get_status,
             commands::get_audio,
             commands::get_settings,
+            commands::get_look_styles,
+            commands::settings_ready,
             commands::save_settings,
             commands::set_listening,
             commands::dismiss_error,
@@ -977,8 +985,20 @@ fn show(app: &AppHandle, status: &Status) {
     state.overlay.show(status, Visibility::of(status, enabled));
 }
 
-/// Opens the settings window; only an explicit user action calls this.
-fn show_settings(app: &AppHandle) {
+/// Opens the settings window; only an explicit user action calls this. A window not yet wearing
+/// its styles waits for them, so the first thing it shows is styled.
+pub(crate) fn show_settings(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    // Ask before checking, so a window finishing its styles at this moment sees the request.
+    state.settings_wanted.store(true, Ordering::SeqCst);
+    if state.settings_ready.load(Ordering::SeqCst)
+        && state.settings_wanted.swap(false, Ordering::SeqCst)
+    {
+        reveal_settings(app);
+    }
+}
+
+fn reveal_settings(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(SETTINGS) {
         let _ = window.show();
         let _ = window.unminimize();
