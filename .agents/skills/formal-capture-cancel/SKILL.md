@@ -17,7 +17,7 @@ after the user cancels or pauses.
 
 The sync commit and its source hashes are recorded in `source.json`. The notes below say why each covered change since the model was written left its actions unchanged.
 
-Covers: crates/thalvi-app/src/runner.rs crates/thalvi-desktop/src/engine.rs crates/thalvi-desktop/src/engine/streaming.rs crates/thalvi-desktop/src/recognizer.rs crates/thalvi-desktop/src/delivery.rs crates/thalvi-desktop/src/realtime.rs crates/thalvi-desktop/src/openai_live.rs crates/thalvi-desktop/src/local.rs '.agents/skills/formal-capture-cancel/**'
+Covers: crates/thalvi-app/src/runner.rs crates/thalvi-desktop/src/engine.rs crates/thalvi-desktop/src/engine/streaming.rs crates/thalvi-desktop/src/engine/final_pass.rs crates/thalvi-desktop/src/recognizer.rs crates/thalvi-desktop/src/delivery.rs crates/thalvi-desktop/src/realtime.rs crates/thalvi-desktop/src/openai_live.rs crates/thalvi-desktop/src/local.rs '.agents/skills/formal-capture-cancel/**'
 They include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
@@ -125,6 +125,16 @@ recovery queued during the capture clears it; that notice is shown only after se
 delivery path. `drive`, `Runner::capture` and `Settling::settle` are unchanged, so the model actions
 are unchanged.
 
+A selected final pass (#586) keeps streaming extras off. At acceptance it starts one finished-audio
+task while the live recognizer closes. Its reply can only supply text through
+`Engine::wait_final_pass`, which polls cancellation before both the reply and the deadline. A
+cancel during live release aborts the task there. A late answer may reach opt-in text recording
+but it cannot re-enter the capture. `FinalReturns` abstracts a reply, fallback or observed cancel;
+a skipped request does not need to await it. For submit, optional cleanup and the confirmation
+of the settled text follow the final pass, with separate cancellation-first awaits
+(`FinalCleanupReturns`, `ConfirmReturns`). An accepted result still crosses `FinishEmpty`.
+The model checks delivery admission. It does not check correctness of recognition or a reply's time.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
@@ -160,6 +170,7 @@ Matching hashes establish synchronization only, not correctness of the model.
 | `crates/thalvi-desktop/src/engine.rs`: `EngineHandle::cancel`, `Engine::capture` | `cancelPending` represents the watch version change; capture entry consumes the old version. `Accept` and `ActiveCancelled` abstract capture work before the ending. |
 | Same file: `Engine::conclude`, `Engine::end_cue`, `Engine::end_with` | `CueReturns`, `CloseReturns`; an accepted cue runs independently and changes feedback state only. Recognizer release polls cancellation first and advances without waiting for the cue. Non-accepted endings still join cue and release and never admit delivery. |
 | Same file: `Engine::start`, `download_started`; `recognizer.rs`: `Recognizer::loading`; `local.rs`: `LocalRecognizer::connect`, `loading` | `starting`, `Loaded`, `LoadFailed`; the wait for an on-device model is unbounded and polls cancellation first. `Accept` is enabled only after `Loaded`. A download or load failure is `LoadFailed`, a failed capture that delivers nothing. Frames read during that wait, including after a hold is released, are not a delivery or cancellation step. |
+| `engine/final_pass.rs`: `Engine::start_final_pass`, `Engine::wait_final_pass`, `Request::cancel`; `engine.rs`: `Engine::confirm_final_submit` | `finalMode`, `finalPass`, `finalCleanup`, `confirm`. A selected final pass excludes merging and starting the streaming extras. The final task can overlap live release; its response is consumed only through `FinalReturns`. `FinalCleanupReturns` and `ConfirmReturns` settle the resulting text before any submit admission. Late recording reaches no delivery. |
 | Same file: `Engine::merge`, `Engine::ask_merge`, `Engine::write`, `Engine::clean`, `Engine::prepare_submit`, `bounded` | `secondary` (the merge of the extras' texts), `writing`, `cleaning`, `Prepare`, `SecondaryReturns`, `WritingReturns`, `CleanupReturns`; disabled stages are skipped, awaiting stages poll cancellation first; repeated waits stutter in this abstraction. A synchronous skipped merge returns without another poll; the runner's final drain still guards delivery. Cleanup runs only for a paste or submit with the switch on, and never after an explicit write (`~writing \/ ~cleaning`). A submit's cleanup is `Prepare` before `Accept`, so its confirmation shows the text that will be sent; a paste's is after the ending, and one stage stands for both. A cancel during it returns a cancelled outcome, so nothing is pasted. |
 | `crates/thalvi-desktop/src/engine/streaming.rs`: `Streams::start`, `Streams::finish`, `Streams::cancel`, `send_frame`, `hear`, `park`, `run`; `engine.rs`: `Engine::drop_streams` | `extras`, `extra`, `merged`: `PreEmpty` opens the extra sessions, `Accept` (merge will not run), `ActiveCancelled`, `CloseReturns` (ending cancelled) and `SecondaryReturns` (cancel) request their cancellation, an uncancelled `SecondaryReturns` leaves them `late`. The model tracks ownership and notification only; the task awaits `RecognizerSession::cancel` or `close` separately. |
 | `crates/thalvi-desktop/src/recognizer.rs`: `RecognizerSession`; `crates/thalvi-desktop/src/realtime.rs`: `RealtimeSession::close`; `crates/thalvi-desktop/src/openai_live.rs`: `OpenAiSession::cancel`, `OpenAiSession::close` | `CloseReturns` may occur before or after the independent accepted cue. Network close is awaited under a timeout, so it can remain Pending; `OpenAiSession::close` aborts its upload task and returns at once. |

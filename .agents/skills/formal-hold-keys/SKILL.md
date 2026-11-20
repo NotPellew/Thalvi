@@ -75,6 +75,10 @@ keep their bodies unchanged. No hold observation, handoff, key event or bound ch
 `hold.rs` and its recorded hash are unchanged. The harness and its mutations still describe
 these callers; no model update is needed.
 
+For the final-pass deadline (#586), `Cutoff` keeps the time alongside the event's existing frame
+order. Both are set by the same first release. The press events, ownership, observation order and
+bounds in the harness are unchanged. The capture engine tests the deadline on its paused clock.
+
 | Code | In the harness |
 | --- | --- |
 | `hold.rs`: `HoldInput::set`, `HoldInput::set_write`, `HoldInput::change`, `KeyState`, `KeyPhase`, `OVERTAKEN_PRESS` | Called for each arriving key event, in arrival order. Every scenario runs within microseconds, so every early release is inside the 1 s window: the worst case for overtake credit. |
