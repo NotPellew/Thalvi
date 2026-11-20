@@ -1337,6 +1337,21 @@ describe("the Recognition page", () => {
     expect(stub.applied()).toHaveLength(1);
   });
 
+  it("clears a saved key on Save, keeping focus in the key field once Clear saved key hides", async () => {
+    const stub = await openSeveral();
+    edit("Cybrex2");
+    await settle();
+    const clear = within(editorEl(), "Clear saved key");
+    clear.focus();
+    clear.click();
+    await settle();
+    expect(clear.hidden).toBe(true);
+    expect(document.activeElement).toBe(control("API key", "input"));
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+    await saveServer();
+    expect(sent(stub).stt.entries.find((entry) => entry.id === CYBREX.id)).toMatchObject({ api_key: "" });
+  });
+
   it.each([
     ["a saved key", "Cybrex2", true],
     ["no key", "Meta", false],
@@ -2260,9 +2275,13 @@ describe("writing", () => {
     type(control("Writing model", "input"), "updated");
     await settle();
     expect(sent(stub).writing).toEqual({ ...writing, model: "updated" });
-    button("Clear saved writing key").click();
+    const clear = button("Clear saved writing key");
+    clear.focus();
+    clear.click();
     await settle();
     expect(stub.applied()[1]?.writing).toEqual({ ...writing, model: "updated", api_key: "" });
+    expect(clear.hidden).toBe(true);
+    expect(document.activeElement).toBe(control("Writing API key", "input"));
   });
 
   describe("prompt", () => {

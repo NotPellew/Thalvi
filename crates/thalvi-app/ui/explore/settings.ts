@@ -406,6 +406,16 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
       { kind: "click", name: "Go to the endpoint setting" },
     ],
   },
+  {
+    issue: 579,
+    title: "Clear saved key in a speech server's form",
+    pinned: true,
+    steps: [
+      { kind: "click", name: "Recognition" },
+      { kind: "click", name: "Edit LLM Gateway" },
+      { kind: "click", name: "Clear saved key" },
+    ],
+  },
 ];
 
 function replayLine(seed: number, path: string | undefined): string {

@@ -1616,6 +1616,7 @@ function speech(context: PageContext): SpeechRows {
         clearKey = true;
         clear.hidden = true;
         cleared.hidden = false;
+        field.field.focus();
       }, "quiet");
       clear.hidden = !saved;
       return sized(row("API key", "Saved in the config. Never shown again.", {
@@ -1831,7 +1832,9 @@ function speech(context: PageContext): SpeechRows {
     say(clearProblem, "");
     applyWriting(true).then(() => {
       input.placeholder = "Cleared";
+      const hadFocus = document.activeElement === clearWritingKey;
       clearWritingKey.hidden = true;
+      if (hadFocus) input.focus();
     }, (error: unknown) => {
       say(clearProblem, errorText(error));
     });
