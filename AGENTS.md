@@ -177,19 +177,21 @@ It does not replace the required cargo-deny check.
 - **After pushing:** PR CI runs the affected tier, and the heavy run on `main` runs every gate.
 
 On a PR, CI runs only the steps its changed paths affect
-(`.github/scripts/changed`); the job names stay, so required checks still
+(`.github/scripts/changed`). The job names stay so required checks still
 report. `.github/workflows/heavy.yml` runs every gate on each push to `main`,
-nightly and on request, plus mutation testing, which advises rather than gates:
-`cargo mutants --in-place --in-diff <diff>` over the Rust changed since the
-`verified` tag (cargo-mutants 27.1.0, `.cargo/mutants.toml`). Survivors are
-listed in the run summary: add the missing test, or judge the mutant equivalent
-and record that in `.cargo/mutants.toml` with a one-line reason. A shard that
-couldn't test (failing baseline, time limit) or had a mutant time out fails the
-run. A green full run
-moves `verified`; a failed one opens or updates the `ci-regression` issue.
-Run it locally only when the issue explicitly asks for mutation testing, and then
-only `--in-diff` against the base, with no desktop session and a throwaway `HOME`,
-since it runs tests against deliberately broken code.
+nightly and on request, along with randomized Settings exploration, the
+GNOME AppImage check and mutation testing.
+Mutation testing runs `cargo mutants --in-place --in-diff <diff>`
+(cargo-mutants 27.1.0) over changes since `verified` in the files listed
+under `examine_globs` in `.cargo/mutants.toml`. Survivors, timeouts and
+baseline failures fail the shard. For survivors listed in the step summary,
+add a missing test or record a proven equivalent or OS-only wiring exclusion
+with a one-line reason. A full Heavy run on `main` moves `verified` only
+when `ci`, `mutants`, `explore` and `gnome-appimage` all succeed. A failed
+full run on `main` opens or updates the `ci-regression` issue.
+Run mutation testing locally only when an issue explicitly asks for it,
+and only `--in-diff` against the base with no desktop session and a
+throwaway `HOME`, since it runs tests against deliberately broken code.
 
 ## Git and PRs
 

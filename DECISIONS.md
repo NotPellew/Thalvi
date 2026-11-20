@@ -224,10 +224,10 @@ areas your change touches. Editing rules are in
 - **Windows packaging stays inside the Windows check.** NSIS packaging stays a step of `desktop-windows`, and installed-app smoke stays after that job (15 Nov 2026).
   Why: on 23 full cached runs the package step was a median 134 s (82–158), which clears #395's 2 minutes of wall time, but a second Windows job adds the setup the first job no longer pays, a median 92 s (73–106), over the 1 runner-minute cap on every run.
   Rejected: a parallel package job. Moving the step off the checks job does not make that step free; the net added runner time is the duplicated setup.
-- **Mutation testing advises on the diff.** cargo-mutants reports survivors in the Rust changed since the last
-  verified commit, in the heavy tier, on Linux; locally it runs only when an issue asks, `--in-diff` against the base (13 Nov 2026).
-  Why: it found real gaps but can't tell them from equivalent mutants, and 250 local runs wrote 577 GiB in 4.5 hours.
-  Rejected: a required gate, whole-workspace runs (3,197 mutants, about 18 hours on a CI runner), Windows runs, local runs by default.
+- **Mutation testing gates six high-risk desktop modules.** Heavy CI checks changes since `verified` in the files
+  under `examine_globs` and fails on survivors (20 Nov 2026, #601).
+  Why: a curated scope keeps the gate focused on desktop state, capture, delivery and settings.
+  Rejected: advisory workspace-wide sweeps, Windows runs, local runs by default.
 - **Property tests only where event order is the rule.** The hold hook and runner controls across captures,
   and the Settings window (`crates/thalvi-app/ui/explore`, fast-check over clicks, keys and waits).
   Why: random controls explore capture, cancellation, settings and shutdown orders beyond the bounded models,
