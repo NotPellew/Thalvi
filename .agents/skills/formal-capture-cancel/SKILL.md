@@ -15,8 +15,8 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `c099dd7cfd344b816c2d7e46be76e3fb5fd3affb`. The source hashes describe this commit.
-The previous sync was `d85fadb`, the default-device repair on this branch.
+Sync commit: `9b0d28b2fa35e35007a9cc5dac5bf9d7656fb624`. The source hashes describe this commit.
+The previous sync was `c099dd7`, the initial trigger repair on this branch.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
@@ -120,6 +120,12 @@ this single-capture model. It adds no cancellation or delivery boundary to
 the mapped capture, so the actions and bounds remain unchanged. Cue-player
 construction also warms the paused output in a blocking task; it neither
 reads capture controls nor admits delivery.
+
+Interrupted cues retain their first-sample timing for feedback metrics. Reading
+that timing neither awaits nor changes capture state. The playback future is
+still dropped before input is restored, inside the same ending-cue task; no
+model action, delivery guard or bound changes. The replay's immediate player
+returns no timing because it produces no audio.
 
 The five checked invariants have these exact meanings:
 
