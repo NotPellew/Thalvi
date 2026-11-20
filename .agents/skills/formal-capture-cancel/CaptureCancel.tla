@@ -60,6 +60,8 @@ DrainOne == /\ phase \in {"pre", "finish"} /\ Len(queue) > 0
                            cueDone, cueAccepted, closeDone, secondary, writing, cleaning, result, delivered,
                            extraVars>>
 
+\* Engine::listen cuts and drains the previous capture's cue before this flow starts.
+\* Its watch version is consumed at capture entry; this model covers only the new capture.
 \* No control branch precedes the capture's first poll (biased select). Engine::capture starts
 \* the streaming extras' tasks when it is first polled, so a capture that never starts has none.
 PreEmpty == /\ phase = "pre" /\ queue = <<>>

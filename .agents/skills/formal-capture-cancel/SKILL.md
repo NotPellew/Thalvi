@@ -15,8 +15,8 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `62459a0b49dd84374a0a1e0be971135a9de41832`. The source hashes describe this commit.
-The previous sync was `c7e6524ccdc225b4cf8f099ab6a5e2f2da2bc999` on main.
+Sync commit: `c099dd7cfd344b816c2d7e46be76e3fb5fd3affb`. The source hashes describe this commit.
+The previous sync was `d85fadb`, the default-device repair on this branch.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
@@ -109,8 +109,17 @@ feedback state; `CloseReturns` advances without waiting for it, cancelling the o
 when a stop was observed before release. The runner's final drain still fences delivery.
 A stop after admission may cut the cue short but cannot retract a paste. Cancelled and
 error endings retain their joined cue/release path, abstracted as non-accepted outcomes.
-The hashes include the accepted-cue change at `59d6547`; the CPU replay runs its
+The hashes include the accepted-cue change at `c7905d8`; the CPU replay runs its
 capture within a `LocalSet`, as the desktop runner does.
+
+Before returning the next trigger, `Engine::listen` signals cancellation of the
+previous ending cue and drains its task. The next `Engine::capture` consumes
+that watch version at entry, as before; a hold resumes input after the old
+cue has stopped. This await belongs to listening between captures, outside
+this single-capture model. It adds no cancellation or delivery boundary to
+the mapped capture, so the actions and bounds remain unchanged. Cue-player
+construction also warms the paused output in a blocking task; it neither
+reads capture controls nor admits delivery.
 
 The five checked invariants have these exact meanings:
 
