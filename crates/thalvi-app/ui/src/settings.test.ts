@@ -1223,6 +1223,21 @@ describe("the Recognition page", () => {
     expect(where(text)).toBe(expected);
   });
 
+  const liveChoice = async () => { use("Cybrex2"); await settle(); };
+  it.each([
+    ["a Live choice", "an Extra switch", liveChoice, async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
+    ["a Live choice", "a removal", liveChoice, async () => { edit("Meta"); within(editorEl(), "Remove").click(); await settle(); }, () => listOf("extra").parentElement],
+    ["a Live choice", "a saved edit", liveChoice, async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, () => entryNamed("Cybrex2")],
+    ["an Extra switch", "another Extra switch", async () => { flip(tickOf("On this computer")); await settle(); }, async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
+  ] as const)("after %s, shows only the Applied. of %s", async (_first, _then, before, act, owner) => {
+    await openSeveral();
+    await before();
+    await act();
+    const shown = Array.from(recognition().querySelectorAll<HTMLElement>(".applied")).filter((node) => node.textContent === APPLIED_TEXT);
+    expect(shown).toHaveLength(1);
+    expect(owner()?.contains(shown[0] ?? null)).toBe(true);
+  });
+
   it.each([
     ["realtime", "Meta realtime ASR", ["Name", "Address", "API key", "Model"]],
     ["open_ai", "OpenAI transcriptions", ["Name", "Address", "API key", "Model", "Request", "Language"]],
