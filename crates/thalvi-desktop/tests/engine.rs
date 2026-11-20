@@ -7724,7 +7724,9 @@ async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
 async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, mut engine, mut frames) = Rig::new("{}");
+            let dir = record_dir("consecutive-holds");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, mut engine, mut frames) = Rig::recording("{}", recorder);
             rig.cues.mutes(&rig.gate);
             rig.cues.set_length(Cue::Accepted, ms(10_000));
             let (delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
@@ -7782,6 +7784,13 @@ async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
                 accepted(CaptureRoute::Paste, "second words")
             );
             let engine = finished(task).await;
+            let rows = read_lines(&dir.join("metrics.jsonl"));
+            assert!(
+                rows.iter().any(|row| row["event"] == "desktop_end_cue"
+                    && row["cue"] == "accepted"
+                    && row["outcome"] == "cancelled"),
+                "cutting the old cue keeps its cancellation metric"
+            );
             rig.handle.cancel();
             settle().await;
             engine.finish().await;
