@@ -327,6 +327,7 @@ impl View {
                     | Status::Pending { .. }
                     | Status::Writing { .. }
                     | Status::CleaningUp { .. }
+                    | Status::FinalPass { .. }
                     | Status::Thinking { .. }
                     | Status::StartingChat { .. }
                     | Status::Working {

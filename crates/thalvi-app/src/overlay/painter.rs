@@ -359,18 +359,26 @@ mod tests {
 
     #[test]
     fn the_cancel_button_shows_only_on_a_capture_the_desktop_lets_be_clicked() {
-        for (look, dark) in LOOKS {
-            let mut painter = Painter::new(1.0, look, dark).unwrap();
-            let with = painter.draw(&view(&capturing(), true), 0.0).bgra.clone();
-            let without = painter.draw(&view(&capturing(), false), 0.0).bgra.clone();
-            let differing = with
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(without.as_chunks::<4>().0)
-                .filter(|(a, b)| a != b)
-                .count();
-            assert!(differing > 40, "{look:?} dark {dark}: {differing}");
+        for status in [
+            capturing(),
+            Status::FinalPass {
+                target: None,
+                route: CaptureRoute::Paste,
+            },
+        ] {
+            for (look, dark) in LOOKS {
+                let mut painter = Painter::new(1.0, look, dark).unwrap();
+                let with = painter.draw(&view(&status, true), 0.0).bgra.clone();
+                let without = painter.draw(&view(&status, false), 0.0).bgra.clone();
+                let differing = with
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(without.as_chunks::<4>().0)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert!(differing > 40, "{look:?} dark {dark}: {differing}");
+            }
         }
     }
 
