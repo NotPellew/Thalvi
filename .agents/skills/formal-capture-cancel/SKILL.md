@@ -15,8 +15,8 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `50f02168f697ede85f3a79fdb0b1d431bd444a31`. The source hashes describe this commit.
-The previous sync was `b22e38a`, the initial trigger repair on this branch.
+Sync commit: `00b802dbffcf22181cb4dbec5b588888e9e8a66b`. The source hashes describe this commit.
+The previous sync was `3df0c21`, the initial trigger repair on this branch.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
@@ -109,7 +109,7 @@ feedback state; `CloseReturns` advances without waiting for it, cancelling the o
 when a stop was observed before release. The runner's final drain still fences delivery.
 A stop after admission may cut the cue short but cannot retract a paste. Cancelled and
 error endings retain their joined cue/release path, abstracted as non-accepted outcomes.
-The hashes include the accepted-cue change at `c7905d8`; the CPU replay runs its
+The hashes include the accepted-cue change at `932e1ce`; the CPU replay runs its
 capture within a `LocalSet`, as the desktop runner does.
 
 Before returning the next trigger, `Engine::listen` signals cancellation of the
