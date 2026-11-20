@@ -12,10 +12,11 @@ stateDiagram-v2
   state "showing the settled submit text" as s11
   state "text goes out" as s12
   state "waiting for the final recognizer" as s13
+  state "waiting for the full Submit preview" as s14
   [*] --> s9
   s1 --> settling: cleanup returns
   s1 --> s10: cleanup returns
-  s1 --> s11: cleanup returns
+  s1 --> s14: cleanup returns
   s2 --> listening: cleanup returns
   s2 --> s10: cleanup returns
   s3 --> s4: recognizer released
@@ -48,4 +49,7 @@ stateDiagram-v2
   s13 --> s4: final pass settles
   s13 --> settling: final pass settles
   s13 --> s10: final pass settles
-  s13 --> s11: final pass settles
+  s13 --> s14: final pass settles
+  s14 --> settling: preview is shown or unavailable
+  s14 --> s10: preview is shown or unavailable
+  s14 --> s11: preview is shown or unavailable
