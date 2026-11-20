@@ -476,8 +476,8 @@ pub struct Engine<R, W, C> {
     spotter_off: Option<String>,
     state: watch::Sender<EngineState>,
     level: watch::Sender<f32>,
-    /// Keeps the cancel channel open so waiting on it never ends.
-    _cancel_tx: Arc<watch::Sender<u64>>,
+    /// Cancels the previous ending cue before the next capture consumes this version.
+    cancel_tx: Arc<watch::Sender<u64>>,
     cancel: watch::Receiver<u64>,
     level_frames: u64,
     level_activity: bool,
@@ -1113,7 +1113,7 @@ where
             spotter_off: parts.spotter_off,
             state,
             level,
-            _cancel_tx: cancel_tx,
+            cancel_tx,
             cancel,
             level_frames: 0,
             level_activity: false,
@@ -1246,7 +1246,8 @@ where
         let mut latency = Latency::default();
         let heard = self.scan(frames, &mut misses, &mut latency).await;
         if heard.is_ok() && !self.ending_cues.is_empty() {
-            self.ending_cues.abort_all();
+            self.cancel_tx
+                .send_modify(|count| *count = count.wrapping_add(1));
             while self.ending_cues.join_next().await.is_some() {}
             if matches!(heard, Ok(WakeTrigger::Hold)) && !self.gate.is_enabled() {
                 self.gate.set_enabled(true);
