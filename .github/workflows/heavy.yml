@@ -76,7 +76,10 @@ jobs:
   mutants:
     name: mutants (${{ matrix.shard }})
     needs: start
-    if: needs.start.outputs.superseded == 'false' && (inputs.scope || 'all') != 'desktop-ui'
+    if: >-
+      needs.start.outputs.superseded == 'false' &&
+      (inputs.scope || 'all') != 'desktop-ui' &&
+      !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/gnome-appimage')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
