@@ -127,6 +127,10 @@ jobs:
           cache: npm
           cache-dependency-path: crates/thalvi-app/ui/package-lock.json
       - if: needs.changes.outputs.server != 'false'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+      - if: needs.changes.outputs.server != 'false'
         run: .github/scripts/gates server
         env:
           TESTS: ${{ needs.changes.outputs.tests }}

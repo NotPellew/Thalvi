@@ -1,0 +1,464 @@
+#!/usr/bin/env python3
+"""Counts #[expect] and #![expect] in crates/ against the lint exception budget.
+
+Each lint named in an attribute counts once, including an expect nested inside
+cfg_attr at any depth and a raw r#expect or r#cfg_attr. Attributes may span lines
+and name several lints. Matches inside comments and string literals do not count.
+A lint over its budget fails the run and names every file:line. A lint under its
+budget fails until the budget is lowered to the count, so a count only goes down.
+A lint that is not listed has a budget of 0.
+"""
+
+import sys
+import tomllib
+from pathlib import Path
+
+BUDGET = ".github/scripts/lint-exceptions.toml"
+# Rust whitespace follows Unicode Pattern_White_Space.
+RUST_WHITESPACE = " \t\n\r\x0b\x0c\u0085\u200e\u200f\u2028\u2029"
+
+FIX = (
+    "Fix the root cause so the lint passes. If the exception is truly\n"
+    f"needed, raise the budget in {BUDGET}."
+)
+
+
+def line_of(text: str, index: int) -> int:
+    return text.count("\n", 0, index) + 1
+
+
+def is_ident_start(char: str) -> bool:
+    return char == "_" or char.isascii() and char.isalpha()
+
+
+def is_ident_continue(char: str) -> bool:
+    return char == "_" or char.isascii() and char.isalnum()
+
+
+def skip_block_comment(text: str, index: int) -> int:
+    depth = 1
+    index += 2
+    while index < len(text) and depth:
+        if text.startswith("/*", index):
+            depth += 1
+            index += 2
+        elif text.startswith("*/", index):
+            depth -= 1
+            index += 2
+        else:
+            index += 1
+    return index
+
+
+def skip_one_comment(text: str, index: int) -> int:
+    if text.startswith("//", index):
+        newline = text.find("\n", index)
+        return len(text) if newline < 0 else newline + 1
+    if text.startswith("/*", index):
+        return skip_block_comment(text, index)
+    return index
+
+
+def skip_trivia(text: str, index: int) -> int:
+    while index < len(text):
+        if text[index] in RUST_WHITESPACE:
+            index += 1
+            continue
+        if text.startswith(("//", "/*"), index):
+            index = skip_one_comment(text, index)
+            continue
+        break
+    return index
+
+
+def skip_cooked_string(text: str, index: int) -> int:
+    """index is the opening quote. A cooked string ends at the next unescaped quote."""
+    index += 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == '"':
+            return index + 1
+        index += 1
+    return index
+
+
+def skip_char_literal(text: str, index: int) -> int:
+    index += 1
+    if index < len(text) and text[index] == "\\":
+        index += 1
+        if index < len(text) and text[index] == "u":
+            index += 1
+            if index < len(text) and text[index] == "{":
+                end = text.find("}", index)
+                index = len(text) if end < 0 else end + 1
+        elif index < len(text) and text[index] == "x":
+            index += 3
+        elif index < len(text):
+            index += 1
+    if index < len(text) and text[index] == "'":
+        index += 1
+    return index
+
+
+def skip_char_or_lifetime(text: str, index: int) -> int:
+    if index + 1 >= len(text):
+        return index + 1
+    if text[index + 1] == "\\":
+        return skip_char_literal(text, index)
+    if index + 2 < len(text) and text[index + 2] == "'":
+        return index + 3
+    return index + 1
+
+
+def try_raw_string(text: str, index: int) -> int | None:
+    if index >= len(text) or text[index] != "r":
+        return None
+    cursor = index + 1
+    hashes = 0
+    while cursor < len(text) and text[cursor] == "#":
+        hashes += 1
+        cursor += 1
+    if cursor >= len(text) or text[cursor] != '"':
+        return None
+    cursor += 1
+    closer = '"' + ("#" * hashes)
+    end = text.find(closer, cursor)
+    if end < 0:
+        return len(text)
+    return end + len(closer)
+
+
+def try_skip_literal(text: str, index: int) -> int | None:
+    if text.startswith(("br", "cr"), index):
+        end = try_raw_string(text, index + 1)
+        if end is not None:
+            return end
+    if text[index] == "r":
+        return try_raw_string(text, index)
+    if index + 1 < len(text) and text[index] in "bc" and text[index + 1] == '"':
+        return skip_cooked_string(text, index + 1)
+    if index + 1 < len(text) and text[index] == "b" and text[index + 1] == "'":
+        return skip_char_or_lifetime(text, index + 1)
+    if text[index] == '"':
+        return skip_cooked_string(text, index)
+    if text[index] == "'":
+        return skip_char_or_lifetime(text, index)
+    return None
+
+
+def try_raw_ident(text: str, index: int) -> int | None:
+    if not text.startswith("r#", index):
+        return None
+    cursor = index + 2
+    if cursor >= len(text) or not is_ident_start(text[cursor]):
+        return None
+    cursor += 1
+    while cursor < len(text) and is_ident_continue(text[cursor]):
+        cursor += 1
+    return cursor
+
+
+def read_ident(text: str, index: int) -> tuple[str, int]:
+    cursor = index + 1
+    while cursor < len(text) and is_ident_continue(text[cursor]):
+        cursor += 1
+    return text[index:cursor], cursor
+
+
+def read_name(text: str, index: int) -> tuple[str, int] | None:
+    """An identifier, or a raw identifier with the `r#` prefix removed."""
+    if text.startswith("r#", index):
+        cursor = index + 2
+        if cursor < len(text) and is_ident_start(text[cursor]):
+            return read_ident(text, cursor)
+        return None
+    if index < len(text) and is_ident_start(text[index]):
+        return read_ident(text, index)
+    return None
+
+
+def read_simple_name(text: str, index: int) -> tuple[str | None, int]:
+    """A single identifier. A path (`foo::bar`) returns `(None, index after it)`."""
+    read = read_name(text, index)
+    if read is None:
+        return None, index
+    name, index = read
+    cursor = skip_trivia(text, index)
+    if not text.startswith("::", cursor):
+        return name, index
+    while text.startswith("::", cursor):
+        cursor = skip_trivia(text, cursor + 2)
+        segment = read_name(text, cursor)
+        if segment is None:
+            break
+        _, cursor = segment
+        cursor = skip_trivia(text, cursor)
+    return None, cursor
+
+
+def read_path(text: str, index: int) -> tuple[str, int, int]:
+    line = line_of(text, index)
+    read = read_name(text, index)
+    if read is None:
+        return "", index, line
+    name, index = read
+    while True:
+        cursor = skip_trivia(text, index)
+        if not text.startswith("::", cursor):
+            return name, index, line
+        cursor = skip_trivia(text, cursor + 2)
+        segment = read_name(text, cursor)
+        if segment is None:
+            return name, index, line
+        part, index = segment
+        name = f"{name}::{part}"
+
+
+def skip_group(text: str, index: int) -> int:
+    closing = {"(": ")", "[": "]", "{": "}"}
+    stack = [closing[text[index]]]
+    index += 1
+    while index < len(text) and stack:
+        if text.startswith(("//", "/*"), index):
+            index = skip_one_comment(text, index)
+            continue
+        literal = try_skip_literal(text, index)
+        if literal is not None and literal > index:
+            index = literal
+            continue
+        if text[index] in closing:
+            stack.append(closing[text[index]])
+        elif text[index] == stack[-1]:
+            stack.pop()
+        index += 1
+    return index
+
+
+def skip_value(text: str, index: int) -> int:
+    index = skip_trivia(text, index)
+    if index >= len(text):
+        return index
+    literal = try_skip_literal(text, index)
+    if literal is not None and literal > index:
+        return literal
+    if text[index] in "([{":
+        return skip_group(text, index)
+    if is_ident_start(text[index]):
+        _, index = read_ident(text, index)
+        return index
+    if text[index] in "+-" or text[index].isdigit():
+        index += 1
+        while index < len(text) and (text[index].isdigit() or text[index] in "._"):
+            index += 1
+    return index
+
+
+def lints_of_expect(text: str, open_paren: int) -> tuple[list[tuple[str, int]], int]:
+    found = []
+    index = open_paren + 1
+    depth = 1
+    while index < len(text) and depth:
+        index = skip_trivia(text, index)
+        if index >= len(text):
+            break
+        if text[index] == "(":
+            depth += 1
+            index += 1
+            continue
+        if text[index] == ")":
+            depth -= 1
+            index += 1
+            continue
+        literal = try_skip_literal(text, index)
+        if literal is not None and literal > index:
+            index = literal
+            continue
+        if depth == 1 and is_ident_start(text[index]):
+            if read_name(text, index) is None:
+                index += 1
+                continue
+            name, index, line = read_path(text, index)
+            if not name:
+                index += 1
+                continue
+            cursor = skip_trivia(text, index)
+            if cursor < len(text) and text[cursor] == "=":
+                index = skip_value(text, cursor + 1)
+                continue
+            if cursor < len(text) and text[cursor] == "(":
+                index = skip_group(text, cursor)
+                continue
+            found.append((name, line))
+            continue
+        index += 1
+    return found, index
+
+
+def consume_attribute_rest(text: str, index: int) -> int:
+    depth = 1
+    while index < len(text) and depth:
+        if text.startswith(("//", "/*"), index):
+            index = skip_one_comment(text, index)
+            continue
+        literal = try_skip_literal(text, index)
+        if literal is not None and literal > index:
+            index = literal
+            continue
+        if text[index] == "[":
+            depth += 1
+        elif text[index] == "]":
+            depth -= 1
+        index += 1
+    return index
+
+
+def skip_one_meta(text: str, index: int) -> int:
+    start = index
+    index = skip_trivia(text, index)
+    if index >= len(text):
+        return index
+    _name, after = read_simple_name(text, index)
+    if after == index:
+        return index + 1
+    index = skip_trivia(text, after)
+    if index < len(text) and text[index] == "(":
+        index = skip_group(text, index)
+    elif index < len(text) and text[index] == "=":
+        index = skip_value(text, index + 1)
+    return index if index > start else start + 1
+
+
+def parse_meta_attribute(text: str, index: int) -> tuple[list[tuple[str, int]], int]:
+    start = skip_trivia(text, index)
+    name, after = read_simple_name(text, start)
+    if name is None and after == start:
+        return [], start
+    cursor = skip_trivia(text, after)
+    if cursor < len(text) and text[cursor] == "(":
+        if name == "expect":
+            return lints_of_expect(text, cursor)
+        if name == "cfg_attr":
+            return expects_after_cfg_condition(text, cursor)
+        return [], skip_group(text, cursor)
+    if cursor < len(text) and text[cursor] == "=":
+        return [], skip_value(text, cursor + 1)
+    return [], cursor
+
+
+def expects_after_cfg_condition(text: str, open_paren: int) -> tuple[list[tuple[str, int]], int]:
+    # The first argument is the cfg condition, not an attribute.
+    found: list[tuple[str, int]] = []
+    index = skip_one_meta(text, open_paren + 1)
+    while index < len(text):
+        index = skip_trivia(text, index)
+        if index >= len(text):
+            return found, index
+        if text[index] == ")":
+            return found, index + 1
+        if text[index] != ",":
+            index += 1
+            continue
+        index = skip_trivia(text, index + 1)
+        if index >= len(text):
+            return found, index
+        if text[index] == ")":
+            return found, index + 1
+        item, next_index = parse_meta_attribute(text, index)
+        found.extend(item)
+        index = next_index if next_index > index else index + 1
+    return found, index
+
+
+def parse_attribute(text: str, index: int) -> tuple[list[tuple[str, int]], int]:
+    cursor = skip_trivia(text, index + 1)
+    if cursor < len(text) and text[cursor] == "!":
+        cursor = skip_trivia(text, cursor + 1)
+    if cursor >= len(text) or text[cursor] != "[":
+        return [], index + 1
+    found, cursor = parse_meta_attribute(text, cursor + 1)
+    return found, consume_attribute_rest(text, cursor)
+
+
+def expect_lints(text: str) -> list[tuple[str, int]]:
+    found = []
+    index = 0
+    while index < len(text):
+        if text.startswith(("//", "/*"), index):
+            index = skip_one_comment(text, index)
+            continue
+        literal = try_skip_literal(text, index)
+        if literal is not None and literal > index:
+            index = literal
+            continue
+        ident = try_raw_ident(text, index)
+        if ident is not None:
+            index = ident
+            continue
+        if text[index] == "#":
+            attribute, index = parse_attribute(text, index)
+            found.extend(attribute)
+            continue
+        index += 1
+    return found
+
+
+def scan_tree(root: Path) -> dict[str, list[tuple[str, int]]]:
+    sites: dict[str, list[tuple[str, int]]] = {}
+    crates = root / "crates"
+    if not crates.is_dir():
+        return sites
+    for path in sorted(crates.rglob("*.rs")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        for lint, line in expect_lints(path.read_text(encoding="utf-8")):
+            sites.setdefault(lint, []).append((relative, line))
+    return sites
+
+
+def load_budget(path: Path) -> dict[str, int]:
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        sys.exit(f"lint-exceptions: {BUDGET} is missing")
+    except tomllib.TOMLDecodeError as error:
+        sys.exit(f"lint-exceptions: {BUDGET} is not valid TOML ({error})")
+    budget = {}
+    for key, value in data.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            sys.exit(f"lint-exceptions: {key} in {BUDGET} must be a non-negative integer")
+        budget[key] = value
+    return budget
+
+
+def render(sites: dict[str, list[tuple[str, int]]], budget: dict[str, int]) -> str:
+    blocks = []
+    unders = []
+    for lint in sorted(set(budget) | set(sites)):
+        found = sites.get(lint, [])
+        allowed = budget.get(lint, 0)
+        if len(found) > allowed:
+            rows = [f"lint exceptions: {lint} has {len(found)}, budget is {allowed}"]
+            rows.extend(f"  {path}:{line}" for path, line in sorted(found))
+            rows.append(FIX)
+            blocks.append("\n".join(rows))
+        elif len(found) < allowed:
+            unders.append(f"lower the budget for {lint} to {len(found)} in {BUDGET}")
+    return "\n".join([*blocks, *unders])
+
+
+def main() -> int:
+    if len(sys.argv) > 1:
+        sys.exit("lint-exceptions: no arguments; run it from the repository root")
+    root = Path.cwd()
+    text = render(scan_tree(root), load_budget(root / BUDGET))
+    if text:
+        print(text)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
