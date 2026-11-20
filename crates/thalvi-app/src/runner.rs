@@ -815,6 +815,8 @@ enum Flow {
 enum Woke {
     Trigger(Result<WakeTrigger, thalvi_desktop::engine::ListenError>),
     Control(Option<Control>),
+    /// A file playing with no microphone has ended, before it woke a capture.
+    FileEnded,
 }
 
 /// What the app shares with the runner besides its controls.
@@ -838,6 +840,8 @@ struct Runner<S: Rig> {
     stopping: bool,
     /// Set while listening wants a microphone it does not have: how many reopen attempts failed.
     reopen_failures: Option<u32>,
+    /// Why the microphone could not be opened. Kept so a file played instead does not clear it.
+    open_failure: Option<Failure>,
     /// Why the selected microphone could not be opened while another stays open.
     microphone_problem: Option<String>,
     /// Settings that arrived during a capture.
@@ -879,6 +883,7 @@ impl<S: Rig> Runner<S> {
             paused: shared.paused,
             stopping: false,
             reopen_failures: None,
+            open_failure: None,
             microphone_problem: None,
             pending: None,
             hold_problem: None,
@@ -1108,6 +1113,7 @@ impl<S: Rig> Runner<S> {
         match session.open_microphone(&self.rig).await {
             Ok(()) => {
                 self.reopen_failures = None;
+                self.open_failure = None;
                 self.publisher.mode(Mode::Idle);
             }
             Err(failure) => self.microphone_failed(failure),
@@ -1118,11 +1124,41 @@ impl<S: Rig> Runner<S> {
     /// Shows why listening has no microphone and schedules the next attempt to reopen it.
     fn microphone_failed(&mut self, failure: Failure) {
         if self.reopen_failures.is_none() {
-            self.fail(failure);
+            self.fail(failure.clone());
         } else {
             tracing::warn!(notice = failure.notice, "microphone still unavailable");
         }
+        self.open_failure = Some(failure);
         self.reopen_failures = Some(self.reopen_failures.map_or(0, |failures| failures + 1));
+    }
+
+    /// A clip is the only input: the microphone is not open.
+    fn feed_only(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.frames.is_some() && session.active_device().is_none())
+    }
+
+    /// Drops a clip's source once it is finished and puts the microphone failure back.
+    fn end_unopened_feed(&mut self) {
+        if self
+            .session
+            .as_ref()
+            .and_then(Session::active_device)
+            .is_some()
+        {
+            return;
+        }
+        if let Some(session) = self.session.as_mut() {
+            session.gate.set_enabled(true);
+        }
+        self.close_microphone();
+        if self.paused || self.stopping {
+            return;
+        }
+        if let Some(failure) = self.open_failure.clone() {
+            self.fail(failure);
+        }
     }
 
     async fn step(&mut self) -> Flow {
@@ -1132,6 +1168,10 @@ impl<S: Rig> Runner<S> {
         self.show_hold_problem();
         if let Some(config) = self.pending.take() {
             self.apply(config).await;
+            return Flow::Continue;
+        }
+        if self.feed_only() && !*self.feeding.borrow() {
+            self.end_unopened_feed();
             return Flow::Continue;
         }
         let listening = !self.paused
@@ -1159,10 +1199,15 @@ impl<S: Rig> Runner<S> {
                 }
             };
         }
+        let feed_only = self.feed_only();
         let woke = {
             let Self {
-                session, control, ..
+                session,
+                control,
+                feeding,
+                ..
             } = &mut *self;
+            let mut file_ended = feeding.subscribe();
             let Some(Session {
                 engine,
                 frames: Some(frames),
@@ -1171,18 +1216,36 @@ impl<S: Rig> Runner<S> {
             else {
                 return Flow::Continue;
             };
-            tokio::select! {
-                trigger = engine.listen(frames) => Woke::Trigger(trigger),
-                control = control.recv() => Woke::Control(control),
+            if feed_only {
+                // A ready wake is taken before the file ending; controls keep their turn over that ending.
+                tokio::select! {
+                    biased;
+                    trigger = engine.listen(frames) => Woke::Trigger(trigger),
+                    control = control.recv() => Woke::Control(control),
+                    _ = file_ended.changed() => Woke::FileEnded,
+                }
+            } else {
+                tokio::select! {
+                    trigger = engine.listen(frames) => Woke::Trigger(trigger),
+                    control = control.recv() => Woke::Control(control),
+                }
             }
         };
         match woke {
             Woke::Control(Some(control)) => self.handle(control).await,
             Woke::Control(None) => Flow::Quit,
+            Woke::FileEnded => {
+                self.end_unopened_feed();
+                Flow::Continue
+            }
             Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Hold)) => {
                 Box::pin(self.capture()).await
             }
             Woke::Trigger(Err(error)) => {
+                if self.feed_only() {
+                    self.end_unopened_feed();
+                    return Flow::Continue;
+                }
                 tracing::warn!(?error, "listening stopped");
                 self.close_microphone();
                 // A capture that failed with the microphone has said where its text went.
@@ -1227,12 +1290,14 @@ impl<S: Rig> Runner<S> {
                     session.feeder.cancel();
                 }
             }
-            Control::Feed(feed) => match &self.session {
-                Some(Session {
-                    frames: Some(_),
-                    feeder,
-                    ..
-                }) => feeder.start(feed),
+            Control::Feed(feed) => match self.session.as_mut() {
+                // A missing microphone still takes the file. The device stays closed.
+                Some(session) if !self.paused => {
+                    if session.frames.is_none() {
+                        session.frames = Some(session.feeder.without_microphone());
+                    }
+                    session.feeder.start(feed);
+                }
                 _ => feed.refuse("Thalvi is not listening."),
             },
             Control::Apply(config) => self.apply(*config).await,
@@ -1481,7 +1546,9 @@ impl<S: Rig> Runner<S> {
             match outcome {
                 None => {
                     // The wake word closed the gate and only a capture opens it again.
+                    // The control that ended it never reached the cancel callback.
                     gate.set_enabled(true);
+                    feeder.cancel();
                     (None, None, ignored, None)
                 }
                 Some(outcome) => {
@@ -1950,7 +2017,9 @@ mod controls;
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::future::Future;
+    use std::rc::Rc;
     use std::time::Duration;
 
     use thalvi_desktop::device::{Download, Export};
@@ -3912,6 +3981,561 @@ mod tests {
                 }
             }
             std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// A microphone the test can leave missing, and the fakes the runner listens through.
+    struct MicLab {
+        opens: Rc<Cell<u32>>,
+        missing: Rc<Cell<bool>>,
+        wake: RefCell<Option<thalvi_desktop::engine::fakes::FakeWake>>,
+        recognizer: RefCell<Option<thalvi_desktop::recognizer::FakeRecognizer>>,
+        cues: RefCell<Option<thalvi_desktop::engine::fakes::FakeCuePlayer>>,
+    }
+
+    struct LabMic {
+        gate: InputGate,
+        opens: Rc<Cell<u32>>,
+        missing: Rc<Cell<bool>>,
+        opened: bool,
+        /// Holds the fake stream open; the test never sends room audio through it.
+        held: Option<thalvi_desktop::engine::fakes::FrameFeed>,
+    }
+
+    impl Rig for MicLab {
+        type Recognizer = thalvi_desktop::recognizer::FakeRecognizer;
+        type Wake = thalvi_desktop::engine::fakes::FakeWake;
+        type Cues = thalvi_desktop::engine::fakes::FakeCuePlayer;
+        type Input = LabMic;
+        type Host = TestHost;
+
+        fn load(
+            &self,
+            _: &DesktopConfig,
+            _: &InputGate,
+            _: &Rc<Publisher>,
+        ) -> impl Future<Output = Result<Loaded<Self>, Failure>> {
+            let recognizer = self.recognizer.borrow_mut().take().unwrap();
+            let wake = self.wake.borrow_mut().take().unwrap();
+            let cues = self.cues.borrow_mut().take().unwrap();
+            std::future::ready(Ok(Loaded {
+                recognizer,
+                wake,
+                cues,
+                recorder: Recorder::disabled(),
+                http: reqwest::Client::new(),
+                chat: None,
+                spotter: None,
+                spotter_off: None,
+                extras: Vec::new(),
+                local: None,
+                extra_locals: Vec::new(),
+            }))
+        }
+
+        fn input(&self, gate: InputGate, _: Option<String>, _: Metrics) -> LabMic {
+            LabMic {
+                gate,
+                opens: Rc::clone(&self.opens),
+                missing: Rc::clone(&self.missing),
+                opened: false,
+                held: None,
+            }
+        }
+    }
+
+    impl Input for LabMic {
+        type Frames = thalvi_desktop::engine::fakes::FakeFrames;
+
+        fn active_name(&self) -> Option<&str> {
+            self.opened.then_some("Test microphone")
+        }
+
+        fn select(&mut self, _: Option<String>) {}
+
+        fn pause(&mut self) {
+            self.opened = false;
+            self.held = None;
+        }
+
+        fn open(
+            self,
+        ) -> impl Future<Output = Result<(Self, Result<Self::Frames, Failure>), Failure>> {
+            std::future::ready(Ok(self.open_stream()))
+        }
+
+        fn replace(
+            self,
+        ) -> impl Future<Output = Result<(Self, Result<Self::Frames, Failure>), Failure>> {
+            std::future::ready(Ok(self.open_stream()))
+        }
+    }
+
+    impl LabMic {
+        fn open_stream(mut self) -> (Self, Result<FakeFramesSlot, Failure>) {
+            self.opens.set(self.opens.get() + 1);
+            if self.missing.get() {
+                self.opened = false;
+                self.held = None;
+                return (
+                    self,
+                    Err(Failure::of(&thalvi_desktop::audio::AudioError::NoDevice)),
+                );
+            }
+            let (frames, feed) = thalvi_desktop::engine::fakes::FakeFrames::new(&self.gate);
+            self.opened = true;
+            self.held = Some(feed);
+            (self, Ok(frames))
+        }
+    }
+
+    type FakeFramesSlot = thalvi_desktop::engine::fakes::FakeFrames;
+
+    fn spoken_clip() -> Clip {
+        use thalvi_desktop::frame::FRAME_SAMPLES;
+        let mut frames = Vec::new();
+        for n in 0..8 {
+            let mut frame = [0_i16; FRAME_SAMPLES];
+            if n == 0 {
+                frame.fill(2_000);
+            }
+            frames.push(frame);
+        }
+        Clip::from_frames(frames)
+    }
+
+    fn feed_config() -> DesktopConfig {
+        DesktopConfig::from_json_str(r#"{"ending_pause":{"paste":0},"history":{"enabled":false}}"#)
+            .unwrap()
+    }
+
+    struct FedRun {
+        link: EngineLink,
+        running: tokio::task::JoinHandle<()>,
+        wake: thalvi_desktop::engine::fakes::WakeControl,
+        server: thalvi_desktop::recognizer::FakeControl,
+        opens: Rc<Cell<u32>>,
+        texts: Arc<Mutex<Vec<String>>>,
+        status: watch::Receiver<Status>,
+        audio: watch::Receiver<AudioStatus>,
+        feeding: watch::Receiver<bool>,
+    }
+
+    impl FedRun {
+        fn start(missing: bool) -> Self {
+            use thalvi_desktop::cues::Cue;
+            use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeWake};
+            use thalvi_desktop::recognizer::FakeRecognizer;
+
+            let (wake_detector, wake) = FakeWake::new();
+            let (recognizer, server) = FakeRecognizer::new();
+            let (cues, cue_control) = FakeCuePlayer::new();
+            for cue in [
+                Cue::Wake,
+                Cue::Provisional,
+                Cue::Accepted,
+                Cue::Cancelled,
+                Cue::Error,
+            ] {
+                cue_control.set_length(cue, Duration::ZERO);
+            }
+            let opens = Rc::new(Cell::new(0));
+            let lab = MicLab {
+                opens: Rc::clone(&opens),
+                missing: Rc::new(Cell::new(missing)),
+                wake: RefCell::new(Some(wake_detector)),
+                recognizer: RefCell::new(Some(recognizer)),
+                cues: RefCell::new(Some(cues)),
+            };
+            let texts = Arc::new(Mutex::new(Vec::new()));
+            let host = TestHost(Arc::new(Mutex::new(Vec::new())), Arc::clone(&texts));
+            let config = feed_config();
+            let (link, ends, _) = EngineLink::wire(&config, false);
+            let status = link.status_updates();
+            let audio = link.audio_updates();
+            let feeding = link.feeding_updates();
+            let running = tokio::task::spawn_local(ends.run(
+                config,
+                false,
+                lab,
+                Arc::new(Delivery::new(host)),
+                Arc::new(History::at("unused-scripted-feed")),
+                Arc::new(Drafts::default()),
+            ));
+            Self {
+                link,
+                running,
+                wake,
+                server,
+                opens,
+                texts,
+                status,
+                audio,
+                feeding,
+            }
+        }
+
+        fn missing_mic(&self) -> bool {
+            matches!(
+                &*self.status.borrow(),
+                Status::Failed { notice, .. } if notice.contains("No microphone was found")
+            )
+        }
+
+        fn pasted(&self) -> Vec<String> {
+            self.texts.lock().unwrap().clone()
+        }
+
+        async fn stop(self) {
+            self.link.send(Control::Quit);
+            self.running.await.unwrap();
+        }
+    }
+
+    async fn yield_until(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("{what}");
+    }
+
+    async fn pump_until(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..80 {
+            if done() {
+                return;
+            }
+            tokio::time::advance(Duration::from_millis(80)).await;
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+        }
+        panic!("{what}");
+    }
+
+    async fn feed_result(mut ended: oneshot::Receiver<FeedEnd>) -> FeedEnd {
+        for _ in 0..50 {
+            match ended.try_recv() {
+                Ok(end) => return end,
+                Err(oneshot::error::TryRecvError::Empty) => {}
+                Err(oneshot::error::TryRecvError::Closed) => return FeedEnd::Cancelled,
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the feed did not finish");
+    }
+
+    /// `Ok` once a file is playing. `Err` is how a feed that never started ended.
+    async fn feed_started(
+        ended: &mut oneshot::Receiver<FeedEnd>,
+        feeding: &watch::Receiver<bool>,
+    ) -> Result<(), FeedEnd> {
+        for _ in 0..50 {
+            if *feeding.borrow() {
+                return Ok(());
+            }
+            match ended.try_recv() {
+                Ok(end) => return Err(end),
+                Err(oneshot::error::TryRecvError::Empty) => {}
+                Err(oneshot::error::TryRecvError::Closed) => return Err(FeedEnd::Cancelled),
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the feed neither started nor finished");
+    }
+
+    async fn capture_started(script: &mut FedRun) {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            script
+                .status
+                .wait_for(|status| matches!(status, Status::Capturing { .. })),
+        )
+        .await
+        .expect("the file never started a capture")
+        .expect("the runner stopped");
+        assert!(
+            *script.feeding.borrow(),
+            "capture did not start during the file"
+        );
+    }
+
+    async fn deliver(script: &mut FedRun) {
+        use thalvi_desktop::recognizer::RecognizerEvent;
+        use thalvi_desktop::wake::WakeEvent;
+
+        let prior_pastes = script.pasted().len();
+        script.server.ready();
+        script.wake.fire(WakeEvent::Capture);
+        let (feed, mut ended) = Feed::new(spoken_clip());
+        script.link.send(Control::Feed(feed));
+        feed_started(&mut ended, &script.feeding)
+            .await
+            .unwrap_or_else(|end| panic!("the file was refused: {end:?}"));
+        capture_started(script).await;
+        script
+            .server
+            .emit(Ok(RecognizerEvent::Final("Hello paste that".to_owned())));
+        pump_until("the file was not delivered", || {
+            script.pasted().len() > prior_pastes
+        })
+        .await;
+        pump_until("the file did not finish", || {
+            matches!(
+                ended.try_recv(),
+                Ok(FeedEnd::Played) | Err(oneshot::error::TryRecvError::Closed)
+            )
+        })
+        .await;
+    }
+
+    async fn pasted_twice(mut script: FedRun, mut ended: oneshot::Receiver<FeedEnd>, label: &str) {
+        script
+            .server
+            .emit(Ok(thalvi_desktop::recognizer::RecognizerEvent::Final(
+                "Hello paste that".to_owned(),
+            )));
+        pump_until(&format!("{label}: nothing was pasted"), || {
+            script.pasted() == ["Hello"]
+        })
+        .await;
+        pump_until(
+            &format!("{label}: the microphone error did not return"),
+            || script.missing_mic() && !*script.feeding.borrow(),
+        )
+        .await;
+        assert!(script.audio.borrow().active.is_none(), "{label}");
+        assert!(
+            matches!(ended.try_recv(), Ok(FeedEnd::Played)),
+            "{label}: {:?}",
+            ended.try_recv()
+        );
+        // The same path accepts another file once the first has released.
+        script.server.connect_again();
+        deliver(&mut script).await;
+        assert_eq!(script.pasted(), ["Hello", "Hello"], "{label}");
+        pump_until(
+            &format!("{label}: the microphone error did not return"),
+            || script.missing_mic() && !*script.feeding.borrow(),
+        )
+        .await;
+        assert!(script.audio.borrow().active.is_none(), "{label}");
+        let opens = script.opens.get();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        yield_until(&format!("{label}: the microphone was not retried"), || {
+            script.opens.get() > opens
+        })
+        .await;
+        assert_eq!(script.opens.get(), opens + 1, "{label}");
+        script.stop().await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum FeedStop {
+        Deliver,
+        Cancel,
+        Pause,
+        Quit,
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scripted_feed_reaches_delivery_without_a_microphone_unless_it_is_stopped() {
+        for stop in [
+            FeedStop::Deliver,
+            FeedStop::Cancel,
+            FeedStop::Pause,
+            FeedStop::Quit,
+        ] {
+            let label = match stop {
+                FeedStop::Deliver => "deliver",
+                FeedStop::Cancel => "cancel",
+                FeedStop::Pause => "pause",
+                FeedStop::Quit => "quit",
+            };
+            LocalSet::new()
+                .run_until(async {
+                    let mut script = FedRun::start(true);
+                    yield_until("the missing microphone was not reported", || {
+                        script.missing_mic()
+                    })
+                    .await;
+                    assert_eq!(script.opens.get(), 1, "{label}");
+                    assert!(script.audio.borrow().active.is_none(), "{label}");
+                    let (feed, mut ended) = Feed::new(spoken_clip());
+                    script.wake.fire(thalvi_desktop::wake::WakeEvent::Capture);
+                    script.server.ready();
+                    script.link.send(Control::Feed(feed));
+                    feed_started(&mut ended, &script.feeding)
+                        .await
+                        .unwrap_or_else(|end| panic!("{label}: the file was refused: {end:?}"));
+                    assert_eq!(
+                        script.opens.get(),
+                        1,
+                        "{label}: a feed must not reopen the microphone"
+                    );
+                    assert!(script.audio.borrow().active.is_none(), "{label}");
+                    capture_started(&mut script).await;
+                    match stop {
+                        FeedStop::Deliver => pasted_twice(script, ended, label).await,
+                        FeedStop::Cancel => {
+                            script.link.send(Control::Cancel);
+                            let end = tokio::time::timeout(Duration::from_secs(3), ended)
+                                .await
+                                .expect("cancel: the file kept playing")
+                                .expect("cancel: the file lost its reply");
+                            assert_eq!(end, FeedEnd::Cancelled, "{label}");
+                            assert!(script.pasted().is_empty(), "{label}");
+                            pump_until(
+                                &format!("{label}: the microphone error did not return"),
+                                || script.missing_mic(),
+                            )
+                            .await;
+                            script.stop().await;
+                        }
+                        FeedStop::Pause => {
+                            script.link.send(Control::SetListening(false));
+                            pump_until(&format!("{label}: listening stayed on"), || {
+                                matches!(&*script.status.borrow(), Status::Paused)
+                            })
+                            .await;
+                            assert!(
+                                matches!(ended.try_recv(), Ok(FeedEnd::Cancelled)),
+                                "{label}"
+                            );
+                            assert!(script.pasted().is_empty(), "{label}");
+                            assert!(script.audio.borrow().paused, "{label}");
+                            assert!(script.audio.borrow().active.is_none(), "{label}");
+                            script.stop().await;
+                        }
+                        FeedStop::Quit => {
+                            let texts = Arc::clone(&script.texts);
+                            script.link.send(Control::Quit);
+                            script.running.await.unwrap();
+                            yield_until(&format!("{label}: the file was delivered"), || {
+                                matches!(
+                                    ended.try_recv(),
+                                    Ok(FeedEnd::Cancelled)
+                                        | Err(oneshot::error::TryRecvError::Closed)
+                                )
+                            })
+                            .await;
+                            assert!(texts.lock().unwrap().is_empty(), "{label}");
+                        }
+                    }
+                })
+                .await;
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum KeptFeed {
+        Paused,
+        HoldKey,
+        Retry,
+        Connected,
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scripted_feed_keeps_pause_keys_retry_and_a_connected_microphone() {
+        for case in [
+            KeptFeed::Paused,
+            KeptFeed::HoldKey,
+            KeptFeed::Retry,
+            KeptFeed::Connected,
+        ] {
+            let label = match case {
+                KeptFeed::Paused => "paused",
+                KeptFeed::HoldKey => "hold key",
+                KeptFeed::Retry => "retry",
+                KeptFeed::Connected => "connected",
+            };
+            LocalSet::new()
+                .run_until(async {
+                    let missing = !matches!(case, KeptFeed::Connected);
+                    let mut script = FedRun::start(missing);
+                    if missing {
+                        yield_until(
+                            &format!("{label}: the missing microphone was not reported"),
+                            || script.missing_mic(),
+                        )
+                        .await;
+                        assert!(script.audio.borrow().active.is_none(), "{label}");
+                    } else {
+                        yield_until(&format!("{label}: listening never started"), || {
+                            matches!(&*script.status.borrow(), Status::Listening)
+                        })
+                        .await;
+                        assert_eq!(
+                            script.audio.borrow().active.as_deref(),
+                            Some("Test microphone"),
+                            "{label}"
+                        );
+                    }
+                    match case {
+                        KeptFeed::Paused => {
+                            script.link.send(Control::SetListening(false));
+                            yield_until("listening was not paused", || {
+                                matches!(&*script.status.borrow(), Status::Paused)
+                            })
+                            .await;
+                            let (feed, ended) = Feed::new(spoken_clip());
+                            script.link.send(Control::Feed(feed));
+                            let end = feed_result(ended).await;
+                            assert_eq!(
+                                end,
+                                FeedEnd::Refused("Thalvi is not listening."),
+                                "{label}"
+                            );
+                            assert!(script.pasted().is_empty(), "{label}");
+                            assert!(script.audio.borrow().active.is_none(), "{label}");
+                            script.stop().await;
+                        }
+                        KeptFeed::HoldKey => {
+                            let key = script.link.hold_input();
+                            key.set(true);
+                            key.set(false);
+                            yield_until("the press was not taken", || script.opens.get() == 1)
+                                .await;
+                            for _ in 0..20 {
+                                tokio::task::yield_now().await;
+                            }
+                            assert!(script.missing_mic(), "{label}");
+                            assert!(script.pasted().is_empty(), "{label}");
+                            assert_eq!(script.opens.get(), 1, "{label}");
+                            script.stop().await;
+                        }
+                        KeptFeed::Retry => {
+                            assert_eq!(script.opens.get(), 1, "{label}");
+                            tokio::time::advance(Duration::from_millis(999)).await;
+                            for _ in 0..20 {
+                                tokio::task::yield_now().await;
+                            }
+                            assert_eq!(script.opens.get(), 1, "{label}: retried early");
+                            tokio::time::advance(Duration::from_millis(1)).await;
+                            yield_until("the microphone was not retried at one second", || {
+                                script.opens.get() == 2
+                            })
+                            .await;
+                            assert!(script.missing_mic(), "{label}");
+                            assert!(script.audio.borrow().active.is_none(), "{label}");
+                            script.stop().await;
+                        }
+                        KeptFeed::Connected => {
+                            deliver(&mut script).await;
+                            assert_eq!(script.pasted(), ["Hello"], "{label}");
+                            assert_eq!(
+                                script.audio.borrow().active.as_deref(),
+                                Some("Test microphone"),
+                                "{label}"
+                            );
+                            assert_eq!(script.opens.get(), 1, "{label}");
+                            script.stop().await;
+                        }
+                    }
+                })
+                .await;
         }
     }
 }

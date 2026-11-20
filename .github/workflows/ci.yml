@@ -197,7 +197,8 @@ jobs:
     needs: [changes, desktop-windows]
     if: ${{ !cancelled() && needs.desktop-windows.result == 'success' }}
     runs-on: windows-latest
-    timeout-minutes: 10
+    # A cold cache downloads the default speech model. Its own bound is about 24 minutes.
+    timeout-minutes: 40
     steps:
       - if: needs.changes.outputs.bundle == 'false'
         run: echo 'The app is unchanged, so there is no installer to try.'
@@ -211,6 +212,18 @@ jobs:
         with:
           name: desktop-windows
           path: installer
+      - if: needs.changes.outputs.bundle != 'false'
+        id: speech-model
+        shell: pwsh
+        run: |
+          $dir = (Join-Path $env:LOCALAPPDATA 'thalvi\models').Replace('\', '/')
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "dir=$dir" -Encoding utf8NoBOM
+      - if: needs.changes.outputs.bundle != 'false'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.speech-model.outputs.dir }}
+          key: nemotron_160ms-${{ runner.os }}
       - if: needs.changes.outputs.bundle != 'false'
         name: install and run the app
         shell: pwsh

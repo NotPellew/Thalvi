@@ -5,8 +5,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::audio::{AudioError, Framer, InputGate};
 use crate::engine::FrameSource;
@@ -269,13 +270,27 @@ impl Feeder {
     /// `microphone`'s frames, or the clip's while one plays. A source made earlier stops getting clips.
     #[must_use]
     pub fn wrap<S: FrameSource>(&self, microphone: S) -> Fed<S> {
+        self.source(Some(microphone))
+    }
+
+    /// Clip frames only, for when no microphone could be opened. After the clip, a capture still
+    /// reading hears silence at the same pace; this does not open a device.
+    #[must_use]
+    pub fn without_microphone<S>(&self) -> Fed<S> {
+        self.source(None)
+    }
+
+    fn source<S>(&self, microphone: Option<S>) -> Fed<S> {
         let (tx, rx) = mpsc::unbounded_channel();
         *self.0.queue.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx);
+        let feeding = Arc::clone(&self.0.feeding);
+        let clip = feeding.subscribe();
         Fed {
             microphone,
             played: rx,
             gate: self.0.gate.clone(),
-            feeding: Arc::clone(&self.0.feeding),
+            feeding,
+            clip,
             generation: self.0.generation.subscribe(),
         }
     }
@@ -347,28 +362,81 @@ async fn play(
 
 /// The microphone's frames, replaced by a clip's while one plays.
 pub struct Fed<S> {
-    microphone: S,
+    microphone: Option<S>,
     played: mpsc::UnboundedReceiver<Played>,
     gate: InputGate,
     feeding: Arc<watch::Sender<bool>>,
+    clip: watch::Receiver<bool>,
     generation: watch::Receiver<u64>,
+}
+
+fn accepted(
+    gate: &InputGate,
+    generation: &watch::Receiver<u64>,
+    played: &Played,
+) -> Option<Queued> {
+    let (epoch, played_generation, queued) = *played;
+    (epoch == gate.state().1 && played_generation == *generation.borrow()).then_some(queued)
+}
+
+impl<S: FrameSource> Fed<S> {
+    /// The next clip frame waiting now, if it still belongs to this gate and feed.
+    fn take_played(&mut self) -> Result<Option<Queued>, AudioError> {
+        loop {
+            match self.played.try_recv() {
+                Ok(played) => {
+                    if let Some(queued) = accepted(&self.gate, &self.generation, &played) {
+                        return Ok(Some(queued));
+                    }
+                }
+                Err(TryRecvError::Empty) => return Ok(None),
+                Err(TryRecvError::Disconnected) => return Err(AudioError::Closed),
+            }
+        }
+    }
+}
+
+async fn next_microphone<S: FrameSource>(microphone: &mut Option<S>) -> Result<Queued, AudioError> {
+    match microphone.as_mut() {
+        Some(microphone) => microphone.next().await,
+        None => std::future::pending().await,
+    }
 }
 
 impl<S: FrameSource> FrameSource for Fed<S> {
     async fn next(&mut self) -> Result<Queued, AudioError> {
         loop {
+            if self.microphone.is_none() {
+                if let Some(queued) = self.take_played()? {
+                    return Ok(queued);
+                }
+                if !*self.feeding.borrow() {
+                    sleep(FRAME_TIME).await;
+                    if let Some(queued) = self.take_played()? {
+                        return Ok(queued);
+                    }
+                    if !*self.feeding.borrow() && self.gate.is_enabled() {
+                        return Ok(Queued::now([0; FRAME_SAMPLES]));
+                    }
+                    continue;
+                }
+            }
             tokio::select! {
                 biased;
-                Some((epoch, generation, queued)) = self.played.recv() => {
-                    if epoch == self.gate.state().1 && generation == *self.generation.borrow() {
+                played = self.played.recv() => {
+                    let Some(played) = played else {
+                        return Err(AudioError::Closed);
+                    };
+                    if let Some(queued) = accepted(&self.gate, &self.generation, &played) {
                         return Ok(queued);
                     }
                 }
-                frame = self.microphone.next() => {
-                    if frame.is_err() || !*self.feeding.borrow() {
+                frame = next_microphone(&mut self.microphone), if self.microphone.is_some() => {
+                    if frame.as_ref().is_err() || !*self.feeding.borrow() {
                         return frame;
                     }
                 }
+                _ = self.clip.changed(), if self.microphone.is_none() => {}
             }
         }
     }

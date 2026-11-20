@@ -64,6 +64,7 @@ DrainOne == /\ phase \in {"pre", "finish"} /\ Len(queue) > 0
 \* Its watch version is consumed at capture entry; this model covers only the new capture.
 \* No control branch precedes the capture's first poll (biased select). Engine::capture starts
 \* the streaming extras' tasks when it is first polled, so a capture that never starts has none.
+\* A stopped pre-start capture also cancels the feeder in the same runner step.
 PreEmpty == /\ phase = "pre" /\ queue = <<>>
             /\ phase' = IF preEnds THEN "done" ELSE "active"
             /\ extra' = IF ~preEnds /\ extras THEN "open" ELSE extra
