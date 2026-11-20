@@ -46,6 +46,7 @@ pub struct TextStyle {
     pub size: f32,
     pub line_height: f32,
     pub weight: u16,
+    pub variable_weight: bool,
     pub mono: bool,
     pub tracking: f32,
 }
@@ -55,6 +56,7 @@ const fn text(size: f32, line_height: f32, weight: u16, mono: bool, tracking: f3
         size,
         line_height,
         weight,
+        variable_weight: false,
         mono,
         tracking,
     }
@@ -117,6 +119,7 @@ impl Measures {
     pub fn label(self, base: TextStyle) -> TextStyle {
         let mut style = self.text(base);
         style.weight = self.label_weight;
+        style.variable_weight = self.label_weight != base.weight;
         style.tracking = self
             .tracking
             .map_or(base.tracking, |tracking| base.size * tracking)

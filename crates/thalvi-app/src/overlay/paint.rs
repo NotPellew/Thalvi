@@ -9,8 +9,10 @@
     reason = "pixel arithmetic on a small surface"
 )]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
+use cosmic_text::fontdb::{Database, ID as FontId, Style as FaceStyle};
 use cosmic_text::{
     Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight,
     Wrap,
@@ -423,6 +425,7 @@ pub struct Text {
     fonts: FontSystem,
     glyphs: SwashCache,
     shaped: HashMap<String, Buffer>,
+    weight_axes: RefCell<HashMap<FontId, Option<(u16, u16)>>>,
     families: (Option<String>, Option<String>),
 }
 
@@ -452,6 +455,7 @@ impl Text {
             fonts,
             glyphs: SwashCache::new(),
             shaped: HashMap::new(),
+            weight_axes: RefCell::default(),
             families: (None, None),
         }
     }
@@ -519,7 +523,11 @@ impl Text {
             let mut buffer = Buffer::new(&mut self.fonts, metrics);
             let base = Attrs::new()
                 .family(family)
-                .weight(Weight(self.nearest_weight(family, style.weight)))
+                .weight(Weight(self.nearest_weight(
+                    family,
+                    style.weight,
+                    style.variable_weight,
+                )))
                 .letter_spacing(style.tracking / style.size);
             // Lines are centred when drawn; cosmic-text's own centring spreads the words apart.
             let width = match layout {
@@ -552,17 +560,39 @@ impl Text {
         &self.shaped[&key]
     }
 
-    /// The weight closest to `wanted` that `family` has. Asked for a weight its family lacks,
-    /// cosmic-text takes it from another family, and the spaces from yet another.
-    fn nearest_weight(&self, family: Family, wanted: u16) -> u16 {
+    /// Snaps to a registered weight so glyphs and spaces stay in the same family.
+    fn nearest_weight(&self, family: Family, wanted: u16, variable: bool) -> u16 {
         let fonts = self.fonts.db();
         let name = fonts.family_name(&family);
-        fonts
-            .faces()
-            .filter(|face| face.families.iter().any(|(named, _)| named == name))
+        let faces = || {
+            fonts
+                .faces()
+                .filter(|face| face.families.iter().any(|(named, _)| named == name))
+        };
+        let mut best = faces()
             .map(|face| face.weight.0)
             .min_by_key(|weight| weight.abs_diff(wanted))
-            .unwrap_or(wanted)
+            .unwrap_or(wanted);
+        if !variable || best == wanted {
+            return best;
+        }
+        let mut axes = self.weight_axes.borrow_mut();
+        for face in faces().filter(|face| face.style == FaceStyle::Normal) {
+            let Some((low, high)) = *axes
+                .entry(face.id)
+                .or_insert_with(|| weight_axis(fonts, face.id))
+            else {
+                continue;
+            };
+            let drawn = wanted.clamp(low, high);
+            if drawn.abs_diff(wanted) < best.abs_diff(wanted) {
+                best = drawn;
+            }
+            if best == wanted {
+                break;
+            }
+        }
+        best
     }
 
     /// The width of each line `spans` are set in, in points.
@@ -665,6 +695,24 @@ impl Text {
     }
 }
 
+fn weight_axis(fonts: &Database, id: FontId) -> Option<(u16, u16)> {
+    use cosmic_text::skrifa::MetadataProvider;
+
+    fonts.with_face_data(id, |data, index| {
+        let font = cosmic_text::skrifa::FontRef::from_index(data, index).ok()?;
+        let axis = font
+            .axes()
+            .get_by_tag(cosmic_text::skrifa::Tag::new(b"wght"))?;
+        let (min, max) = (axis.min_value(), axis.max_value());
+        if !(0.0..=1000.0).contains(&min) || !(0.0..=1000.0).contains(&max) || min > max {
+            return None;
+        }
+        let low = min.ceil() as u16;
+        let high = max.floor() as u16;
+        (low <= high).then_some((low, high))
+    })?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,6 +725,7 @@ mod tests {
                 size: 13.0,
                 line_height: 17.0,
                 weight,
+                variable_weight: false,
                 mono: false,
                 tracking: 0.0,
             };
@@ -1004,6 +1053,7 @@ mod tests {
             size: 13.0,
             line_height: 17.0,
             weight: 400,
+            variable_weight: false,
             mono: false,
             tracking: 0.0,
         };
@@ -1080,6 +1130,7 @@ mod tests {
             size: 13.0,
             line_height: 17.0,
             weight: 400,
+            variable_weight: false,
             mono: false,
             tracking: 0.0,
         };
@@ -1126,8 +1177,8 @@ mod tests {
             .faces()
             .any(|face| face.families.iter().any(|(family, _)| *family == name));
         let heavier = installed
-            && text.nearest_weight(Family::SansSerif, 700)
-                > text.nearest_weight(Family::SansSerif, 400);
+            && text.nearest_weight(Family::SansSerif, 700, false)
+                > text.nearest_weight(Family::SansSerif, 400, false);
         assert!(
             !heavier || bold * 10 > regular * 11,
             "bold is heavier where the family has a heavier face: {regular} {bold}"
@@ -1142,6 +1193,59 @@ mod tests {
     }
 
     #[test]
+    fn a_variable_font_draws_different_ink_at_weight_400_and_900() {
+        let mut text = Text::new();
+        let name = "Thalvi Test Weight";
+        // The synthetic face registers at 400 and gets a wider stroke at its axis limit of 700.
+        text.fonts
+            .db_mut()
+            .load_font_data(include_bytes!("fixtures/variable-weight.ttf").to_vec());
+        let face = text
+            .fonts
+            .db()
+            .faces()
+            .find(|face| face.families.iter().any(|(family, _)| family == name))
+            .unwrap();
+        assert_eq!(face.weight.0, 400);
+        let id = face.id;
+        text.set_families(name, name);
+        let [regular, built_in, heavy] =
+            [(400, false), (700, false), (900, true)].map(|(weight, variable_weight)| {
+                let style = Style {
+                    size: 14.0,
+                    line_height: 18.0,
+                    weight,
+                    variable_weight,
+                    mono: true,
+                    tracking: 0.0,
+                };
+                let spans = [("H", WHITE)];
+                let glyphs: Vec<_> = text
+                    .shape(&spans, style, Layout::Line, 1.0, false)
+                    .layout_runs()
+                    .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.font_id))
+                    .collect();
+                assert_eq!(glyphs, [id], "weight {weight} stays in the chosen font");
+                let mut canvas = Canvas::new(24.0, 24.0, 1.0).unwrap();
+                text.draw(&mut canvas, &spans, style, Layout::Line, (2.0, 2.0));
+                canvas
+                    .pixmap
+                    .pixels()
+                    .iter()
+                    .map(|pixel| u32::from(pixel.alpha()))
+                    .sum::<u32>()
+            });
+        assert_eq!(
+            regular, built_in,
+            "the built-in weight keeps its original raster"
+        );
+        assert!(
+            regular > 0 && heavy > regular,
+            "ink at 400: {regular}, at 900: {heavy}"
+        );
+    }
+
+    #[test]
     fn a_weight_is_the_nearest_one_the_family_has() {
         let text = Text::new();
         let fonts = text.fonts.db();
@@ -1152,7 +1256,7 @@ mod tests {
             .map(|face| face.weight.0)
             .collect();
         for wanted in [1, 400, 650, 1000] {
-            let got = text.nearest_weight(Family::SansSerif, wanted);
+            let got = text.nearest_weight(Family::SansSerif, wanted, false);
             // A family that is not installed keeps the weight asked for.
             let Some(best) = has.iter().map(|weight| weight.abs_diff(wanted)).min() else {
                 assert_eq!(got, wanted, "{name} is not installed");
