@@ -102,11 +102,11 @@ struct SettingsStyle {
 
 impl SettingsStyle {
     fn accent_tint(&self, alpha: f32) -> String {
-        rgba(self.style.dark.accent, self.glow_alpha(alpha))
+        with_alpha(self.style.dark.accent, self.glow_alpha(alpha))
     }
 
     fn border_tint(&self, alpha: f32) -> String {
-        rgba(self.style.dark.border, self.glow_alpha(alpha))
+        with_alpha(self.style.dark.border, self.glow_alpha(alpha))
     }
 
     fn glow_alpha(&self, alpha: f32) -> f32 {
@@ -519,7 +519,7 @@ impl SettingsStyle {
         );
         tokens.set(
             "--check-indicator-glow",
-            format!("0 0 5px {}", rgba(s.done, self.glow_alpha(1.0))),
+            format!("0 0 5px {}", with_alpha(s.done, self.glow_alpha(1.0))),
         );
 
         tokens.set("--lk-holo-outline", holo_defaults.dark.border.to_hex());
@@ -561,7 +561,7 @@ impl SettingsStyle {
                 format!(
                     "0 0 {} {}",
                     px(4.0 + 12.0 * s.glow),
-                    rgba(s.accent, (0.15 + 0.5 * (s.glow - d.glow)).clamp(0.0, 1.0))
+                    with_alpha(s.accent, (0.15 + 0.5 * (s.glow - d.glow)).clamp(0.0, 1.0))
                 )
             } else {
                 "none".to_owned()
@@ -804,10 +804,10 @@ impl SettingsStyle {
             pick(
                 look,
                 "none".to_owned(),
-                rgba(s.surface, s.opacity.clamp(0.0, 1.0)),
+                with_alpha(s.surface, s.opacity.clamp(0.0, 1.0)),
                 format!(
                     "linear-gradient(180deg, {}, {}) padding-box, var(--edge)",
-                    rgba(s.surface, s.opacity.clamp(0.0, 1.0)),
+                    with_alpha(s.surface, s.opacity.clamp(0.0, 1.0)),
                     shade(s.surface, 0.81)
                 ),
             ),
@@ -954,7 +954,7 @@ impl SettingsStyle {
                 look,
                 "var(--neon)".to_owned(),
                 "var(--neon)".to_owned(),
-                rgba(s.accent, 0.6),
+                with_alpha(s.accent, 0.6),
             ),
         );
         tokens.set(
@@ -1120,7 +1120,7 @@ impl SettingsStyle {
                 look,
                 "var(--neon)".to_owned(),
                 "var(--neon)".to_owned(),
-                rgba(s.accent, 0.6),
+                with_alpha(s.accent, 0.6),
             ),
         );
         tokens.set(
@@ -1190,7 +1190,7 @@ impl SettingsStyle {
                 look,
                 "transparent".to_owned(),
                 "#1a1d20".to_owned(),
-                rgba(s.done, 0.75),
+                with_alpha(s.done, 0.75),
             ),
         );
     }
@@ -1227,7 +1227,7 @@ impl SettingsStyle {
                 look,
                 "none".to_owned(),
                 format!("0 0 8px {}", s.accent.to_hex()),
-                format!("0 1px 2px #000000, 1px 0 2px {}", rgba(s.done, 0.35)),
+                format!("0 1px 2px #000000, 1px 0 2px {}", with_alpha(s.done, 0.35)),
             ),
         );
         tokens.set(
@@ -1242,8 +1242,8 @@ impl SettingsStyle {
                 "none".to_owned(),
                 format!(
                     "inset -3px 0 5px -1px {}, 1px 0 4px {}, inset 0 2px 4px #000000",
-                    rgba(s.done, 0.5),
-                    rgba(s.done, 0.3)
+                    with_alpha(s.done, 0.5),
+                    with_alpha(s.done, 0.3)
                 ),
             ),
         );
@@ -1335,7 +1335,7 @@ fn surface(scheme: &Scheme, model: &Scheme) -> String {
     if alpha >= 0.999 {
         scheme.surface.to_hex()
     } else {
-        rgba(scheme.surface, alpha)
+        with_alpha(scheme.surface, alpha)
     }
 }
 
@@ -1358,9 +1358,12 @@ fn palette_against_defaults(
     }
 }
 
-fn rgba(color: Color, alpha: f32) -> String {
+fn with_alpha(color: Color, alpha: f32) -> String {
     let [r, g, b, _] = color.channels();
-    format!("rgba({r}, {g}, {b}, {})", number(alpha))
+    format!(
+        "color-mix(in srgb, rgb({r}, {g}, {b}) {}%, transparent)",
+        number(alpha * 100.0)
+    )
 }
 
 /// Preserves the built-in tint while following RGB changes to its model colour.
