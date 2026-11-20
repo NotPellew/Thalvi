@@ -976,7 +976,7 @@ const KINDS: Record<SpeechEntry["kind"], Kind> = {
   },
   extra: {
     title: "Extra-only servers",
-    hint: "Send finished audio for a final pass or as an extra.",
+    hint: "Upload for a final pass or as an extra.",
     terms: "extra-only servers · extra recognizers · speech servers",
     add: "Add an extra-only server",
     about: "Transcribes each capture again for the chat model to merge with the live text; it never shows your words itself.",

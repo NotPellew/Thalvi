@@ -1117,7 +1117,7 @@ describe("the Recognition page", () => {
       ["Streaming servers", "Words appear while you speak.", "Add a streaming server", null],
       ["After-you-stop servers", "Sends each capture once you stop.", "Add an after-you-stop server", "None yet."],
       ["On this computer", "A downloaded model; audio stays here.", "Add an on-device model", null],
-      ["Extra-only servers", "Send finished audio for a final pass or as an extra.", "Add an extra-only server", null],
+      ["Extra-only servers", "Upload for a final pass or as an extra.", "Add an extra-only server", null],
       ["Word list", "Names and terms, added one at a time.", null, null],
     ]);
     const live = recognition().querySelector(".grp") as HTMLElement;
