@@ -12,18 +12,38 @@ jobs:
   gnome-probe:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Record runner and install GNOME rig prerequisites
+      - name: Record the runner image
         run: |
           mkdir -p probe-out
           cat /etc/os-release | tee probe-out/os-release
           ls -l /dev/fuse /dev/dri | tee probe-out/devices || true
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends             bubblewrap dbus-x11 ffmpeg fuse3 gir1.2-gtk-3.0 gnome-shell             libasound2-plugins libayatana-appindicator3-1 libegl-mesa0 libgl1-mesa-dri             libgtk-3-0t64 libwebkit2gtk-4.1-0 libxdo3 pipewire python3-gi             wireplumber wl-clipboard x11-utils xdotool xwayland
+          printf 'ImageOS=%s\nImageVersion=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}" | tee probe-out/runner-image
+      - name: Update Ubuntu package indexes
+        run: |
+          printf '%s\n' https://archive.ubuntu.com/ubuntu/ | sudo tee /etc/apt/apt-mirrors.txt
+          sudo timeout --kill-after=15s 180s apt-get \
+            -o Acquire::Retries=1 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25 \
+            -o APT::Update::Error-Mode=any update 2>&1 | tee probe-out/apt-update.log
+      - name: Install GNOME rig prerequisites
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+            timeout --kill-after=15s 420s apt-get \
+            -o Acquire::Retries=1 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25 \
+            install -y --no-install-recommends \
+            bubblewrap dbus-x11 fuse3 gir1.2-gtk-3.0 gnome-shell \
+            libasound2-plugins libayatana-appindicator3-1 libegl-mesa0 libgl1-mesa-dri \
+            libgtk-3-0t64 libwebkit2gtk-4.1-0 libxdo3 pipewire python3-gi \
+            wireplumber wl-clipboard x11-utils xdotool xwayland 2>&1 | tee probe-out/apt-install.log
           gnome-shell --version | tee probe-out/gnome-version
+      - name: Check user namespaces and FUSE
+        run: |
           if ! bwrap --unshare-user --ro-bind / / true 2>probe-out/userns-before; then
             cat probe-out/userns-before
             grep -qiE 'permission denied|operation not permitted' probe-out/userns-before
