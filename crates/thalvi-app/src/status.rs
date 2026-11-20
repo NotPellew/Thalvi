@@ -1,6 +1,7 @@
 //! What the UI is told: the engine's state, the pause switch and the delivery outcome as one typed status.
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
@@ -352,25 +353,10 @@ impl View {
                     route,
                     text,
                     waiting_for_quiet,
-                } => Status::Pending {
-                    target,
-                    route: *route,
-                    text: text.clone(),
-                    waiting_for_quiet: *waiting_for_quiet,
-                    pause_ms: u64::try_from(self.pauses.get(*route).as_millis())
-                        .unwrap_or(u64::MAX),
-                    copies: self.copies,
-                    final_confirmation: false,
-                },
-                EngineState::ConfirmingSubmit { text, pause } => Status::Pending {
-                    target,
-                    route: CaptureRoute::Submit,
-                    text: text.clone(),
-                    waiting_for_quiet: false,
-                    pause_ms: u64::try_from(pause.as_millis()).unwrap_or(u64::MAX),
-                    copies: self.copies,
-                    final_confirmation: true,
-                },
+                } => self.pending_status(target, *route, text, *waiting_for_quiet, None),
+                EngineState::ConfirmingSubmit { text, pause } => {
+                    self.pending_status(target, CaptureRoute::Submit, text, false, Some(*pause))
+                }
                 EngineState::FinalPass { route } => Status::FinalPass {
                     target,
                     route: *route,
@@ -395,6 +381,26 @@ impl View {
                     again: *again,
                 },
             },
+        }
+    }
+
+    fn pending_status(
+        &self,
+        target: Option<String>,
+        route: CaptureRoute,
+        text: &str,
+        waiting_for_quiet: bool,
+        final_preview: Option<Duration>,
+    ) -> Status {
+        let pause = final_preview.unwrap_or_else(|| self.pauses.get(route));
+        Status::Pending {
+            target,
+            route,
+            text: text.to_owned(),
+            waiting_for_quiet,
+            pause_ms: u64::try_from(pause.as_millis()).unwrap_or(u64::MAX),
+            copies: self.copies,
+            final_confirmation: final_preview.is_some(),
         }
     }
 }
@@ -511,42 +517,6 @@ mod tests {
                 },
             ),
             (
-                pending(CaptureRoute::Submit, true),
-                Status::Pending {
-                    target: Some(kitty()),
-                    route: CaptureRoute::Submit,
-                    text: "hello".to_owned(),
-                    waiting_for_quiet: true,
-                    pause_ms: 2500,
-                    copies: false,
-                    final_confirmation: false,
-                },
-            ),
-            (
-                pending(CaptureRoute::Paste, false),
-                Status::Pending {
-                    target: Some(kitty()),
-                    route: CaptureRoute::Paste,
-                    text: "hello".to_owned(),
-                    waiting_for_quiet: false,
-                    pause_ms: 700,
-                    copies: false,
-                    final_confirmation: false,
-                },
-            ),
-            (
-                pending(CaptureRoute::Write, false),
-                Status::Pending {
-                    target: Some(kitty()),
-                    route: CaptureRoute::Write,
-                    text: "hello".to_owned(),
-                    waiting_for_quiet: false,
-                    pause_ms: 700,
-                    copies: false,
-                    final_confirmation: false,
-                },
-            ),
-            (
                 EngineState::Writing {
                     text: "Hello, ".to_owned(),
                 },
@@ -581,6 +551,29 @@ mod tests {
         for (engine, expected) in cases {
             let label = format!("{engine:?}");
             assert_eq!(view(Mode::Idle, engine).status(), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn pending_status_keeps_the_route_text_and_timing_of_the_ending() {
+        for (route, waiting_for_quiet, pause_ms) in [
+            (CaptureRoute::Submit, true, 2500),
+            (CaptureRoute::Paste, false, 700),
+            (CaptureRoute::Write, false, 700),
+        ] {
+            assert_eq!(
+                view(Mode::Idle, pending(route, waiting_for_quiet)).status(),
+                Status::Pending {
+                    target: Some(kitty()),
+                    route,
+                    text: "hello".to_owned(),
+                    waiting_for_quiet,
+                    pause_ms,
+                    copies: false,
+                    final_confirmation: false,
+                },
+                "{route:?}",
+            );
         }
     }
 

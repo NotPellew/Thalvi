@@ -756,6 +756,18 @@ mod tests {
         );
     }
 
+    fn paste_countdown(target: Option<String>, text: &str, pause_ms: u64) -> Status {
+        Status::Pending {
+            target,
+            route: CaptureRoute::Paste,
+            text: text.to_owned(),
+            waiting_for_quiet: false,
+            pause_ms,
+            copies: false,
+            final_confirmation: false,
+        }
+    }
+
     #[test]
     fn the_overlay_shows_from_the_wake_word_and_hides_after_a_confirmation_or_a_failure() {
         let target = Some("kitty".to_owned());
@@ -779,18 +791,7 @@ mod tests {
                 },
                 Visibility::Show,
             ),
-            (
-                Status::Pending {
-                    target: target.clone(),
-                    route: CaptureRoute::Paste,
-                    text: String::new(),
-                    waiting_for_quiet: false,
-                    pause_ms: 700,
-                    copies: false,
-                    final_confirmation: false,
-                },
-                Visibility::Show,
-            ),
+            (paste_countdown(target.clone(), "", 700), Visibility::Show),
             (
                 Status::Writing {
                     target: target.clone(),
@@ -893,15 +894,7 @@ mod tests {
         let at = |ms: u64| start + Duration::from_millis(ms);
         let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
         let (mut surface, mut overlay) = (Fake::default(), Overlaying::new(false, start));
-        let pending = Status::Pending {
-            target: None,
-            route: CaptureRoute::Paste,
-            text: "hello".to_owned(),
-            waiting_for_quiet: false,
-            pause_ms: 2500,
-            copies: false,
-            final_confirmation: false,
-        };
+        let pending = paste_countdown(None, "hello", 2500);
         overlay.take(
             Message::Status(Box::new(pending), Visibility::Show),
             at(10_000),

@@ -91,7 +91,7 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
-    use thalvi_desktop::capture::CaptureRoute;
+    use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 
     use super::*;
     use crate::status::{FailureKind, Status};
@@ -147,7 +147,7 @@ mod tests {
                     },
                     target: None,
                     copies: false,
-                    pauses: Default::default(),
+                    pauses: EndingPauses::default(),
                     loading: None,
                     wake_words: true,
                 }
