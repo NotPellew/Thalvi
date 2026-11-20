@@ -148,7 +148,10 @@ impl CpalCuePlayer {
     /// Plays the cues switched on in `cues`, muting `gate` while a [`Mic::Muted`] one plays.
     #[must_use]
     pub fn new(cues: Cues, gate: InputGate) -> Self {
-        Self(Arc::new(CueEngine::new(cues, gate)))
+        let engine = Arc::new(CueEngine::new(cues, gate));
+        let warming = Arc::clone(&engine);
+        tokio::task::spawn_blocking(move || warming.warm_up());
+        Self(engine)
     }
 }
 

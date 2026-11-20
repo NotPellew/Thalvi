@@ -257,7 +257,16 @@ impl CueEngine {
     }
 
     /// Attempts to prepare a paused output; a failure is retried by the next cue.
-    pub(crate) fn warm_up(&self) {}
+    pub(crate) fn warm_up(&self) {
+        let _turn = self.serial.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut cache = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.is_none()
+            && let Ok(kept) = self.output.build()
+            && kept.speaker.pause().is_ok()
+        {
+            *cache = Some(kept);
+        }
+    }
 
     /// Plays `cue` and returns when it has finished, was stopped, or failed. `called` is when the
     /// caller asked for it; the timing is none when the cue never reached the output.
