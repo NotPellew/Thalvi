@@ -1268,6 +1268,18 @@ describe("the Recognition page", () => {
     expect(Array.from(editorEl().querySelectorAll<HTMLElement>(".row")).map((row) => [row.querySelector(".what > :first-child")?.textContent, row.querySelector(".what > small")?.textContent ?? null])).toEqual(hints);
   });
 
+  it.each([
+    ["explanation", () => editorEl().querySelector("h4 + p")?.textContent, "Words appear while you speak. Connect Thalvi's own recognizer, which runs on a computer with an NVIDIA GPU, or another server with the same WebSocket protocol for realtime transcription."],
+    ["default name", () => control("Name", "input").value, "Realtime transcription (WebSocket)"],
+    ["Address hint", () => rowOf("Address").querySelector(".what > small")?.textContent, "The server's ws:// or wss:// address. Thalvi's own recognizer uses port 8012."],
+    ["API key hint", () => rowOf("API key").querySelector(".what > small")?.textContent, "Only if the server needs one. Saved, never shown."],
+    ["Model hint", () => rowOf("Model").querySelector(".what > small")?.textContent, "The model the server should use. Thalvi's own recognizer accepts any name."],
+  ] as const)("says what a streaming server can be and how to fill it in: the %s", async (_what, shown, text) => {
+    await openSeveral();
+    await addServer("realtime");
+    expect(shown()).toBe(text);
+  });
+
   it("numbers a default name that is taken", async () => {
     await open({ ...several(), stt: { entries: [{ ...SERVER, name: "Meta realtime ASR" }, { ...META, name: "Extra recognizer" }] } });
     goTo("recognition");
@@ -1659,6 +1671,22 @@ describe("the fake backend's address check", () => {
     const backend = fakeBackend(new URLSearchParams());
     await expect(backend.checkSpeechEntry(good)).resolves.toBeUndefined();
     await expect(backend.checkSpeechEntry(bad)).rejects.toThrow(`the address must start with ${wanted}.`);
+  });
+});
+
+describe("the Recognition page against the fake backend", () => {
+  it("never calls a streaming server Meta realtime, in the form or in the saved row", async () => {
+    mountSettings(root, fakeBackend(new URLSearchParams()));
+    await settle();
+    goTo("recognition");
+    const shown = (): string => [recognition().textContent, ...Array.from(recognition().querySelectorAll("input"), (input) => input.value)].join("\n");
+    await addServer("realtime");
+    expect(shown()).not.toContain("Meta realtime");
+    type(control("Address", "input"), "ws://127.0.0.1:8012");
+    type(control("Model", "input"), "nemotron");
+    await saveServer();
+    expect(names(listOf("realtime"))).toContain("Realtime transcription (WebSocket) 2");
+    expect(shown()).not.toContain("Meta realtime");
   });
 });
 
