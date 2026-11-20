@@ -76,11 +76,11 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   unless the download is the point. Add `"recordings":{"metrics":true,"text":true,"audio":false}`
   for the evidence below.
 - Copy model files read-only from a cache into `$R/home/.local/share/thalvi/models/`
-  to skip downloads (the app checks their hashes). Every start needs
-  `melspectrogram.onnx`, `embedding_model.onnx`, `hey_thalvi_v0.0.14.onnx`,
-  `hey_mycroft_v0.1.onnx`, `openwakeword/` and the ending spotter's
-  `kws_gigaspeech_3m.*` and `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/`
-  (about 20 MB together); on-device Nemotron adds `nemotron_160ms.*`. A missing
+  to skip downloads (the app accepts a cached file by its pinned size, without
+  rehashing it). A start with the default wake word needs `melspectrogram.onnx`,
+  `embedding_model.onnx`, `hey_thalvi_v0.0.14.onnx` and the ending spotter's four
+  `kws_gigaspeech_3m.*` files (about 9 MB together); on-device Nemotron adds
+  `nemotron_160ms.*`, and another chosen wake word its own head. A missing
   ending spotter downloads from modelscope.cn, which can be slow enough to fail;
   the app then says so and keeps working.
 - App output is `$R/out/app-<tag>.log`, every line stamped with its arrival time.
@@ -123,10 +123,10 @@ than treating a responsive Settings window as a ready speech engine.
 
 | Need | Command |
 | --- | --- |
-| Tray actions | `$H ctl $R pause`, `resume`, `toggle`, `cancel`, `status` (the relaunch path the tray and key binds use) |
+| Listening controls | `$H ctl $R pause`, `resume`, `toggle`, `cancel` (the requests the tray's Pause/Resume listening and Cancel capture send); `status` is the tray's short state |
 | Open Settings | `$H ctl $R` with no argument, or `$H ctl $R show commands` for one page |
 | What Thalvi and its overlay show | `$H ctl $R state` (state, `overlay`, `recognizer`; never what was said) |
-| Set up from a fresh config | `$H ctl $R models`, `$H ctl $R model-download speech nemotron_160ms` (replies when ready), `$H ctl $R speech-check '<entry json>'`, `$H ctl $R settings set '<json>'` |
+| Set up from a fresh config | `$H ctl $R models`, `$H ctl $R model-download speech nemotron_160ms` (replies when ready; shows nothing on screen, so see a notice through the Settings Download button), `$H ctl $R speech-check '<entry json>'`, `$H ctl $R settings set '<json>'` |
 | Quit the app like the tray | `$H ctl $R quit`; the log ends with `Stopped.` |
 | Keys into the focused window | `$H sh $R wtype -k Tab` (also `-M shift -k Tab -m shift`, `-k Return`, `-k Down`, `-k Next` for Page Down) |
 | Window size | `$H hypr $R dispatch setfloating "title:^Thalvi settings\$"`, then `$H hypr $R dispatch resizewindowpixel "exact 400 680,title:^Thalvi settings\$"`; repeat until `$H hypr $R clients` shows `size: 400,680` |
@@ -147,7 +147,8 @@ than treating a responsive Settings window as a ready speech engine.
   search box, then the sidebar pages in order (Listening, Recognition,
   Commands, Chat model, Overlay & sounds, History & recordings, App); `Return` opens the page.
   The page's fields follow. A typed field applies when it loses focus, so `Tab` out of
-  it (or press `Return`) before looking for the confirmation beside it. Take a
+  it (or press `Return`) before looking for the confirmation beside it; a speech-entry
+  editor's fields apply only on its **Save**. Take a
   screenshot after each step to see where the focus ring is rather than counting.
 - A long page scrolls inside its own pane: focus a field in the page and press
   `Next` (Page Down) to scroll it, `Home` to return.
@@ -237,8 +238,9 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
   reports `No capture is being taken.` An unreleased key makes another start
   look like a repeated key-down and no capture starts. Do the same for
   `write-start` and `write-end`.
-- For a spoken ending use `Finish dictation.`: from the Ryan voice it ended and pasted 3 of 3
-  wake captures, while `Paste that.` was heard as `Taste that` and the capture stayed open.
+- For a spoken ending use `Finish dictation.` synthesized with Piper's `--length-scale 1.25`:
+  it ended and pasted 7 of 7 fed captures on Nemotron, while at normal speed it was heard as
+  `Finish vacation`, and `Paste that.` as `Taste that`; both left the capture open.
   `ctl cancel` closes a capture that never ends.
 - `say` holds a file while the app isn't reading the microphone, so a file can play late,
   into the next case. Wait until `$R/home/mic-queue` is empty before starting a case.
@@ -344,10 +346,12 @@ isolated app. The entry has `kind: realtime`, a unique `id` and `name`,
 `api_key` (empty for the repository's self-hosted ASR). `thalvi_server` is a
 removed legacy kind; it is not the current realtime entry.
 
-Apply it through `ctl settings set` as `stt.entries`, then wait for `ctl state`
-to name that entry with status `ready` before starting a capture. Run the
-GNOME recipe above and retain its new readiness, transcription and delivery
-evidence. A successful connection check alone proves no recognition.
+`speech-check` validates the fields only: it says `ready: true` for an
+unreachable address. Apply the entry through `ctl settings set` as
+`stt.entries`; `ctl state` then names it with status `ready`, which does not
+prove a connection either. Run the GNOME recipe above and require a new
+`desktop_transcription_ready` with `outcome: ok` during the capture, then its
+transcription and delivery evidence.
 
 The same synthetic clip can come from a real TTS server. Qwen's
 `/v1/audio/speech/pcm-stream` accepts `input` and `voice`; decode each

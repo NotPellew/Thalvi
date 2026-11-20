@@ -100,7 +100,7 @@ sandbox_args() {
 # killing it takes everything inside down. Output goes to $1, each line stamped with the time it arrived.
 launch_held() {
   local log=$1 pidfile=$2; shift 2
-  LOG=$log setsid bash -c 'exec > >(while IFS= read -r line; do printf "%s %s\n" "$(date +%T.%3N)" "$line"; done > "$LOG") 2>&1; "$@"; echo "[exited $?]"' _ "$@" > /dev/null 2>&1 &
+  LOG=$log setsid bash -c 'exec > >(while IFS= read -r line; do t=$EPOCHREALTIME; f=${t#*[.,]}; printf "%(%T)T.%s %s\n" "${t%[.,]*}" "${f:0:3}" "$line"; done > "$LOG") 2>&1; "$@"; echo "[exited $?]"' _ "$@" > /dev/null 2>&1 &
   echo $! > "$pidfile"
 }
 
@@ -383,7 +383,7 @@ cmd_app_start() {
     [ ! -e "$r/mic" ] || plain+=(PIPEWIRE_REMOTE=rig-pipewire)
     cat > "$r/home/app-run.sh" <<EOF
 #!/usr/bin/env bash
-exec > >(while IFS= read -r line; do printf "%s %s\n" "\$(date +%T.%3N)" "\$line"; done > /tmp/out/app-$tag.log) 2>&1
+exec > >(while IFS= read -r line; do t=\$EPOCHREALTIME; f=\${t#*[.,]}; printf "%(%T)T.%s %s\n" "\${t%[.,]*}" "\${f:0:3}" "\$line"; done > /tmp/out/app-$tag.log) 2>&1
 exec env GDK_BACKEND=wayland ${plain[*]} ${wrap[*]} /home/rig/app-bin
 EOF
     chmod +x "$r/home/app-run.sh"
@@ -499,7 +499,7 @@ main() {
     burst)
       local r=$1 name=$2 n=$3 gap=$4
       not_gnome "$r" burst
-      run_inner "$r" bash -c 'for i in $(seq -f %03g 1 "$2"); do echo "$1-$i $(date +%T.%3N)" >> /tmp/out/$1-times.txt; grim -l 1 /tmp/out/$1-$i.png; sleep "$3"; done' _ "$name" "$n" "$gap" ;;
+      run_inner "$r" bash -c 'for i in $(seq -f %03g 1 "$2"); do t=$EPOCHREALTIME; f=${t#*[.,]}; printf "%s %(%T)T.%s\n" "$1-$i" "${t%[.,]*}" "${f:0:3}" >> /tmp/out/$1-times.txt; grim -l 1 /tmp/out/$1-$i.png; sleep "$3"; done' _ "$name" "$n" "$gap" ;;
     sh) local r=$1; shift; run_inner "$r" "$@" ;;
     help|-h|--help) usage ;;
     *) usage >&2; exit 2 ;;
