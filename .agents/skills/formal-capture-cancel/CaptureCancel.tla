@@ -209,12 +209,13 @@ PreviewReturns(shown) == /\ phase = "preview"
                                         stopRequested, cancelPending, cueDone, cueAccepted,
                                         closeDone, secondary, writing, cleaning, delivered, extraVars>>
 
-ConfirmReturns(stillShown) == /\ phase = "confirm" /\ phase' = "finish"
-                  /\ result' = IF cancelPending THEN "cancelled"
-                                ELSE IF stillShown THEN "accepted" ELSE "failed"
-                  /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
-                                 stopRequested, cancelPending, cueDone, cueAccepted,
-                                 closeDone, secondary, writing, cleaning, delivered, extraVars>>
+ConfirmReturns(stillShown) ==
+    /\ phase = "confirm" /\ phase' = "finish"
+    /\ result' = IF cancelPending THEN "cancelled"
+                  ELSE IF stillShown THEN "accepted" ELSE "failed"
+    /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
+                   stopRequested, cancelPending, cueDone, cueAccepted,
+                   closeDone, secondary, writing, cleaning, delivered, extraVars>>
 
 \* An explicit write. It never continues into dictation cleanup: cleanup is the other path.
 WritingReturns == /\ phase = "writing" /\ phase' = "finish"
