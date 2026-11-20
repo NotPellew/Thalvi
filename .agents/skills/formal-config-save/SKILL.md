@@ -84,17 +84,19 @@ sends two settings requests at once reaches it without the user, because
 
 ## Covers
 
-Sync commit: `bc83c62031c5768ff836ab35b762bad1541fbe24`. [source.json](source.json)
+Sync commit: `7e5f31deed648c159bfed41245116d06b5711fbb`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
+The notes below say why each covered change since the model was written added no writer.
 
-Changes since the previous sync `8df760f` were read: `bc83c62` (#464) registers
+Covers: crates/thalvi-app/src/settings.rs crates/thalvi-app/src/commands.rs crates/thalvi-app/src/app.rs crates/thalvi-app/src/agent.rs crates/thalvi-desktop/src/host/channel.rs crates/thalvi-desktop/src/host/windows/pipe.rs '.agents/skills/formal-config-save/**'
+
+The app styles change (#464) registers
 two read-only Settings commands in `start` (the current app and why app styles
 may not apply) and adds agent tests for `writing.apps`; `writing.apps` is
 checked by the same config load as every other field. None of it writes
 `desktop.json` or `AppState::config`, or takes the save lock. The model and its
-three invariants are unchanged. The hashes describe that branch merged with main's
-word-list report (`e1981db`), which adds one test field in `agent.rs`, and its
+three invariants are unchanged. Main's word-list report (`e1981db`) adds one test field in `agent.rs`, and its
 download failure report (#493), which changes what `download_speech_model`
 returns in `commands.rs` and `app.rs`; neither adds a writer.
 
@@ -112,14 +114,13 @@ flag through `SyncedConfig::remember`, the same lock as the login switch. The
 tray item and an agent `settings set` of that flag are callers of those writers.
 No new writer, lock, or temporary name is added. A `themes` value this build
 keeps whole is written back by the same restore step when the save does not
-change it. These hashes describe the working tree at sync commit
-`113634abc24e4433e421d159fed509c7d916f75a`.
+change it.
 
 An unreadable look, and a built-in-look save that fails, are recorded on `LastError` for the tray and Settings. Neither writes `desktop.json` or takes the save lock.
 
-The opt-in dictation cleanup (#465) adds one agent test in `agent.rs`. `settings_set` is unchanged: the new field is refused by the same config load as every other writing field. No writer of `desktop.json` or `AppState::config` is added, so the model and its three invariants are unchanged. The `agent.rs` hash describes commit `4d534df`, after the theme model merged.
+The opt-in dictation cleanup (#465) adds one agent test in `agent.rs`. `settings_set` is unchanged: the new field is refused by the same config load as every other writing field. No writer of `desktop.json` or `AppState::config` is added, so the model and its three invariants are unchanged.
 
-The experimental Whisper entry (#481, branch `feat/speech-trials`; these hashes describe its commit `98c254fb`) adds no writer:
+The experimental Whisper entry (#481) adds no writer:
 `commands.rs` lists the Whisper models, words their device line and downloads their files into the model
 store, `app.rs` passes the packaged helper folder into `AppState::start`, and `agent.rs` names the model in
 `recognizer`. None writes `desktop.json` or `AppState::config` or takes the save lock.
@@ -132,8 +133,7 @@ are unchanged.
 Hold-key recovery (#566) changes only `held` in `app.rs`: a desktop that refuses the keys at start
 keeps a watch that binds them at a later config reload, and a refused key change in Settings still
 ends the save before `Create`, as before. No writer of `desktop.json` or `AppState::config` and no
-lock is added, so the model and its three invariants are unchanged. The `app.rs` hash describes the
-commit that adds this paragraph.
+lock is added, so the model and its three invariants are unchanged.
 
 | Code | Model action and boundary |
 | --- | --- |
@@ -197,6 +197,59 @@ five mutations of that design each must break their own invariant:
 
 `SELF-TEST PASS` verifies detection only; it is not a pass of the code as it is.
 
+### Chart
+
+A review aid, separate from the check:
+
+```sh
+.agents/skills/formal-config-save/scripts/check.py chart
+```
+
+It runs the same pinned TLC on the faithful model under `TypeOK` alone, in `/var/tmp`, and
+redraws [chart.mmd](chart.mmd) from [view.py](view.py) with `scripts/chart.py` (about 1 s;
+it prints `CHART written states=<n> arrows=<n>`). A `CHART skipped` line or a chart error never
+changes the check's result. When the model changes, update `view.py` with it (every action
+must be in `ACTIONS`), then rerun `chart`.
+
+Compare the chart with what the product should do before reading TLA+.
+
+```mermaid
+stateDiagram-v2
+  state "Settings save has the config to itself" as s1
+  state "Settings save replaced desktop.json" as s2
+  state "Settings save replacing desktop.json" as s3
+  state "Settings save updated the running app" as s4
+  state "agent settings change has the config to itself" as s5
+  state "agent settings change replaced desktop.json" as s6
+  state "agent settings change replacing desktop.json" as s7
+  state "agent settings change updated the running app" as s8
+  state "every save returned [desktop.json, app and runner agree]" as s9
+  state "login switch has the config to itself" as s10
+  state "login switch replaced desktop.json" as s11
+  state "login switch replacing desktop.json" as s12
+  state "login switch updated the running app" as s13
+  state "no save in progress" as s14
+  [*] --> s14
+  s1 --> s3: merges its change over the config
+  s2 --> s4: sets the running config
+  s3 --> s2: renames the new file over desktop.json
+  s4 --> s9: unlocks
+  s4 --> s14: unlocks
+  s5 --> s7: merges its change over the config
+  s6 --> s8: sets the running config
+  s7 --> s6: renames the new file over desktop.json
+  s8 --> s9: unlocks
+  s8 --> s14: unlocks
+  s10 --> s12: merges its change over the config
+  s11 --> s13: sets the running config
+  s12 --> s11: renames the new file over desktop.json
+  s13 --> s9: unlocks
+  s13 --> s14: unlocks
+  s14 --> s1: locks the config
+  s14 --> s5: locks the config
+  s14 --> s10: locks the config
+```
+
 ## Read a result
 
 A pass holds only for the bounds and assumptions under Scope. For a failure,
@@ -221,8 +274,9 @@ steps in the code's words, with the harm. The traces above describe the fixed bu
    wording, the new wording and that evidence here.
 4. Update each changed file's SHA-256 in `source.json` (`sha256sum <path>`), and
    move `sync_commit` only after confirming that the model describes that commit.
-   For an uncommitted change, keep the previous commit and say that its hashes
-   describe the working tree.
+   For an uncommitted change, keep the previous commit; the next maintenance pass
+   reads from it. Do not write which commit a hash describes; `source.json` is that record. If the sync
+   commit is missing from history (a rebase), read from the last commit that changed `source.json`.
 5. Run the check and `--self-test`. When a fix lands, the faithful run must pass;
    update the finding above and keep a mutation that reverts the fix.
 

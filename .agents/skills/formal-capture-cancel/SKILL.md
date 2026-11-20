@@ -15,9 +15,10 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `00b802dbffcf22181cb4dbec5b588888e9e8a66b`. The source hashes describe this commit.
-The previous sync was `3df0c21`, the initial trigger repair on this branch.
-The covered changes through this commit include buffered live recognition,
+Sync commit: `7e5f31deed648c159bfed41245116d06b5711fbb`. The source hashes describe this commit. The notes below say why each covered change since the model was written left its actions unchanged.
+
+Covers: crates/thalvi-app/src/runner.rs crates/thalvi-desktop/src/engine.rs crates/thalvi-desktop/src/engine/streaming.rs crates/thalvi-desktop/src/recognizer.rs crates/thalvi-desktop/src/delivery.rs crates/thalvi-desktop/src/realtime.rs crates/thalvi-desktop/src/openai_live.rs crates/thalvi-desktop/src/local.rs '.agents/skills/formal-capture-cancel/**'
+They include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
 switching happens after capture; notices, metrics and endpoint payload changes
@@ -31,11 +32,9 @@ queue step, so the mapped actions are unchanged.
 The certificate diagnostics change only failure classification in
 `recognizer.rs`, `realtime.rs` and `openai_live.rs`. The inspected close, cancel
 and loading methods are unchanged: failed connections still deliver nothing,
-with no new await or queue step. Model actions remain unchanged; source hashes
-include these diagnostics at the sync commit above.
+with no new await or queue step. Model actions remain unchanged.
 
-The experimental Whisper entry (#481, branch `feat/speech-trials`; the hashes of `runner.rs`, `engine.rs` and
-`recognizer.rs` describe its commit `98c254fb`, after the sync commit above) only retypes `Control::ReloadSpeechModel`'s payload, which `Requests::take` still does not count as
+The experimental Whisper entry (#481) only retypes `Control::ReloadSpeechModel`'s payload, which `Requests::take` still does not count as
 an ending, and passes the helper folder into `Chosen::new`; `drive`, `Runner::capture` and `Settling::settle`
 are unchanged. Its `WhisperSession` (`crates/thalvi-desktop/src/whisper.rs`) buffers like `OpenAiSession`:
 `cancel` and `close` return at once, and dropping a session with its request in flight aborts the request
@@ -47,8 +46,8 @@ so the model actions are unchanged. Its Vulkan previews (#482) are `RecognizerEv
 never admits one to delivery, the same path the model abstracts for streaming recognizers. The model does not
 cover preview ordering inside the session; `whisper.rs` tests do.
 
-The download-size notice (#485, stacked on `feat/speech-trials`) changes only `runner.rs`'s tests module, for
-`Step`'s new `Download` payload; `runner.rs`'s hash describes the commit that adds this paragraph. No mapped function
+The download-size notice (#485) changes only `runner.rs`'s tests module, for
+`Step`'s new `Download` payload. No mapped function
 changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the model actions are unchanged.
 
 Holding unconfirmed lines back from a terminal adds a branch to `Delivery::paste_in` after admission: when the
@@ -56,7 +55,7 @@ route is not Submit, the text has a line break and `Host::is_terminal` (a synchr
 the window is a terminal, it keeps the text on the clipboard through `keep` instead of calling `deliver`. Both are
 host actions after `FinishEmpty`, with no new await, queue step or write to cancellation state, so `delivered`
 still abstracts the admission and model actions are unchanged. `runner.rs` changes only in its tests module, for
-the new host method. The hashes of `runner.rs` and `delivery.rs` describe the commit that adds this paragraph.
+the new host method.
 
 The app styles change (#464) passes the bound window's app and title into
 `Engine::capture` and keeps a local copy for Settings before capture begins.
@@ -65,26 +64,21 @@ Prompt selection and its metric are synchronous local values; the writing
 request still runs under the same cancellation-biased `bounded` call.
 `Requests`, `drive`, `Settling::settle`, the close/cue joins, merge waits and
 loading waits are unchanged. No model action, await boundary or bound changes.
-Its hashes describe that branch merged with main's download-size notice and Vulkan
-previews (above), which touch no mapped function.
 
 A hold released while an on-device model is still loading keeps `Engine::start` reading microphone frames.
 Frames after the release cutoff are discarded and are not delivered. The read stays in the same
 cancellation-first select: the wait is still unbounded, `Accept` is still enabled only after `Loaded`,
-and a cancel still wins. Model actions are unchanged. The `engine.rs` hash describes
-that change merged with the app styles change above.
+and a cancel still wins. Model actions are unchanged.
 
 `Engine::conclude` no longer merges a Task capture: it takes the existing no-merge branch, calling
 `Engine::drop_streams` before `end_with`, the `Accept (merge will not run)` step the model already has.
-No await, queue step or delivery path is added, so model actions are unchanged. The `engine.rs` hash
-describes that working change on top of the hold change above.
+No await, queue step or delivery path is added, so model actions are unchanged.
 
-The runner-control property (#525; inspected through `c7e6524`) moves desktop loading and
+The runner-control property (#525) moves desktop loading and
 microphone blocking work behind `Rig` and `Input`, with the same awaits and FIFO controls.
 `Requests::take`, `Requests::read_queued`, `drive`, `Runner::capture` and `Settling::settle`
 keep their bodies unchanged. `follow` now publishes a new engine's initial status; it adds
-no cancellation write, await or delivery path. The model actions and bounds are unchanged;
-that change merged with the cleanup change below is what the sync commit's runner hash describes.
+no cancellation write, await or delivery path. The model actions and bounds are unchanged.
 
 Opt-in dictation cleanup (#465) adds `Engine::clean`, the same cancellation-first `bounded` shape
 as `Engine::write`. A submit is cleaned before its confirmation is shown (`Prepare`, then
@@ -92,16 +86,14 @@ as `Engine::write`. A submit is cleaned before its confirmation is shown (`Prepa
 stands for both orders, and it is never on together with `writing`. `CleanupReturns` is its own
 await: a cancel there yields a cancelled result, so the runner admits nothing. A cleanup that
 finishes or falls back returns to the capture, and delivery still meets `FinishEmpty`. The 3 s
-bound, including the endpoint becoming ready, is not a cancellation step. The hashes of `engine.rs`
-and `runner.rs` describe the sync commit above.
+bound, including the endpoint becoming ready, is not a cancellation step.
 
 A hold's start cue no longer mutes the microphone: `Engine::begin_hold` leaves the gate open, and
 `Engine::start` passes `Mic::Open` to the same wake cue future for a hold (`Mic::Muted` for a wake
 word and every other cue), and reopens the gate after the cue only when it was muted. The select in
 `Engine::start` is otherwise unchanged: frames are still read only after the cue, from the queue that
 kept them, and cancellation still wins. No await, queue step, cancellation write or delivery path is
-added, so model actions are unchanged. The replay's `ImmediateCues` takes the new argument. The
-`engine.rs` hash describes the commit that adds this paragraph.
+added, so model actions are unchanged. The replay's `ImmediateCues` takes the new argument.
 
 Accepted ending cues (#574) run in an engine-owned local task while `end_with` awaits
 recognizer release under a cancellation-first select. `CueReturns` now changes only
@@ -109,8 +101,7 @@ feedback state; `CloseReturns` advances without waiting for it, cancelling the o
 when a stop was observed before release. The runner's final drain still fences delivery.
 A stop after admission may cut the cue short but cannot retract a paste. Cancelled and
 error endings retain their joined cue/release path, abstracted as non-accepted outcomes.
-The hashes include the accepted-cue change at `932e1ce`; the CPU replay runs its
-capture within a `LocalSet`, as the desktop runner does.
+The CPU replay runs its capture within a `LocalSet`, as the desktop runner does.
 
 Before returning the next trigger, `Engine::listen` signals cancellation of the
 previous ending cue and drains its task. The next `Engine::capture` consumes
@@ -132,7 +123,7 @@ Hold-key recovery (#566) adds `Control::HoldKeyWorks`, which `Requests::take` an
 pending hold notice into `Requests` before a capture's drains and takes it back after, so a
 recovery queued during the capture clears it; that notice is shown only after settling and is not a
 delivery path. `drive`, `Runner::capture` and `Settling::settle` are unchanged, so the model actions
-are unchanged. The `runner.rs` hash describes the commit that adds this paragraph.
+are unchanged.
 
 The five checked invariants have these exact meanings:
 
@@ -266,6 +257,62 @@ accepting a held press or reporting a completed tap. It checks engine retune/reb
 switch, model loading or native input. A warm replay takes about 5 s.
 The replay respects an existing `TMPDIR` and `CARGO_TARGET_DIR` for managed jobs.
 
+### Chart
+
+A review aid, separate from the check:
+
+```sh
+.agents/skills/formal-capture-cancel/scripts/check.py chart
+```
+
+It runs the same pinned TLC on the faithful model under `TypeOK` alone, in `/var/tmp`, and
+redraws [chart.mmd](chart.mmd) from [view.py](view.py) with `scripts/chart.py` (about 6 s;
+it prints `CHART written states=<n> arrows=<n>`). A `CHART skipped` line or a chart error never
+changes the check's result. When the model changes, update `view.py` with it (every action
+must be in `ACTIONS`), then rerun `chart`.
+
+Compare the chart with what the product should do before reading TLA+.
+
+```mermaid
+stateDiagram-v2
+  state "dictation cleanup of a submit" as s1
+  state "ending cue plays, recognizer releases" as s2
+  state "explicit write request" as s3
+  state "listening [a stop was seen]" as s4
+  state "listening, model still loading" as s5
+  state "merging the streaming texts" as s6
+  state "nothing goes out" as s7
+  state "reading controls queued before the capture" as s8
+  state "settling [a stop was seen]" as s9
+  state "text goes out" as s10
+  [*] --> s8
+  s1 --> listening: cleanup returns
+  s1 --> s9: cleanup returns
+  s2 --> s3: recognizer released
+  s2 --> s6: recognizer released
+  s2 --> settling: recognizer released
+  s2 --> s9: recognizer released
+  s3 --> settling: write request returns
+  s3 --> s9: write request returns
+  listening --> s4: reads a control
+  listening --> s1: submit needs cleanup
+  listening --> s2: user ends the dictation
+  s4 --> s9: capture cancelled
+  s5 --> s9: capture cancelled
+  s5 --> settling: load fails
+  s5 --> listening: model ready
+  s6 --> s3: merge returns
+  s6 --> settling: merge returns
+  s6 --> s9: merge returns
+  s8 --> listening: no controls left
+  s8 --> s5: no controls left
+  s8 --> s7: no controls left
+  settling --> s7: no controls left
+  settling --> s10: no controls left
+  settling --> s9: reads a queued control
+  s9 --> s7: no controls left
+```
+
 ## Read a result
 
 A pass holds only for the bounds and assumptions below. For a failure, open
@@ -301,9 +348,9 @@ order. Step 7 now finds `ended` set by step 5 and admits nothing.
 4. Update each affected SHA-256 in `source.json` from the inspected working
    file (`sha256sum <path>`), and move `sync_commit` to the inspected commit
    only after confirming the model describes it. During an uncommitted change,
-   retain the prior commit and state that its file hashes describe the working
-   change; refresh the commit when it exists. Hash updates are not a substitute
-   for step 2.
+   keep the prior commit; the next maintenance pass reads from it. Do not write which commit a hash describes; `source.json` is that record. If the sync
+   commit is missing from history (a rebase), read from the last commit that changed `source.json`.
+   Hash updates are not a substitute for step 2.
 5. Run the full check and negative controls. Replay any new counterexample;
    preserve a real failure. The known failure may be resolved only with code
    evidence and a faithful full-model pass, plus the real-code replay.

@@ -56,15 +56,19 @@ own, so either order could (not tried on a live session).
 
 ## Covers
 
-Sync commit: `c7e6524ccdc225b4cf8f099ab6a5e2f2da2bc999`. [source.json](source.json) records the
+Sync commit: `7e5f31deed648c159bfed41245116d06b5711fbb`. [source.json](source.json) records the
 whole-file hash of `hold.rs`. Matching hashes establish synchronization only,
-not that the event model fits. Changes since `6baf0f0e` alter hook routing and
+not that the event model fits.
+
+Covers: crates/thalvi-desktop/src/hold.rs '.agents/skills/formal-hold-keys/**'
+
+`hold.rs` last changed in `27430c3b`. Changes since `6baf0f0e` alter hook routing and
 its tests (`251fd063`, `27430c3b`); `HoldInput`, `Presses`, their bounds and the
 AltGr event harness remain unchanged. The merged history also contains the
 already represented AltGr addition `51c26f40` and key-validation/message changes
 `0baa95a4`, `c056fa4c`. Hook routing itself remains outside this proof.
 
-The runner-control property (#525; inspected through `c7e6524`) moves channel creation into
+The runner-control property (#525) moves channel creation into
 `EngineLink::wire` and makes `Runner` and `Session` generic. The same `HoldInput` watch reaches
 the engine and runner cursors; `apply_engine`, `capture`, `pressed` and `while_delivering`
 keep their bodies unchanged. No hold observation, handoff, key event or bound changes, and
@@ -170,8 +174,9 @@ to make a run pass.
    old wording, the new wording and that evidence here.
 4. Update the SHA-256 in `source.json` (`sha256sum crates/thalvi-desktop/src/hold.rs`),
    and move `sync_commit` only after confirming the harness describes that
-   commit; for an uncommitted change, keep the previous commit and say the
-   hash describes the working tree.
+   commit; for an uncommitted change, keep the previous commit; the next
+   maintenance pass reads from it. Do not write which commit a hash describes; `source.json` is that record. If the sync
+   commit is missing from history (a rebase), read from the last commit that changed `source.json`.
 5. Run the check and `--self-test`. A fix for the finding must turn
    `FreeKeyStartsHold` to `HOLDS` without breaking the other three; update the
    finding text here and add its mutation.
@@ -196,7 +201,10 @@ its press (the 200 ms is not modelled), and only the wait of the latest press or
 the oldest earlier one runs out at a time.
 
 Not verified: histories longer than the bounds, events more than a second apart
-(an expired early release), a key already down when the app starts, other
+(an expired early release), a key already down when the app starts or when
+Hyprland binds the keys late (`hold_binds.rs`: after a refused start, or when it
+replaces binds whose program is gone), which can deliver a release without its
+press, other
 cursors and `skip`, the Windows hook's own event handling, the engine's
 reaction to a press beyond `take` (cues, capture, delivery), and real input
 devices. The harness drives the real `HoldInput` and `Presses` on one thread;
