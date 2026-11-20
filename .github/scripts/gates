@@ -109,6 +109,9 @@ gate_release() {
 
 gate_formal() {
   step python3 .github/scripts/formal-source-hashes.py
+  step python3 .github/scripts/formal-source-hashes.test.py
+  step python3 .github/scripts/formal-checks.test.py
+  step python3 .github/scripts/formal-checks.py
 }
 
 run_component() {

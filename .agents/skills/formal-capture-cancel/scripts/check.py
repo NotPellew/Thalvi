@@ -111,7 +111,7 @@ def run(java, jar, evidence, label, scenario='all', flags=(), invariant=None, mu
     return violation.group(1) if violation else None
 
 
-def chart(java, jar):
+def chart(java, jar, output):
     """Dumps the faithful model's states under TypeOK alone and draws chart.mmd from view.py."""
     scratch = Path(tempfile.mkdtemp(prefix='thalvi-formal-chart-', dir='/var/tmp'))
     shutil.copyfile(SKILL / f'{MODEL}.tla', scratch / f'{MODEL}.tla')
@@ -130,7 +130,7 @@ def chart(java, jar):
         return 2
     drawn = subprocess.run([sys.executable, '-I', str(SKILL / 'scripts' / 'chart.py'),
                             '--dot', str(dot), '--view', str(SKILL / 'view.py'),
-                            '--out', str(SKILL / 'chart.mmd')], check=False)
+                            '--out', str(output)], check=False)
     shutil.rmtree(scratch)
     return drawn.returncode
 
@@ -140,9 +140,11 @@ def main():
     parser.add_argument('--self-test', action='store_true', help='check guard-removal negative controls')
     parser.add_argument('command', nargs='?', choices=['chart'],
                         help='draw chart.mmd from the model for review; never a verdict')
+    parser.add_argument('--out', type=Path, default=SKILL / 'chart.mmd',
+                        help='output path for the chart command')
     args = parser.parse_args()
     if args.command == 'chart':
-        return chart(java_command(), fetch(TLC_NAME, TLC_URL, TLC_SHA))
+        return chart(java_command(), fetch(TLC_NAME, TLC_URL, TLC_SHA), args.out)
     source_check()
     jar = fetch(TLC_NAME, TLC_URL, TLC_SHA)
     java = java_command()
