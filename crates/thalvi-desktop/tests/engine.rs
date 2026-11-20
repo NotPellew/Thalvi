@@ -1719,8 +1719,12 @@ async fn cancelling_from_outside_stops_whatever_the_capture_is_doing() {
                 rig.handle.cancel();
                 assert_eq!(
                     finished(task).await,
-                    CaptureOutcome::Cancelled {
-                        dictated: (!matches!(moment, Moment::Starting)).then(|| "Hello".to_owned())
+                    match moment {
+                        Moment::AcceptedCue => accepted(CaptureRoute::Paste, "Hello"),
+                        _ => CaptureOutcome::Cancelled {
+                            dictated: (!matches!(moment, Moment::Starting))
+                                .then(|| "Hello".to_owned()),
+                        },
                     }
                 );
                 let log = rig.cue_log();
@@ -2323,8 +2327,8 @@ fn capture_and_listen(
     })
 }
 
-/// When the extras go out: the capture ends at 3500 and the accepted cue takes 100 ms.
-const MERGE_STARTS: u64 = 3600;
+/// The extras go out as the capture ends, while the accepted cue plays.
+const MERGE_STARTS: u64 = 3500;
 
 const ALL: RecordKinds = RecordKinds {
     metrics: true,
@@ -4026,6 +4030,7 @@ async fn every_cue_records_when_it_started_when_it_is_audible_and_what_the_user_
             let timing = CueTiming {
                 start: ms(40),
                 output: Some(ms(15)),
+                rebuilt: false,
             };
             let mut lines = cue_lines("cue-timing-dictation", timing, Run::Dictation).await;
             lines.extend(cue_lines("cue-timing-failure", timing, Run::Failure).await);
@@ -4103,6 +4108,7 @@ async fn a_device_that_reports_no_delay_leaves_output_empty_and_a_failed_cue_has
             let silent = CueTiming {
                 start: ms(30),
                 output: None,
+                rebuilt: false,
             };
             let lines = cue_lines("cue-timing-silent", silent, Run::Dictation).await;
             let wake = &lines[0];
@@ -4144,6 +4150,7 @@ async fn cue_lines_hold_timings_only_never_what_was_said_or_heard() {
             let timing = CueTiming {
                 start: ms(40),
                 output: Some(ms(15)),
+                rebuilt: false,
             };
             let lines = cue_lines("cue-timing-privacy", timing, Run::Dictation).await;
             assert_eq!(
@@ -7608,7 +7615,7 @@ async fn a_buffering_streaming_extra_is_told_the_audio_is_complete_and_merges_it
                 r#"["live words","X words"]"#
             );
             extras_were(&extra_metrics(&dir), &[("X", "ok", true)]);
-            assert_eq!(extra_duration(&dir, "X").round(), 400.0);
+            assert_eq!(extra_duration(&dir, "X").round(), 300.0);
         })
         .await;
 }
@@ -7656,6 +7663,171 @@ async fn a_streaming_extra_is_waited_for_until_every_word_it_heard_is_final() {
                 .unwrap();
             assert_eq!(metric["api"], "realtime");
             assert_eq!(metric["model"], "m");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
+    LocalSet::new()
+        .run_until(async {
+            for cleanup in [false, true] {
+                let (url, _asked, _feed) = chat(Chat::After(50, says!("hello world"))).await;
+                let config = if cleanup {
+                    cleaning(&url)
+                } else {
+                    "{}".to_owned()
+                };
+                let (mut rig, mut engine, mut frames) = Rig::new(&config);
+                rig.cues.never_finishes(Cue::Accepted);
+                rig.cues.mutes(&rig.gate);
+                let task = tokio::task::spawn_local(async move {
+                    assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                    let outcome = engine.capture(&mut frames, None).await;
+                    (outcome, engine)
+                });
+                rig.hold().await;
+                rig.say(1000, Say::Partial("hello world")).await;
+                rig.release(1200).await;
+                rig.say(1250, Say::Final("hello world")).await;
+                if cleanup {
+                    rig.at(1300).await;
+                }
+                assert_eq!(rig.started(Cue::Accepted), [1250]);
+                assert!(
+                    task.is_finished(),
+                    "paste is ready while the accepted cue still plays"
+                );
+                let (outcome, engine) = task.await.unwrap();
+                assert_eq!(outcome, accepted(CaptureRoute::Paste, "hello world"));
+                assert!(!rig.cue_log().iter().any(|(_, log)| matches!(
+                    log,
+                    CueLog::Finished(Cue::Accepted) | CueLog::Cut(Cue::Accepted)
+                )));
+                assert!(
+                    !rig.gate.is_enabled(),
+                    "the remaining cue still mutes input"
+                );
+                rig.handle.cancel();
+                settle().await;
+                engine.finish().await;
+                assert!(
+                    rig.gate.is_enabled(),
+                    "input returns after the remaining cue stops"
+                );
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("consecutive-holds");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, mut engine, mut frames) = Rig::recording("{}", recorder);
+            rig.cues.mutes(&rig.gate);
+            rig.cues.set_length(Cue::Accepted, ms(10_000));
+            let (delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+            let task = tokio::task::spawn_local(async move {
+                for _ in 0..2 {
+                    assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                    let outcome = engine.capture(&mut frames, None).await;
+                    delivered.send(outcome).unwrap();
+                }
+                engine
+            });
+            rig.hold().await;
+            rig.say(1000, Say::Partial("first words")).await;
+            rig.release(1200).await;
+            rig.say(1250, Say::Final("first words")).await;
+            assert_eq!(
+                deliveries.try_recv().unwrap(),
+                accepted(CaptureRoute::Paste, "first words")
+            );
+            assert!(
+                !rig.gate.is_enabled(),
+                "the first ending cue is still playing"
+            );
+
+            rig.server.connect_again();
+            rig.at(1300).await;
+            rig.press().await;
+            rig.server.ready();
+            settle().await;
+            assert!(
+                rig.gate.is_enabled(),
+                "the next hold hears from the press while the old end cue is cut: {:?}, {:?}",
+                rig.state(),
+                rig.cue_log()
+            );
+            assert!(rig.cue_log().contains(&(1300, CueLog::Cut(Cue::Accepted))));
+            assert_eq!(
+                rig.started(Cue::Wake),
+                [0, 1300],
+                "the new start cue does not wait behind the old end cue"
+            );
+            rig.at(1350).await;
+            rig.feed.send(quiet(55));
+            settle().await;
+            rig.at(1530).await;
+            assert!(
+                tags(&rig.sent()).contains(&55),
+                "words over the second start cue reach recognition"
+            );
+            rig.say(1600, Say::Partial("second words")).await;
+            rig.release(1800).await;
+            rig.say(1850, Say::Final("second words")).await;
+            assert_eq!(
+                deliveries.try_recv().unwrap(),
+                accepted(CaptureRoute::Paste, "second words")
+            );
+            let engine = finished(task).await;
+            let rows = read_lines(&dir.join("metrics.jsonl"));
+            assert!(
+                rows.iter().any(|row| row["event"] == "desktop_end_cue"
+                    && row["cue"] == "accepted"
+                    && row["outcome"] == "cancelled"),
+                "cutting the old cue keeps its cancellation metric"
+            );
+            let cut = rows
+                .iter()
+                .find(|row| row["event"] == "desktop_end_cue" && row["outcome"] == "cancelled")
+                .unwrap();
+            assert_eq!(
+                cut["start_ms"], 25.0,
+                "cutting a sounding cue keeps its first-sample timing"
+            );
+            assert_eq!(cut["output_ms"], 15.0);
+            assert_eq!(cut["audible_ms"], 40.0);
+            rig.handle.cancel();
+            settle().await;
+            engine.finish().await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cue_metrics_mark_only_stream_rebuilds() {
+    LocalSet::new()
+        .run_until(async {
+            for rebuilt in [false, true] {
+                let timing = CueTiming {
+                    start: ms(25),
+                    output: Some(ms(15)),
+                    rebuilt,
+                };
+                let lines =
+                    cue_lines(&format!("cue-rebuilt-{rebuilt}"), timing, Run::Dictation).await;
+                for line in lines {
+                    assert_eq!(
+                        line.get("rebuilt"),
+                        rebuilt.then_some(&serde_json::Value::Bool(true)),
+                        "only rebuilt cues carry rebuilt: true"
+                    );
+                }
+            }
         })
         .await;
 }
