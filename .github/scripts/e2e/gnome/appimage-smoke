@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+# Smoke-test a Linux AppImage in headless software GNOME.
+#
+#   .github/scripts/e2e/gnome/appimage-smoke APPIMAGE OUT_DIR
+#
+# Starts GNOME Wayland and Xwayland without /dev/dri, mounts the AppImage through FUSE
+# outside the sandbox, and binds that filesystem read-only. Feeds the committed
+# dictation WAV through the on-device Nemotron model, checks the clipboard and a
+# Ctrl+V into an owned editor, then checks that Recognition rendered.
+# OUT_DIR receives logs, status, metrics, clipboard, screenshots and teardown.
+# It does not receive the run's X11 cookie. Models already present in
+# THALVI_MODEL_CACHE or ~/.local/share/thalvi/models are copied in and the run
+# stays offline; otherwise the app may download them and they are saved back to
+# THALVI_MODEL_CACHE under the nemotron_160ms id.
+set -euo pipefail
+
+[[ $# -eq 2 && -f $1 ]] || { echo "usage: appimage-smoke APPIMAGE OUT_DIR" >&2; exit 2; }
+image=$1
+out=$2
+root=$(cd "$(dirname "$0")/../../../.." && pwd)
+rig=$root/.agents/skills/verify-thalvi/scripts/thalvi-desktop-rig
+check=$root/.github/scripts/e2e/gnome/check
+wav_src=$root/.github/scripts/e2e/fixtures/dictation-feed.wav
+expected=$(tr -d '\r' < "$root/.github/scripts/e2e/fixtures/dictation.txt")
+expected=${expected%$'\n'}
+sentinel=THALVI-GNOME-SENTINEL-603
+probe=$(mktemp -d /var/tmp/t603.XXXXXX)
+run=
+victim_pid=
+mount_pid=
+mount_dir=
+mount_at=
+
+mkdir -p "$out"
+export THALVI_RIG_BASE=$probe/rig
+
+await() {
+  local deadline=$((SECONDS + $1)) label=$2
+  shift 2
+  until "$@"; do
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for $label" >&2
+      return 1
+    fi
+    sleep 0.2
+  done
+}
+
+models_ready() {
+  local dir=$1
+  [[ -f $dir/nemotron_160ms.tokens.txt && -f $dir/nemotron_160ms.encoder.int8.onnx \
+    && -f $dir/melspectrogram.onnx && -f $dir/embedding_model.onnx ]] || return 1
+  compgen -G "$dir/hey_thalvi*.onnx" > /dev/null
+}
+
+copy_models() {
+  local src=$1 dst=$2
+  mkdir -p "$dst"
+  (
+    shopt -s nullglob
+    local files=("$src"/nemotron_160ms.* "$src"/melspectrogram.onnx "$src"/embedding_model.onnx \
+      "$src"/hey_thalvi*.onnx "$src"/hey_mycroft*.onnx "$src"/kws_gigaspeech_3m.*)
+    (( ${#files[@]} )) && cp -a "${files[@]}" "$dst/"
+    [[ -d $src/openwakeword ]] && cp -a "$src/openwakeword" "$dst/"
+    [[ -d $src/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01 ]] &&
+      cp -a "$src/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01" "$dst/"
+  )
+}
+
+count_file_captures() {
+  local metrics=$run/home/.local/share/thalvi/recordings/metrics.jsonl
+  if [[ ! -s $metrics ]]; then
+    echo 0
+    return
+  fi
+  jq -s '[.[] | select(.event == "desktop_capture_flow" and .outcome == "ok" and .source == "file")] | length' "$metrics"
+}
+
+copy_evidence() {
+  local name src
+  [[ -n $run && -d $run/out ]] || return 0
+  for name in isolation.txt sandbox-mount executable-proof app-mounted.log status.json state.json \
+    metrics.jsonl clipboard.txt victim.txt victim-focus.log recognition.png delivery.png \
+    show-recognition.json windows.txt gnome-shell.log committed-feed.json session.txt renderer.txt; do
+    src=$run/out/$name
+    [[ -f $src ]] && cp -a "$src" "$out/$name"
+  done
+  local metrics=$run/home/.local/share/thalvi/recordings/metrics.jsonl
+  [[ -f $metrics ]] && cp -a "$metrics" "$out/metrics.jsonl"
+  # The cookie authenticates this run's X server. Keep it out of the evidence directory.
+  rm -f "$out/x11.auth" "$out/"*x11.auth*
+}
+
+save_models() {
+  local cache=${THALVI_MODEL_CACHE:-} models
+  [[ -n $cache && -n $run ]] || return 0
+  models=$run/home/.local/share/thalvi/models
+  [[ -d $models ]] || return 0
+  mkdir -p "$cache"
+  cp -a "$models"/. "$cache/"
+}
+
+unmount_image() {
+  local how=not-mounted gone=yes
+  if [[ -n $mount_dir ]] && mountpoint -q "$mount_dir"; then
+    if fusermount3 -u "$mount_dir" 2>"$out/unmount.err"; then
+      how=detached
+    else
+      if [[ -n $mount_pid ]]; then
+        kill "$mount_pid" 2>/dev/null || true
+        wait "$mount_pid" 2>/dev/null || true
+      fi
+      if fusermount3 -u "$mount_dir" 2>>"$out/unmount.err"; then
+        how=detached-after-wait
+      elif fusermount3 -uz "$mount_dir" 2>>"$out/unmount.err"; then
+        how=lazy
+      else
+        how=failed
+        gone=no
+      fi
+    fi
+  fi
+  if [[ -n $mount_pid ]]; then
+    kill "$mount_pid" 2>/dev/null || true
+    wait "$mount_pid" 2>/dev/null || true
+  fi
+  if [[ -n $mount_dir ]] && mountpoint -q "$mount_dir"; then
+    gone=no
+    how=still-mounted
+  elif [[ -n $mount_dir && -d $mount_dir ]]; then
+    rmdir "$mount_dir" 2>/dev/null || true
+  fi
+  printf 'unmount=%s\nmount_gone=%s\n' "$how" "$gone" > "$out/teardown-mount.txt"
+  [[ $gone == yes ]]
+}
+
+cleanup() {
+  local rc=$? app_holder='' comp_holder='' app_gone=yes comp_gone=yes
+  trap - EXIT TERM INT
+  set +e
+  if [[ -n $victim_pid ]]; then
+    kill "$victim_pid" 2>/dev/null || true
+    wait "$victim_pid" 2>/dev/null || true
+  fi
+  if [[ -n $run && -d $run ]]; then
+    [[ -s $run/app.pid ]] && app_holder=$(cat "$run/app.pid")
+    [[ -s $run/compositor.pid ]] && comp_holder=$(cat "$run/compositor.pid")
+    timeout 8 "$rig" ctl "$run" quit > "$out/quit.json" 2>/dev/null || true
+    "$rig" down "$run" > "$out/down.txt" 2>/dev/null || true
+    if [[ -n $app_holder ]] && kill -0 "$app_holder" 2>/dev/null; then
+      kill -KILL "$app_holder" 2>/dev/null || true
+      wait "$app_holder" 2>/dev/null || true
+      kill -0 "$app_holder" 2>/dev/null && app_gone=no
+    fi
+    if [[ -n $comp_holder ]] && kill -0 "$comp_holder" 2>/dev/null; then
+      kill -KILL "$comp_holder" 2>/dev/null || true
+      wait "$comp_holder" 2>/dev/null || true
+      kill -0 "$comp_holder" 2>/dev/null && comp_gone=no
+    fi
+    copy_evidence
+    save_models
+  fi
+  unmount_image || rc=1
+  {
+    echo "app_holder_gone=$app_gone"
+    echo "compositor_holder_gone=$comp_gone"
+    [[ -f $out/teardown-mount.txt ]] && cat "$out/teardown-mount.txt"
+  } > "$out/teardown.txt"
+  rm -rf "$probe"
+  exit "$rc"
+}
+trap cleanup EXIT TERM INT
+
+cat /etc/os-release > "$out/os-release"
+gnome-shell --version > "$out/gnome-version"
+cp "$image" "$probe/Thalvi.AppImage"
+chmod +x "$probe/Thalvi.AppImage"
+image=$probe/Thalvi.AppImage
+sha256sum "$image" > "$out/package.sha256"
+cp "$wav_src" "$probe/dictation-feed.wav"
+printf '%s\n' '{"stt":{"entries":[{"kind":"on_device","id":"ci","name":"On this computer","active":true,"model":"nemotron_160ms"}]},"recordings":{"metrics":true}}' > "$probe/desktop.json"
+
+models_copied=no
+model_src=${THALVI_MODEL_CACHE:-}
+if [[ -z $model_src || ! -d $model_src ]] || ! models_ready "$model_src"; then
+  model_src=${XDG_DATA_HOME:-$HOME/.local/share}/thalvi/models
+fi
+up_args=(up --gnome --software --size 1280x720)
+if models_ready "$model_src"; then
+  models_copied=prepared
+  up_args+=(--offline)
+fi
+printf 'models_copied=%s\nmodel_src=%s\n' "$models_copied" "$model_src" > "$out/models.txt"
+
+up=$("$rig" "${up_args[@]}")
+printf '%s\n' "$up" > "$out/rig-up"
+run=$(printf '%s\n' "$up" | sed -n 's/^RUN_DIR=//p')
+[[ -n $run && -d $run ]]
+if [[ $models_copied == prepared ]]; then
+  copy_models "$model_src" "$run/home/.local/share/thalvi/models"
+  models_copied=yes
+  printf 'models_copied=yes\nmodel_src=%s\n' "$model_src" > "$out/models.txt"
+fi
+
+grep -F 'Created surfaceless renderer without GPU' "$run/out/gnome-shell.log" | tee "$run/out/renderer.txt" >/dev/null
+"$rig" proof "$run" > /dev/null
+# shellcheck disable=SC2016 # the sandbox shell expands these, not this script
+"$rig" sh "$run" sh -ec 'test "$XDG_CURRENT_DESKTOP" = GNOME; test "$XDG_SESSION_TYPE" = wayland; test ! -e /dev/dri; test ! -e /dev/snd' \
+  | tee "$run/out/session.txt"
+[[ -s $run/x11.number ]]
+if [[ $models_copied == yes ]]; then
+  ns=$(grep 'network namespace:' "$run/out/isolation.txt")
+  here=$(printf '%s\n' "$ns" | grep -oE 'net:\[[0-9]+\]' | head -1)
+  host=$(printf '%s\n' "$ns" | grep -oE 'net:\[[0-9]+\]' | tail -1)
+  [[ -n $here && -n $host && $here != "$host" ]]
+fi
+
+"$image" --appimage-mount > "$probe/mount.out" 2>"$probe/mount.err" &
+mount_pid=$!
+mounted() {
+  mount_dir=$(awk '/^\//{ print; exit }' "$probe/mount.out")
+  [[ -n $mount_dir && -x $mount_dir/AppRun ]] && mountpoint -q "$mount_dir"
+}
+await 15 'FUSE AppImage mount' mounted || { cat "$probe/mount.err" >&2; exit 1; }
+mount_at=$probe/mounted
+mkdir -p "$mount_at"
+"$rig" bind "$run" "$mount_dir" "$mount_at"
+"$rig" sh "$run" findmnt -rn -M "$mount_at" -o TARGET,SOURCE,FSTYPE,OPTIONS | tee "$run/out/sandbox-mount"
+grep -E 'fuse\.[^ ]+ ro,' "$run/out/sandbox-mount"
+
+{
+  printf '#!/usr/bin/env bash\nexport APPDIR=%q APPIMAGE=%q ARGV0=%q\n' "$mount_at" "$image" "$image"
+  # shellcheck disable=SC2016 # AppRun's shell expands APPDIR when the package starts
+  printf 'exec "$APPDIR/AppRun" "$@"\n'
+} > "$probe/launch"
+chmod +x "$probe/launch"
+"$rig" app-start "$run" "$probe/launch" --config "$probe/desktop.json" --tag mounted
+
+listening() {
+  timeout 8 "$rig" ctl "$run" status > "$run/out/status.json" 2>/dev/null &&
+    jq -e '.class == "listening"' "$run/out/status.json" >/dev/null
+}
+if [[ $models_copied == yes ]]; then listen_for=120; else listen_for=1500; fi
+await "$listen_for" 'the on-device recognizer to listen' listening
+timeout 12 "$rig" ctl "$run" state > "$run/out/state.json"
+jq -e '.ok == true' "$run/out/state.json" >/dev/null
+
+python3 - "$(cat "$run/app.pid")" "$mount_dir/usr/bin/thalvi-desktop" "$image" "$mount_at" <<'PY' | tee "$run/out/executable-proof"
+import os
+import subprocess
+import sys
+
+holder, binary, image, appdir = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+children = {}
+for line in subprocess.check_output(["ps", "-eo", "pid=,ppid="], text=True).splitlines():
+    pid, parent = map(int, line.split())
+    children.setdefault(parent, []).append(pid)
+todo = [holder]
+hits = []
+while todo:
+    pid = todo.pop()
+    todo.extend(children.get(pid, ()))
+    try:
+        if os.path.samefile(f"/proc/{pid}/exe", binary):
+            hits.append(pid)
+    except OSError:
+        pass
+if len(hits) != 1:
+    raise SystemExit(f"expected one mounted executable, found {hits}")
+pid = hits[0]
+print(os.readlink(f"/proc/{pid}/exe"))
+env = {}
+for item in open(f"/proc/{pid}/environ", "rb").read().split(b"\0"):
+    if b"=" not in item:
+        continue
+    key, value = item.split(b"=", 1)
+    env[key.decode()] = value.decode()
+for key in ("APPIMAGE", "APPDIR", "ARGV0"):
+    print(f"{key}={env.get(key, '')}")
+if env.get("APPIMAGE") != image or env.get("ARGV0") != image:
+    raise SystemExit("the running package does not name this AppImage")
+if env.get("APPDIR") != appdir:
+    raise SystemExit("the running package is not the read-only mount")
+PY
+
+"$rig" gnome "$run" victim /tmp/out/victim-focus.log > "$out/victim-process.log" 2>&1 &
+victim_pid=$!
+focused() { timeout 8 "$rig" gnome "$run" focus | grep -q '"victim"'; }
+await 20 'the editor to take focus' focused
+timeout 8 "$rig" gnome "$run" clip-set "$sentinel"
+got=$(timeout 8 "$rig" gnome "$run" clip)
+[[ $got == "$sentinel" ]]
+[[ ! -s $run/out/victim.txt ]]
+
+before=$(count_file_captures)
+timeout 30 "$rig" ctl "$run" feed "$probe/dictation-feed.wav" | tee "$run/out/committed-feed.json" | jq -e '.ok == true' >/dev/null
+file_landed() { [[ $(count_file_captures) -gt $before ]]; }
+await 40 'a new successful file capture' file_landed
+timeout 10 "$rig" shot "$run" delivery >/dev/null
+timeout 8 "$rig" gnome "$run" clip > "$run/out/clipboard.txt"
+"$check" transcript "$expected" "$(cat "$run/out/clipboard.txt")"
+if grep -q 'focus-out' "$run/out/victim-focus.log"; then
+  echo "the editor lost focus during dictation: $(tr '\n' ' ' < "$run/out/victim-focus.log")" >&2
+  exit 1
+fi
+[[ ! -s $run/out/victim.txt ]]
+"$rig" sh "$run" xdotool key --clearmodifiers ctrl+v
+await 8 'Ctrl+V in the editor' test -s "$run/out/victim.txt"
+"$check" transcript "$expected" "$(cat "$run/out/victim.txt")"
+
+timeout 12 "$rig" ctl "$run" show recognition | tee "$run/out/show-recognition.json" | jq -e '.took_effect == true' >/dev/null
+visible() {
+  timeout 8 "$rig" gnome "$run" windows > "$run/out/windows.txt" && grep -qi 'Thalvi settings' "$run/out/windows.txt"
+}
+await 25 'the Settings window' visible
+timeout 12 "$rig" shot "$run" recognition >/dev/null
+"$check" page-image "$run/out/recognition.png"
+echo "gnome appimage smoke passed"

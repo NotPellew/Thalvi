@@ -189,6 +189,77 @@ jobs:
           echo "seed: $seed" | tee -a "$GITHUB_STEP_SUMMARY"
           EXPLORE_SEED=$seed npm run explore --prefix crates/thalvi-app/ui
 
+  # Qualification only: a full manual Heavy run, on the same run's desktop-linux artifact.
+  # After five consecutive hosted passes, add gnome-appimage to verified.needs and report.needs
+  # and require needs.gnome-appimage.result == 'success' in verified's if. Until then a failure
+  # here does not move verified and does not open the ci-regression issue.
+  gnome-appimage:
+    name: gnome-appimage
+    needs: [start, ci]
+    if: needs.start.outputs.superseded == 'false' && github.event_name == 'workflow_dispatch' && (inputs.scope || 'all') == 'all'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Record the runner
+        run: |
+          mkdir -p gnome-smoke
+          cat /etc/os-release | tee gnome-smoke/os-release
+          printf 'ImageOS=%s\nImageVersion=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}" | tee gnome-smoke/runner-image
+      - name: Update Ubuntu package indexes
+        run: |
+          printf '%s\n' https://archive.ubuntu.com/ubuntu/ | sudo tee /etc/apt/apt-mirrors.txt
+          sudo timeout --kill-after=15s 180s apt-get \
+            -o Acquire::Retries=1 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25 \
+            -o APT::Update::Error-Mode=any update 2>&1 | tee gnome-smoke/apt-update.log
+      - name: Install GNOME smoke prerequisites
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+            timeout --kill-after=15s 420s apt-get \
+            -o Acquire::Retries=1 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25 \
+            install -y --no-install-recommends \
+            bubblewrap dbus-x11 fuse3 gir1.2-gtk-3.0 gnome-shell \
+            jq libasound2-plugins libayatana-appindicator3-1 libegl-mesa0 libgl1-mesa-dri \
+            libgtk-3-0t64 libwebkit2gtk-4.1-0 libxdo3 pipewire python3-gi \
+            tesseract-ocr wireplumber wl-clipboard x11-utils xdotool xwayland
+          gnome-shell --version | tee gnome-smoke/gnome-version
+      - name: Check user namespaces and FUSE
+        run: |
+          if ! bwrap --unshare-user --ro-bind / / true 2>gnome-smoke/userns-before; then
+            cat gnome-smoke/userns-before
+            grep -qiE 'permission denied|operation not permitted' gnome-smoke/userns-before
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --unshare-user --ro-bind / / true
+          fi
+          if [[ ! -e /dev/fuse ]]; then sudo modprobe fuse; fi
+          test -c /dev/fuse
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-linux
+          path: package
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: model-cache
+          key: nemotron_160ms
+      - name: Run the mounted AppImage in software GNOME
+        env:
+          THALVI_MODEL_CACHE: ${{ github.workspace }}/model-cache
+        run: |
+          image=$(find package -name '*.AppImage' -print -quit)
+          test -n "$image"
+          .github/scripts/e2e/gnome/appimage-smoke "$image" "$PWD/gnome-smoke"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: gnome-appimage
+          path: gnome-smoke
+          retention-days: 7
+
   verified:
     name: verified
     needs: [start, ci, mutants]
