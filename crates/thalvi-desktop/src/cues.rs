@@ -299,7 +299,7 @@ impl CueEngine {
                 .unwrap_or_else(PoisonError::into_inner) = Some(Voice {
                 samples: synthesize(cue, rate),
                 position: 0,
-                channels: 1,
+                channels: kept.channels,
                 rate,
                 playback: Arc::clone(playback),
             });
@@ -396,6 +396,7 @@ struct OutputState {
 
 struct Kept {
     id: cpal::DeviceId,
+    channels: usize,
     speaker: Box<dyn Speaker + Send>,
     state: Arc<OutputState>,
 }
@@ -420,6 +421,7 @@ impl Output for CpalOutput {
         let supported = device.default_output_config().map_err(CueError::Failed)?;
         let rate = supported.sample_rate();
         let config = supported.config();
+        let channels = usize::from(config.channels.max(1));
         let callback = Arc::clone(&state);
         let stream = match supported.sample_format() {
             SampleFormat::F32 => output::<f32>(&device, config, callback),
@@ -435,6 +437,7 @@ impl Output for CpalOutput {
         .map_err(CueError::Failed)?;
         Ok(Kept {
             id,
+            channels,
             speaker: Box::new(CpalSpeaker { stream, rate }),
             state,
         })
@@ -466,14 +469,12 @@ fn output<T>(
 where
     T: SizedSample + FromSample<f32>,
 {
-    let channels = usize::from(config.channels.max(1));
     let errors = Arc::clone(&state);
     device.build_output_stream(
         config,
         move |data: &mut [T], info: &OutputCallbackInfo| {
             let mut voice = state.voice.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(voice) = voice.as_mut() {
-                voice.channels = channels;
                 voice.fill(data, info);
             } else {
                 data.fill(T::from_sample(0.0));
@@ -578,6 +579,7 @@ mod tests {
             self.states.lock().unwrap().push(Arc::clone(&state));
             Ok(Kept {
                 id,
+                channels: 1,
                 speaker: Box::new(FakeSpeaker {
                     output: Arc::clone(self),
                     device,
