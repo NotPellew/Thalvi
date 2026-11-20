@@ -4,7 +4,6 @@ import { applyPatch, settingsPatch } from "./patch.ts";
 import { SETTINGS } from "./testing.ts";
 
 describe("the patch of a change", () => {
-  // (what changed, how, and the patch that carries only that)
   const changes: [string, (settings: Settings) => void, unknown][] = [
     ["nothing", () => undefined, {}],
     ["a switch", (s) => { s.overlay.draft = false; }, { overlay: { draft: false } }],

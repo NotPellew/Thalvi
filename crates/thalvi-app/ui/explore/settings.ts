@@ -1,5 +1,4 @@
 // Settings exploration for #526: fast-check drives Playwright against the vite dev server with `?fake`.
-// The seed, run count and replay path come from the environment and are read once in `readInputs`.
 
 import { createServer, type ViteDevServer } from "vite";
 import fc from "fast-check";

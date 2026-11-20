@@ -101,7 +101,6 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
         if (match && !row.classList.contains("off")) shown += 1;
         if (query !== "" && match) reveal(row);
       }
-      // A nested field is not a row, so it is matched on its own and its ancestors are opened.
       if (query !== "") {
         for (const field of page.node.querySelectorAll<HTMLElement>(".mini")) {
           const name = field.querySelector("span")?.textContent ?? "";
@@ -310,7 +309,6 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     openedProgrammatically.delete(node);
     touchedDuringSearch.add(node);
   };
-  // jsdom flips <details> on a summary click and does not fire toggle, so both are recorded.
   pagesNode.addEventListener("toggle", touchedByUser, true);
   pagesNode.addEventListener("click", (event) => {
     if (!(event.target instanceof Element) || !event.target.closest("summary")) return;
