@@ -26,7 +26,7 @@ use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
-use thalvi_desktop::host::{Desktop, Host, WindowApp};
+use thalvi_desktop::host::{Desktop, HoldReport, Host, WindowApp};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
 use thalvi_desktop::recognizer::Recognizer;
@@ -61,6 +61,8 @@ pub enum Control {
     Apply(Box<DesktopConfig>),
     /// The desktop refused to report the hold key; the notice says so in plain words.
     HoldKeyFailed(String),
+    /// The desktop can report the hold keys again.
+    HoldKeyWorks,
     /// The status overlay failed, or recovered (`None`). Shown while nothing else has failed.
     Overlay(Option<Failure>),
     /// Stops for an update, but only if nothing is going on.
@@ -225,10 +227,13 @@ impl EngineLink {
 
     /// Tells the user about a hold key problem found after the keys were set up, such as binds
     /// Hyprland dropped.
-    pub fn hold_problems(&self) -> impl Fn(String) + Send + Sync + 'static {
+    pub fn hold_problems(&self) -> impl Fn(HoldReport) + Send + Sync + 'static {
         let control = self.control.clone();
         move |notice| {
-            let _ = control.send(Control::HoldKeyFailed(notice));
+            let _ = control.send(match notice {
+                HoldReport::Problem(notice) => Control::HoldKeyFailed(notice),
+                HoldReport::Working => Control::HoldKeyWorks,
+            });
         }
     }
 
@@ -444,6 +449,10 @@ impl Publisher {
     /// Whether the status shows an overlay failure, which recovery may clear.
     fn overlay_failed(&self) -> bool {
         matches!(&self.view.borrow().mode, Mode::Failed(failure) if failure.headline == "Status overlay unavailable")
+    }
+
+    fn hold_failed(&self) -> bool {
+        matches!(&self.view.borrow().mode, Mode::Failed(failure) if failure.headline == "Hold key unavailable")
     }
 
     fn mode(&self, mode: Mode) {
@@ -1065,12 +1074,13 @@ impl<S: Rig> Runner<S> {
     async fn open_microphone(&mut self) {
         let mut requests = Requests {
             listening_off: self.paused,
+            hold_problem: self.hold_problem.take(),
             ..Requests::default()
         };
         requests.read_queued(&mut self.control);
         self.paused = requests.listening_off;
         self.stopping |= requests.quit;
-        self.hold_problem = requests.hold_problem.or(self.hold_problem.take());
+        self.hold_problem = requests.hold_problem;
         if let Some(model) = requests.reload {
             self.reload_speech_model(model);
         }
@@ -1227,6 +1237,12 @@ impl<S: Rig> Runner<S> {
             },
             Control::Apply(config) => self.apply(*config).await,
             Control::HoldKeyFailed(notice) => self.hold_problem = Some(notice),
+            Control::HoldKeyWorks => {
+                self.hold_problem = None;
+                if self.publisher.hold_failed() {
+                    self.publisher.mode(Mode::Idle);
+                }
+            }
             Control::Overlay(failure) => self.overlay(failure),
             Control::ReloadSpeechModel(model) => self.reload_speech_model(model),
             Control::RemoveChat(reply) => {
@@ -1435,6 +1451,7 @@ impl<S: Rig> Runner<S> {
                 config,
                 key,
                 publisher,
+                hold_problem,
                 ..
             } = &mut *self;
             let Some(Session {
@@ -1448,6 +1465,7 @@ impl<S: Rig> Runner<S> {
             else {
                 return Flow::Continue;
             };
+            requests.hold_problem = hold_problem.take();
             let outcome = Box::pin(drive(
                 engine.capture(frames, window),
                 control,
@@ -1503,7 +1521,7 @@ impl<S: Rig> Runner<S> {
         if let Some(config) = requests.pending.take() {
             self.pending = Some(config);
         }
-        self.hold_problem = requests.hold_problem.or(self.hold_problem.take());
+        self.hold_problem = requests.hold_problem;
         if requests.quit {
             // Nothing is delivered after a quit; what was dictated is already kept.
             return Flow::Quit;
@@ -1829,6 +1847,10 @@ impl Requests {
             }
             Some(Control::HoldKeyFailed(notice)) => {
                 self.hold_problem = Some(notice);
+                false
+            }
+            Some(Control::HoldKeyWorks) => {
+                self.hold_problem = None;
                 false
             }
             Some(Control::Overlay(_)) => false,
@@ -3538,6 +3560,112 @@ mod tests {
         let (outcome, requests, _) = run(vec![], vec![Control::ToggleListening]).await;
         assert_eq!(outcome, Some("cancelled"));
         assert!(requests.listening_off, "one toggle during a capture pauses");
+    }
+
+    struct NoticeRig;
+
+    impl Rig for NoticeRig {
+        type Recognizer = Chosen;
+        type Wake = WakeEngine;
+        type Cues = CpalCuePlayer;
+        type Input = Microphone;
+        type Host = TestHost;
+
+        async fn load(
+            &self,
+            _: &DesktopConfig,
+            _: &InputGate,
+            _: &Rc<Publisher>,
+        ) -> Result<Loaded<Self>, Failure> {
+            std::future::pending().await
+        }
+
+        fn input(&self, _: InputGate, _: Option<String>, _: Metrics) -> Microphone {
+            panic!("notice controls do not open a microphone")
+        }
+    }
+
+    #[tokio::test]
+    async fn working_hold_keys_clear_the_shown_or_pending_failure_without_ending_a_capture() {
+        let config = DesktopConfig::from_json_str("{}").unwrap();
+        let (link, ends, _) = EngineLink::wire(&config, false);
+        let publisher = Publisher::new(ends.status, config.ending_pause);
+        publisher.mode(Mode::Idle);
+        let mut runner = Runner::new(
+            config,
+            Arc::new(Delivery::new(TestHost::default())),
+            ends.control,
+            Rc::clone(&publisher),
+            ends.level,
+            ends.audio,
+            Shared {
+                rig: NoticeRig,
+                key: ends.key,
+                history: Arc::new(History::at("unused-history")),
+                drafts: Arc::new(Drafts::default()),
+                feeding: ends.feeding,
+                paused: false,
+                last_writing_window: ends.last_writing_window,
+            },
+        );
+        for show in [true, false] {
+            runner
+                .handle(Control::HoldKeyFailed("Hyprland refused F9.".to_owned()))
+                .await;
+            if show {
+                runner.show_hold_problem();
+                assert!(
+                    matches!(&publisher.view.borrow().mode, Mode::Failed(f) if f.headline == "Hold key unavailable")
+                );
+            }
+            link.hold_problems()(HoldReport::Working);
+            let control = runner.control.recv().await.unwrap();
+            runner.handle(control).await;
+            assert!(
+                runner.hold_problem.is_none(),
+                "recovery clears a pending hold failure"
+            );
+            assert_eq!(
+                publisher.view.borrow().mode,
+                Mode::Idle,
+                "recovery clears a shown hold failure"
+            );
+        }
+        runner.hold_problem = Some("Hyprland refused F9.".to_owned());
+        link.hold_problems()(HoldReport::Working);
+        runner.open_microphone().await;
+        assert!(
+            runner.hold_problem.is_none(),
+            "queued recovery clears the earlier pending failure"
+        );
+
+        let other = Mode::Failed(Failure {
+            kind: FailureKind::Other,
+            headline: "Another failure",
+            notice: "Keep this.".to_owned(),
+            causes: Vec::new(),
+        });
+        publisher.mode(other.clone());
+        runner.handle(Control::HoldKeyWorks).await;
+        assert_eq!(
+            publisher.view.borrow().mode,
+            other,
+            "unrelated failures stay visible"
+        );
+
+        let mut requests = Requests::default();
+        assert!(!requests.take(Some(Control::HoldKeyFailed(
+            "Hyprland refused F9.".to_owned()
+        ))));
+        assert!(
+            !requests.take(Some(Control::HoldKeyWorks)),
+            "recovery does not end the capture"
+        );
+        assert!(!requests.ended);
+        assert_eq!(
+            requests.hold_problem, None,
+            "recovery clears a failure pending during capture"
+        );
     }
 
     #[test]

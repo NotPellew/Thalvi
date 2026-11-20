@@ -450,6 +450,14 @@ fn held(source: Result<HoldSource, HostError>, keeping: bool) -> Held {
                 ..Held::default()
             }
         }
+        Ok(HoldSource::Refused { reason, watch }) if !keeping => Held {
+            watch: Some(watch),
+            refusal: Some(format!(
+                "{reason} The hold keys work once that is fixed and the desktop reloads its config; the wake word still works meanwhile."
+            )),
+            ..Held::default()
+        },
+        Ok(HoldSource::Refused { reason, .. }) => held(Err(reason), keeping),
         Err(error) => Held {
             refusal: Some(if keeping {
                 format!("{error} The keys that were set before still work.")
@@ -1611,6 +1619,36 @@ mod tests {
     impl Drop for Named {
         fn drop(&mut self) {
             self.0.lock().unwrap().push(self.1);
+        }
+    }
+
+    #[test]
+    fn a_refused_hold_start_keeps_its_watch_but_a_refused_key_change_drops_it() {
+        for keeping in [false, true] {
+            let dropped = Arc::new(Mutex::new(Vec::new()));
+            let held = held(
+                Ok(HoldSource::Refused {
+                    reason: HostError::Unsupported("Hyprland refused F9.".to_owned()),
+                    watch: HoldWatch::new(Named(Arc::clone(&dropped), "waiting")),
+                }),
+                keeping,
+            );
+            assert_eq!(
+                held.watch.is_some(),
+                !keeping,
+                "start must keep its waiting watch"
+            );
+            assert_eq!(
+                held.refusal.as_deref(),
+                Some(if keeping {
+                    "Hyprland refused F9. The keys that were set before still work."
+                } else {
+                    "Hyprland refused F9. The hold keys work once that is fixed and the desktop reloads its config; the wake word still works meanwhile."
+                })
+            );
+            assert_eq!(dropped.lock().unwrap().len(), usize::from(keeping));
+            drop(held);
+            assert_eq!(*dropped.lock().unwrap(), ["waiting"]);
         }
     }
 

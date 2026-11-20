@@ -24,7 +24,7 @@
       ]
     },
     "crates/thalvi-app/src/app.rs": {
-      "sha256": "0e537c782c8bac727e1c2d597aa769594ddffb01cfc8e75504ca16556190c240",
+      "sha256": "5c7e275b10ebf1c1ad973cff72fb8d67b0cee6ad4a3fc8aeef5dcc28c86156d4",
       "functions": [
         "setup",
         "AppState::config",

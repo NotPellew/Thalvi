@@ -11,8 +11,8 @@ use xkbcommon::xkb::{self, Keycode, Keysym};
 
 use super::command::{CommandError, CommandRunner, SystemRunner, tool, wl_copy};
 use super::{
-    App, AppMatchLimit, Delivered, HoldSource, Host, HostError, MAYBE_PASTED, Modifier, PasteText,
-    Shortcut, WebUrl, WindowApp,
+    App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, MAYBE_PASTED, Modifier,
+    PasteText, Shortcut, WebUrl, WindowApp,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 use hold_binds::{Events, Installed};
@@ -68,13 +68,15 @@ impl Hyprland {
     /// which report the presses and releases, so `_on_change` is not called. The binds go when the
     /// watch is dropped, and come back after a config reload. Later problems go to `on_problem`.
     ///
+    /// [`HoldSource::Refused`] when another bind holds a key or Hyprland refuses the binds; its
+    /// watch binds them at the next config reload that allows it.
+    ///
     /// # Errors
-    /// [`HostError::Unsupported`] when a key is not F1 to F12 alone, another bind holds it, or
-    /// Hyprland refuses the binds.
+    /// [`HostError::Unsupported`] when a key is not F1 to F12 alone or the program path cannot be bound.
     pub fn watch_hold_keys(
         keys: &[(HoldKind, HoldKey)],
         _on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
-        on_problem: impl Fn(String) + Send + Sync + 'static,
+        on_problem: impl Fn(HoldReport) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         /// Shared by every watch, since a key change has two at once.
         static INSTALLED: LazyLock<Installed> = LazyLock::new(Installed::default);
@@ -93,7 +95,6 @@ impl Hyprland {
             Events::system(),
             on_problem,
         )
-        .map(HoldSource::Watching)
     }
 }
 

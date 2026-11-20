@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::hold::{HoldKey, HoldKind};
 use crate::host::command::{CommandRunner, tool};
-use crate::host::{HoldWatch, HostError};
+use crate::host::{HoldReport, HoldSource, HoldWatch, HostError};
 
 /// What the user is told when Hyprland's reloads can no longer be followed.
 const RELOADS_NOT_FOLLOWED: &str = "Thalvi cannot follow Hyprland's config reloads. The hold keys stop working after a reload until Thalvi is restarted.";
@@ -68,6 +68,28 @@ impl Row {
                 ["hold-start", "hold-end", "write-start", "write-end"].contains(&word)
             })
     }
+
+    /// Whether this is a Thalvi hold bind whose program, the first shell word, is an absolute path that no longer exists.
+    fn is_leftover(&self) -> bool {
+        if !self.is_thalvi_hold() {
+            return false;
+        }
+        let mut word = String::new();
+        let mut quoted = false;
+        let mut chars = self.arg.trim_start().chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' => quoted = !quoted,
+                '\\' if !quoted => match chars.next() {
+                    Some(c) => word.push(c),
+                    None => return false,
+                },
+                c if c.is_whitespace() && !quoted => break,
+                c => word.push(c),
+            }
+        }
+        !quoted && Path::new(&word).is_absolute() && !Path::new(&word).exists()
+    }
 }
 
 /// `exe` as one shell word for the `exec` of a bind.
@@ -118,28 +140,42 @@ fn wanted(exe: &Path, keys: &[(HoldKind, HoldKey)]) -> Result<Vec<Bind>, HostErr
     Ok(binds)
 }
 
+/// What Hyprland needs to hold every wanted bind.
+struct Changes<'a> {
+    /// Keys whose binds go first: they hold binds of a Thalvi whose program is gone.
+    replace: Vec<&'a str>,
+    add: Vec<&'a Bind>,
+}
+
 /// The binds of `wanted` that Hyprland lacks, or the notice why they cannot be added: another bind
 /// holds a key, or a hold bind that Thalvi did not add does. A bind identical to a wanted one is
-/// adopted, so it is neither added again nor in the way.
-fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Vec<&'a Bind>, String> {
+/// adopted, so it is neither added again nor in the way, and a leftover is replaced.
+fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> {
     let mut keys: Vec<&str> = wanted.iter().map(|bind| bind.key.as_str()).collect();
     keys.dedup();
-    let (mut doubled, mut taken) = (Vec::new(), Vec::new());
+    let (mut doubled, mut taken, mut replace) = (Vec::new(), Vec::new(), Vec::new());
     for key in keys {
-        let strangers: Vec<&Row> = rows
+        let (leftovers, others): (Vec<_>, Vec<_>) = rows
             .iter()
-            .filter(|row| row.on(key) && !wanted.iter().any(|bind| bind.is(row)))
+            .filter(|row| row.on(key))
+            .partition(|row| row.is_leftover());
+        let conflicts: Vec<_> = others
+            .into_iter()
+            .filter(|row| !wanted.iter().any(|bind| bind.is(row)))
             .collect();
-        if strangers.iter().any(|row| row.is_thalvi_hold()) {
+        if !leftovers.is_empty() {
+            replace.push(key);
+        }
+        if conflicts.iter().any(|row| row.is_thalvi_hold()) {
             doubled.push(key);
-        } else if !strangers.is_empty() {
+        } else if !conflicts.is_empty() {
             taken.push(key);
         }
     }
     let mut notices = Vec::new();
     if !doubled.is_empty() {
         notices.push(format!(
-            "Hyprland already binds {} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf. If it has none, a Thalvi that did not quit left them, and hyprctl reload clears them.",
+            "Hyprland already binds {} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them.",
             doubled.join(" and ")
         ));
     }
@@ -156,10 +192,15 @@ fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Vec<&'a Bind>, String
     if !notices.is_empty() {
         return Err(notices.join(" "));
     }
-    Ok(wanted
-        .iter()
-        .filter(|bind| !rows.iter().any(|row| bind.is(row)))
-        .collect())
+    Ok(Changes {
+        add: wanted
+            .iter()
+            .filter(|bind| {
+                replace.contains(&bind.key.as_str()) || !rows.iter().any(|row| bind.is(row))
+            })
+            .collect(),
+        replace,
+    })
 }
 
 /// The binds this process has put in Hyprland, each with the watches that rely on it: a key change
@@ -207,13 +248,20 @@ impl Installed {
     }
 }
 
+/// Whether a watch relies on its binds in [`Installed`]: only a bound watch gives them up when dropped.
+enum State {
+    /// The first bind was refused; a reload may still bind them.
+    Waiting,
+    Bound,
+    Gone,
+}
+
 struct Shared<R> {
     run: Arc<R>,
     installed: Installed,
     binds: Vec<Bind>,
-    /// False once the watch is dropped, after which the binds are no longer to be kept.
-    live: Mutex<bool>,
-    tell: Box<dyn Fn(String) + Send + Sync>,
+    state: Mutex<State>,
+    tell: Box<dyn Fn(HoldReport) + Send + Sync>,
 }
 
 impl<R: CommandRunner> Shared<R> {
@@ -226,15 +274,23 @@ impl<R: CommandRunner> Shared<R> {
         let rows: Vec<Row> = serde_json::from_str(&list).map_err(|_| {
             HostError::NothingTyped("The desktop returned an invalid bind list.".to_owned())
         })?;
-        let missing = missing(&self.binds, &rows).map_err(HostError::Unsupported)?;
+        let Changes {
+            replace,
+            add: missing,
+        } = missing(&self.binds, &rows).map_err(HostError::Unsupported)?;
         if missing.is_empty() {
             return Ok(());
         }
-        let batch = missing
-            .iter()
-            .map(|bind| bind.keyword())
-            .collect::<Vec<_>>()
-            .join("; ");
+        let mut commands = Vec::new();
+        for bind in &missing {
+            if replace.contains(&bind.key.as_str())
+                && !commands.contains(&format!("keyword unbind , {}", bind.key))
+            {
+                commands.push(format!("keyword unbind , {}", bind.key));
+            }
+            commands.push(bind.keyword());
+        }
+        let batch = commands.join("; ");
         let refusal = match self.run.run("hyprctl", &["--batch", &batch], None) {
             Ok(reply) => {
                 let replies: Vec<&str> = reply
@@ -242,7 +298,7 @@ impl<R: CommandRunner> Shared<R> {
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
                     .collect();
-                if replies.len() == missing.len() && replies.iter().all(|reply| *reply == "ok") {
+                if replies.len() == commands.len() && replies.iter().all(|reply| *reply == "ok") {
                     return Ok(());
                 }
                 replies
@@ -276,27 +332,37 @@ impl<R: CommandRunner> Shared<R> {
             .collect::<Vec<_>>()
             .join("; ");
         if let Err(error) = self.run.run("hyprctl", &["--batch", &batch], None) {
-            (self.tell)(format!(
+            (self.tell)(HoldReport::Problem(format!(
                 "Thalvi could not remove its hold key binds from Hyprland: {error} They stay until Hyprland reloads its config."
-            ));
+            )));
         }
     }
 
     /// Puts the binds back after Hyprland dropped them, unless something else took a key meanwhile.
     fn rebind(&self) {
-        let live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
-        if !*live {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*state, State::Gone) {
             return;
         }
-        if let Err(error) = self.ensure() {
-            (self.tell)(format!(
+        match self.ensure() {
+            Ok(()) => {
+                if matches!(*state, State::Waiting) {
+                    self.installed.rely_on(&self.binds);
+                    *state = State::Bound;
+                }
+                (self.tell)(HoldReport::Working);
+            }
+            Err(error) => (self.tell)(HoldReport::Problem(format!(
                 "{error} The hold keys do not work until that is fixed and Hyprland reloads its config again."
-            ));
+            ))),
         }
     }
 
     fn is_live(&self) -> bool {
-        *self.live.lock().unwrap_or_else(PoisonError::into_inner)
+        !matches!(
+            *self.state.lock().unwrap_or_else(PoisonError::into_inner),
+            State::Gone
+        )
     }
 }
 
@@ -309,14 +375,17 @@ struct HoldBinds<R: CommandRunner> {
 impl<R: CommandRunner> Drop for HoldBinds<R> {
     fn drop(&mut self) {
         {
-            let mut live = self
+            let mut state = self
                 .shared
-                .live
+                .state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            *live = false;
-            let free = self.shared.installed.give_up(&self.shared.binds);
-            self.shared.unbind(&free);
+            let bound = matches!(*state, State::Bound);
+            *state = State::Gone;
+            if bound {
+                let free = self.shared.installed.give_up(&self.shared.binds);
+                self.shared.unbind(&free);
+            }
         }
         if let Some(close) = self.close_events.take() {
             close();
@@ -387,41 +456,51 @@ fn follow(mut events: impl BufRead, mut on_reload: impl FnMut()) {
 /// Problems that come later, with no call to return them from, go to `tell`.
 ///
 /// # Errors
-/// Why the keys cannot be bound: a key Hyprland cannot take, a bind in the way, or a refusal.
+/// A key Hyprland cannot take, or an unusable program path. A bind in the way returns a waiting watch.
 pub(super) fn bind<R: CommandRunner + 'static>(
     run: Arc<R>,
     installed: Installed,
     exe: &Path,
     keys: &[(HoldKind, HoldKey)],
     events: io::Result<Events>,
-    tell: impl Fn(String) + Send + Sync + 'static,
-) -> Result<HoldWatch, HostError> {
+    tell: impl Fn(HoldReport) + Send + Sync + 'static,
+) -> Result<HoldSource, HostError> {
     let shared = Arc::new(Shared {
         run,
         installed,
         binds: wanted(exe, keys)?,
-        live: Mutex::new(true),
+        state: Mutex::new(State::Waiting),
         tell: Box::new(tell),
     });
-    shared.ensure()?;
-    shared.installed.rely_on(&shared.binds);
+    let refusal = match shared.ensure() {
+        Ok(()) => {
+            shared.installed.rely_on(&shared.binds);
+            *shared.state.lock().unwrap_or_else(PoisonError::into_inner) = State::Bound;
+            None
+        }
+        Err(error) => Some(error),
+    };
     let close_events = if let Ok(Events { reader, close }) = events {
         let shared = Arc::clone(&shared);
         std::thread::spawn(move || {
             follow(reader, || shared.rebind());
             if shared.is_live() {
-                (shared.tell)(RELOADS_NOT_FOLLOWED.to_owned());
+                (shared.tell)(HoldReport::Problem(RELOADS_NOT_FOLLOWED.to_owned()));
             }
         });
         Some(close)
     } else {
-        (shared.tell)(RELOADS_NOT_FOLLOWED.to_owned());
+        (shared.tell)(HoldReport::Problem(RELOADS_NOT_FOLLOWED.to_owned()));
         None
     };
-    Ok(HoldWatch::new(HoldBinds {
+    let watch = HoldWatch::new(HoldBinds {
         shared,
         close_events,
-    }))
+    });
+    Ok(match refusal {
+        Some(reason) => HoldSource::Refused { reason, watch },
+        None => HoldSource::Watching(watch),
+    })
 }
 
 #[cfg(test)]
@@ -528,7 +607,7 @@ mod tests {
         bind
     }
 
-    const EXE: &str = "/opt/Thalvi/thalvi-desktop";
+    const EXE: &str = "/proc/self/exe";
 
     fn hold(name: &str) -> (HoldKind, HoldKey) {
         (HoldKind::Dictate, HoldKey::parse(name).unwrap())
@@ -553,10 +632,21 @@ mod tests {
             keys,
             Err(io::ErrorKind::NotFound.into()),
             move |notice| {
-                let _ = told.send(notice);
+                if let HoldReport::Problem(notice) = notice {
+                    let _ = told.send(notice);
+                }
             },
-        );
+        )
+        .and_then(watching);
         (watch, notices)
+    }
+
+    fn watching(source: HoldSource) -> Result<HoldWatch, HostError> {
+        match source {
+            HoldSource::Watching(watch) => Ok(watch),
+            HoldSource::Refused { reason, .. } => Err(reason),
+            HoldSource::Unavailable(reason) => panic!("Hyprland has hold keys: {reason}"),
+        }
     }
 
     fn defaults() -> [(HoldKind, HoldKey); 2] {
@@ -577,7 +667,7 @@ mod tests {
     #[test]
     fn the_keys_are_bound_in_one_batch_that_quotes_the_path_for_the_shell() {
         for (exe, quoted) in [
-            (EXE, "'/opt/Thalvi/thalvi-desktop'"),
+            ("/opt/Thalvi/thalvi-desktop", "'/opt/Thalvi/thalvi-desktop'"),
             (
                 "/home/me/Apps/Thalvi 1.0.AppImage",
                 "'/home/me/Apps/Thalvi 1.0.AppImage'",
@@ -679,13 +769,74 @@ mod tests {
     }
 
     #[test]
+    fn missing_programs_are_replaced_in_one_batch_including_adopted_pairs() {
+        let gone = "/tmp/.mount_ThalviGone/usr/bin/thalvi-desktop";
+        assert!(!Path::new(gone).exists());
+        for (name, program, adopted) in [
+            ("quoted", format!("'{gone}'"), false),
+            ("bare", gone.to_owned(), false),
+            (
+                "escaped quote",
+                "'/tmp/Thalvi gone'\\''s/thalvi-desktop'".to_owned(),
+                false,
+            ),
+            ("adopted pair", format!("'{gone}'"), true),
+        ] {
+            let mut existing = vec![
+                row("F9", false, "exec", &format!("{program} hold-start")),
+                row("F9", true, "exec", &format!("{program} hold-end")),
+                row("F10", false, "exec", &format!("{program} write-start")),
+                row("F10", true, "exec", &format!("{program} write-end")),
+            ];
+            if adopted {
+                existing.push(row("F9", false, "exec", &format!("'{EXE}' hold-start")));
+            }
+            let hypr = Compositor::new(existing);
+            let (watch, _) = bind_keys(&hypr, &Installed::default(), EXE, &defaults());
+            assert!(watch.is_ok(), "{name}: dead binds must be replaced");
+            assert_eq!(
+                hypr.commands(),
+                [
+                    "hyprctl -j binds".to_owned(),
+                    format!(
+                        "hyprctl --batch keyword unbind , F9; keyword bind , F9, exec, '{EXE}' hold-start; keyword bindrti , F9, exec, '{EXE}' hold-end; keyword unbind , F10; keyword bind , F10, exec, '{EXE}' write-start; keyword bindrti , F10, exec, '{EXE}' write-end"
+                    ),
+                ],
+                "{name}"
+            );
+            assert_eq!(
+                hypr.bound(),
+                bound_by_thalvi(EXE, &[("F9", "hold"), ("F10", "write")]),
+                "{name}"
+            );
+            drop(watch);
+            assert_eq!(hypr.bound(), [], "{name}: the watch owns the replacements");
+        }
+    }
+
+    #[test]
+    fn an_existing_program_is_refused_without_promising_reload_removes_it() {
+        let path = std::env::temp_dir().join(format!("thalvi-live-program-{}", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        let command = format!("{} hold-start", quoted(&path).unwrap());
+        let hypr = Compositor::new(vec![row("F9", false, "exec", &command)]);
+        let (watch, _) = bind_keys(&hypr, &Installed::default(), EXE, &defaults());
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(watch.err(), Some(HostError::Unsupported(
+            "Hyprland already binds F9 to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them.".to_owned()
+        )));
+        assert_eq!(hypr.commands(), ["hyprctl -j binds"]);
+        assert_eq!(hypr.bound().len(), 1);
+    }
+
+    #[test]
     fn a_key_another_bind_holds_is_refused_and_nothing_is_bound() {
         let taken = |key: &str| {
             format!("{key} is already bound in Hyprland. Pick another key or remove that bind.")
         };
         let thalvi = |keys: &str| {
             format!(
-                "Hyprland already binds {keys} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf. If it has none, a Thalvi that did not quit left them, and hyprctl reload clears them."
+                "Hyprland already binds {keys} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them."
             )
         };
         let cases = [
@@ -728,16 +879,6 @@ mod tests {
                     row("F9", true, "exec", "thalvi-desktop hold-end"),
                 ],
                 thalvi("F9"),
-            ),
-            (
-                "binds left by an instance that ran from another path",
-                vec![row(
-                    "F10",
-                    false,
-                    "exec",
-                    "'/old/Thalvi.AppImage' write-start",
-                )],
-                thalvi("F10"),
             ),
             (
                 "another program's bind that ends in a word like the hold commands",
@@ -924,6 +1065,96 @@ mod tests {
         }
     }
 
+    fn follow_start(
+        hypr: &Compositor,
+        installed: &Installed,
+        keys: &[(HoldKind, HoldKey)],
+    ) -> (
+        Result<HoldSource, HostError>,
+        UnixStream,
+        mpsc::Receiver<HoldReport>,
+    ) {
+        let (hyprland, ours) = UnixStream::pair().unwrap();
+        let (told, reports) = mpsc::channel();
+        let source = bind(
+            Arc::clone(&hypr.runner),
+            installed.clone(),
+            Path::new(EXE),
+            keys,
+            Events::on(ours),
+            move |report| {
+                let _ = told.send(report);
+            },
+        );
+        (source, hyprland, reports)
+    }
+
+    #[test]
+    fn a_refused_start_recovers_on_reload_and_reports_later_conflicts() {
+        let conflict = row("F9", false, "exec", "thalvi-desktop hold-start");
+        let hypr = Compositor::new(vec![conflict.clone()]);
+        let (source, mut events, reports) = follow_start(&hypr, &Installed::default(), &defaults());
+        let Ok(HoldSource::Refused { reason, watch }) = source else {
+            panic!("a refused start must keep following reloads");
+        };
+        assert!(
+            reason
+                .to_string()
+                .contains("one press would start two holds")
+        );
+        assert_eq!(hypr.commands(), ["hyprctl -j binds"]);
+        hypr.binds.lock().unwrap().clear();
+        events.write_all(b"configreloaded>>\n").unwrap();
+        assert_eq!(reports.recv_timeout(WAIT).unwrap(), HoldReport::Working);
+        assert_eq!(
+            hypr.bound(),
+            bound_by_thalvi(EXE, &[("F9", "hold"), ("F10", "write")])
+        );
+        // An already-bound watch reports success even if the compositor kept its binds.
+        events.write_all(b"configreloaded>>\n").unwrap();
+        assert_eq!(reports.recv_timeout(WAIT).unwrap(), HoldReport::Working);
+        let before = hypr.commands().len();
+        *hypr.binds.lock().unwrap() = vec![conflict];
+        events.write_all(b"configreloaded>>\n").unwrap();
+        assert_eq!(reports.recv_timeout(WAIT).unwrap(), HoldReport::Problem(
+            "Hyprland already binds F9 to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them. The hold keys do not work until that is fixed and Hyprland reloads its config again.".to_owned()
+        ));
+        assert_eq!(&hypr.commands()[before..], ["hyprctl -j binds"]);
+        assert_eq!(hypr.bound().len(), 1);
+        drop(watch);
+        events.set_read_timeout(Some(WAIT)).unwrap();
+        assert_eq!(events.read(&mut [0; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn dropping_a_never_bound_watch_leaves_the_earlier_watch_owning_its_keys() {
+        let installed = Installed::default();
+        let hypr = Compositor::new(vec![row("F7", false, "exec", "obs")]);
+        let (earlier, _) = bind_keys(&hypr, &installed, EXE, &[hold("F9")]);
+        let earlier = earlier.unwrap();
+        let (source, mut events, reports) =
+            follow_start(&hypr, &installed, &[hold("F9"), write("F7")]);
+        let Ok(HoldSource::Refused { watch, .. }) = source else {
+            panic!("a refused start must return its waiting watch");
+        };
+        let commands = hypr.commands();
+        drop(watch);
+        events.set_read_timeout(Some(WAIT)).unwrap();
+        assert_eq!(events.read(&mut [0; 1]).unwrap(), 0);
+        assert_eq!(
+            reports.recv_timeout(WAIT),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+        assert_eq!(
+            hypr.commands(),
+            commands,
+            "a never-bound watch unbinds nothing"
+        );
+        assert_eq!(hypr.bound().len(), 3, "the earlier watch still owns F9");
+        drop(earlier);
+        assert_eq!(hypr.bound(), [("F7".to_owned(), false, "obs".to_owned())]);
+    }
+
     struct Following {
         watch: HoldWatch,
         /// Hyprland's end of the event socket.
@@ -942,9 +1173,12 @@ mod tests {
             &defaults(),
             Events::on(ours),
             move |notice| {
-                let _ = told.send(notice);
+                if let HoldReport::Problem(notice) = notice {
+                    let _ = told.send(notice);
+                }
             },
         )
+        .and_then(watching)
         .unwrap();
         Following {
             watch,
@@ -1013,9 +1247,12 @@ mod tests {
             &defaults(),
             Err(io::ErrorKind::NotFound.into()),
             move |notice| {
-                let _ = told.send(notice);
+                if let HoldReport::Problem(notice) = notice {
+                    let _ = told.send(notice);
+                }
             },
         )
+        .and_then(watching)
         .unwrap();
         assert_eq!(notices.try_recv().unwrap(), RELOADS_NOT_FOLLOWED);
         assert_eq!(hypr.bound().len(), 4);

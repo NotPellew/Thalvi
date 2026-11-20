@@ -197,6 +197,17 @@ pub enum HoldSource {
     /// The desktop gives the app no way to see the key, as `reason` says: not a failure, since
     /// the user did nothing wrong, but the key does nothing and Settings says why.
     Unavailable(&'static str),
+    /// The desktop refused the keys for now; the watch binds them when the desktop reloads its config.
+    Refused { reason: HostError, watch: HoldWatch },
+}
+
+/// Whether the desktop can currently report the hold keys, after their initial setup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HoldReport {
+    /// The keys cannot be used; the notice says why.
+    Problem(String),
+    /// The keys work again after the desktop reloaded its config.
+    Working,
 }
 
 /// A key held while the last key of a [`Shortcut`] is pressed.
