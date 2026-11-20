@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -I
 """Helpers for the GNOME mode of thalvi-desktop-rig; each subcommand runs inside the rig's sandbox.
 
-Daemons (started by the rig): logind, input, mic. Tools: shot, windows, focus, key, type, clip, victim.
+Daemons (started by the rig): logind, input, mic. Tools: shot, windows, focus, key, type, clip, clip-set, victim.
 """
 import json
 import os
@@ -263,25 +263,54 @@ def run_clip():
     sys.stdout.write(result[0])
 
 
-def run_victim(log_path):
-    """A window with a text entry that logs every focus change, for checking what steals focus."""
+def run_clip_set(text):
+    """Replaces the clipboard text. store() hands it to the session clipboard manager."""
+    os.environ["GDK_BACKEND"] = "x11"
+    import gi
+
+    gi.require_version("Gdk", "3.0")
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gdk, GLib, Gtk
+
+    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+    clipboard.set_text(text, -1)
+    clipboard.store()
+    GLib.timeout_add(200, Gtk.main_quit)
+    Gtk.main()
+
+
+def run_victim(log_path, x11):
+    """A window that logs every focus change and writes its text buffer to victim.txt."""
+    if x11:
+        os.environ["GDK_BACKEND"] = "x11"
     import gi
 
     gi.require_version("Gtk", "3.0")
     from gi.repository import Gtk
 
     log = open(log_path, "a", buffering=1)
+    buffer = open(os.path.join(os.path.dirname(log_path), "victim.txt"), "w", buffering=1)
+    buffer.write("")
 
     def stamp(event):
         print("%.3f %s" % (time.time(), event), file=log)
 
+    def changed(widget):
+        buffer.seek(0)
+        buffer.truncate()
+        buffer.write(widget.get_text())
+        buffer.flush()
+
     window = Gtk.Window(title="victim")
     window.set_default_size(600, 300)
-    window.add(Gtk.Entry())
+    entry = Gtk.Entry()
+    entry.connect("changed", changed)
+    window.add(entry)
     window.connect("focus-in-event", lambda *_: stamp("focus-in"))
     window.connect("focus-out-event", lambda *_: stamp("focus-out"))
     window.connect("destroy", Gtk.main_quit)
     window.show_all()
+    entry.grab_focus()
     stamp("mapped")
     Gtk.main()
 
@@ -307,10 +336,12 @@ def main(argv):
         send_input("%s %s" % (verb, argv[2]))
     elif verb == "clip":
         run_clip()
-    elif verb == "victim" and len(argv) == 3:
-        run_victim(argv[2])
+    elif verb == "clip-set" and len(argv) >= 3:
+        run_clip_set(" ".join(argv[2:]))
+    elif verb in ("victim", "victim-x11") and len(argv) == 3:
+        run_victim(argv[2], x11=verb == "victim-x11")
     else:
-        sys.exit("usage: thalvi-gnome-rig.py logind|input|mic FIFO QUEUE|shot FILE|windows|focus|key NAME|type TEXT|clip|victim LOG")
+        sys.exit("usage: thalvi-gnome-rig.py logind|input|mic FIFO QUEUE|shot FILE|windows|focus|key NAME|type TEXT|clip|clip-set TEXT|victim LOG|victim-x11 LOG")
 
 
 main(sys.argv)

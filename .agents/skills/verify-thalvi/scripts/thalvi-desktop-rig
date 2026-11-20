@@ -10,10 +10,12 @@ GNOME_HELPER=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/thalvi-gnome-rig.py
 
 usage() {
   cat <<'EOF'
-up [--size WxH] [--gnome] [--mic] [--offline]
+up [--size WxH] [--gnome] [--mic] [--offline] [--software]
                            start the compositors (or headless GNOME Shell); prints RUN_DIR=<R> last. --mic gives a
                            Hyprland run the private microphone a --gnome run always has; --offline puts every sandbox
-                           of the run in a network namespace with only loopback
+                           of the run in a network namespace with only loopback; --software is only for a --gnome run
+                           and draws it without a GPU node
+bind R SRC DST             ro-bind the directory SRC at DST in every later sandbox of this run
 app-start R BIN [--config F] [--env K=V]... [--tag NAME] [--trace] [--hosted] [--nvidia]
                            start BIN (a thalvi-desktop binary) in its own sandbox; stdout/stderr go to R/out/app-NAME.log;
                            --trace records every socket the app and its children open to R/out/trace-NAME.txt (strace);
@@ -70,14 +72,22 @@ render_source() {
 # bwrap arguments shared by every process of a run. The host is read-only; /home, /tmp, /run/user
 # and /dev are replaced, so the developer's config, cache, models, sockets and sound devices are absent.
 sandbox_args() {
-  local r=$1 node
-  node=$(render_node)
+  local r=$1 node src dst
   printf '%s\0' --unshare-pid --unshare-ipc --die-with-parent --new-session --clearenv \
-    --ro-bind / / --tmpfs /home --tmpfs /tmp --tmpfs /run/user --dev /dev --proc /proc \
-    --dev-bind "$(render_source "$node")" "$node" \
-    --setenv __EGL_VENDOR_LIBRARY_FILENAMES /usr/share/glvnd/egl_vendor.d/50_mesa.json \
-    --setenv WLR_RENDER_DRM_DEVICE "$node" \
-    --dir "/run/user/$UID_NUM" --bind "$r/rt" "/run/user/$UID_NUM" \
+    --ro-bind / / --tmpfs /home --tmpfs /tmp --tmpfs /run/user --dev /dev --proc /proc
+  # A software GNOME run has no DRM node: Mesa's surfaceless renderer draws without /dev/dri.
+  if [ -e "$r/software" ]; then
+    printf '%s\0' \
+      --setenv __EGL_VENDOR_LIBRARY_FILENAMES /usr/share/glvnd/egl_vendor.d/50_mesa.json \
+      --setenv LIBGL_ALWAYS_SOFTWARE 1
+  else
+    node=$(render_node)
+    printf '%s\0' \
+      --dev-bind "$(render_source "$node")" "$node" \
+      --setenv __EGL_VENDOR_LIBRARY_FILENAMES /usr/share/glvnd/egl_vendor.d/50_mesa.json \
+      --setenv WLR_RENDER_DRM_DEVICE "$node"
+  fi
+  printf '%s\0' --dir "/run/user/$UID_NUM" --bind "$r/rt" "/run/user/$UID_NUM" \
     --dir /home/rig --bind "$r/home" /home/rig --bind "$r/out" /tmp/out \
     --setenv HOME /home/rig --setenv USER rig --setenv PATH /usr/local/bin:/usr/bin:/bin \
     --setenv XDG_RUNTIME_DIR "/run/user/$UID_NUM" --setenv XDG_CONFIG_HOME /home/rig/.config \
@@ -93,6 +103,11 @@ sandbox_args() {
     printf '%s\0' --tmpfs /run/dbus --bind "$r/x11" /tmp/.X11-unix
   fi
   [ ! -e "$r/mic" ] || printf '%s\0' --ro-bind "$GNOME_HELPER" /tmp/thalvi-gnome-rig.py
+  # The AppImage's FUSE mount stays outside the sandbox and is bound read-only at the recorded path.
+  if [ -s "$r/ro-bind" ]; then
+    { IFS= read -r src && IFS= read -r dst; } < "$r/ro-bind"
+    printf '%s\0' --ro-bind "$src" "$dst"
+  fi
 }
 
 # Starts "$@" detached, with a holder shell as its parent: bwrap's --die-with-parent follows the
@@ -221,26 +236,38 @@ EOF
   echo "RUN_DIR=$r"
 }
 
+cmd_bind() {
+  local r=$1 src=$2 dst=$3
+  [ -d "$r" ] || die "bind: no run $r"
+  [ -d "$src" ] || die "bind: no directory $src"
+  printf '%s\n%s\n' "$src" "$dst" > "$r/ro-bind"
+}
+
 cmd_up() {
-  local size=1920x1080 gnome=0 mic=0 offline=0
+  local size=1920x1080 gnome=0 mic=0 offline=0 software=0
   while [ $# -gt 0 ]; do
     case $1 in
       --size) size=$2; shift 2 ;;
       --gnome) gnome=1; shift ;;
       --mic) mic=1; shift ;;
       --offline) offline=1; shift ;;
+      --software) software=1; shift ;;
       *) die "up: unknown argument $1" ;;
     esac
   done
-  local node
-  node=$(render_node)
-  render_source "$node" > /dev/null  # dies here, in the main shell, on a bad THALVI_RIG_RENDER or an unusable primary node
+  [ "$software" = 0 ] || [ "$gnome" = 1 ] || die "up: --software is only for a --gnome run"
+  if [ "$software" = 0 ]; then
+    local node
+    node=$(render_node)
+    render_source "$node" > /dev/null  # dies here, in the main shell, on a bad THALVI_RIG_RENDER or an unusable primary node
+  fi
   mkdir -p "$BASE"
   local r
   r=$(mktemp -d "$BASE/run-XXXXXX")
   mkdir -p "$r/rt" "$r/home/.config" "$r/home/.local/share" "$r/home/.cache" "$r/out"
   chmod 700 "$r/rt"
   [ "$offline" = 0 ] || touch "$r/offline"
+  [ "$software" = 0 ] || touch "$r/software"
   [ "$gnome" = 0 ] && [ "$mic" = 0 ] || write_mic_files "$r"
   [ "$gnome" = 0 ] || { cmd_up_gnome "$r" "$size"; return; }
   [ -e "$r/mic" ] || printf 'pcm.!default { type null }\nctl.!default { type null }\n' > "$r/home/alsa.conf"
@@ -481,6 +508,7 @@ main() {
   local cmd=${1:-help}; shift || true
   case $cmd in
     up) cmd_up "$@" ;;
+    bind) [ $# -eq 3 ] || die "bind: usage: bind R SRC DST"; cmd_bind "$@" ;;
     app-start) cmd_app_start "$@" ;;
     app-stop) cmd_app_stop "$@" ;;
     victim) cmd_victim "$@" ;;
