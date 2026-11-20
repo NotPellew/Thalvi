@@ -168,6 +168,7 @@ Rename(o) ==
     /\ UNCHANGED <<mem, engine, inodes, nextInode, fd, content, lastField, lastSwitch>>
 
 \* AppState::apply (form saves) or AppState::remember: `*config = ...` under its lock.
+\* Resolving and sending the overlay style adds no file or config write and takes no save lock.
 \* A save that gets here returns Ok.
 Apply(o) ==
     /\ MayRun(o)
