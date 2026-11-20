@@ -28,6 +28,14 @@ function Find-Editor($Start) {
   return $null
 }
 
+function Find-FocusedEditor {
+  $editWindow = [SmokeFocus]::FocusedEditWindow([uint32]$ProcessId)
+  if ($editWindow -ne [IntPtr]::Zero) {
+    return [System.Windows.Automation.AutomationElement]::FromHandle($editWindow)
+  }
+  return Find-Editor ([System.Windows.Automation.AutomationElement]::FocusedElement)
+}
+
 function Get-EditorText($Element) {
   try {
     $pattern = $Element.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
@@ -46,9 +54,19 @@ try {
   Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class SmokeFocus {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct GuiThreadInfo {
+    public uint Size, Flags;
+    public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+    public int Left, Top, Right, Bottom;
+  }
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
+  [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetClassName(IntPtr window, StringBuilder name, int length);
   public static uint ForegroundProcess() {
     uint process;
     GetWindowThreadProcessId(GetForegroundWindow(), out process);
@@ -56,6 +74,17 @@ public static class SmokeFocus {
   }
   public static IntPtr ForegroundWindow() {
     return GetForegroundWindow();
+  }
+  public static IntPtr FocusedEditWindow(uint expectedProcess) {
+    var info = new GuiThreadInfo { Size = (uint)Marshal.SizeOf(typeof(GuiThreadInfo)) };
+    if (!GetGUIThreadInfo(0, ref info) || info.Focus == IntPtr.Zero) return IntPtr.Zero;
+    uint process;
+    GetWindowThreadProcessId(info.Focus, out process);
+    if (process != expectedProcess) return IntPtr.Zero;
+    var name = new StringBuilder(256);
+    GetClassName(info.Focus, name, name.Capacity);
+    return string.Equals(name.ToString(), "Edit", StringComparison.OrdinalIgnoreCase)
+      ? info.Focus : IntPtr.Zero;
   }
 }
 '@
@@ -67,8 +96,7 @@ public static class SmokeFocus {
   if ([int]$foreground -ne $ProcessId) {
     throw "foreground process is $foreground, not $ProcessId"
   }
-  $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-  $editor = Find-Editor $focused
+  $editor = Find-FocusedEditor
   if ($PrepareFocus -and $null -eq $editor) {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle([SmokeFocus]::ForegroundWindow())
     $edit = New-Object System.Windows.Automation.PropertyCondition(
@@ -81,8 +109,7 @@ public static class SmokeFocus {
     $editor = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $either)
     if ($null -eq $editor) { throw 'Notepad has no editor' }
     $editor.SetFocus()
-    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-    $editor = Find-Editor $focused
+    $editor = Find-FocusedEditor
     if ($null -eq $editor) { throw "Notepad's editor does not have focus" }
   }
   if ($null -eq $editor) { throw "Notepad's editor does not have focus" }
