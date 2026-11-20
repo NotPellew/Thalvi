@@ -126,7 +126,7 @@ function liveSelect(): HTMLSelectElement {
 
 /** Picks a live recognizer in the drop-down by the entry's name. */
 function use(name: string): void {
-  const option = Array.from(liveSelect().options).find((candidate) => candidate.textContent.startsWith(`${name} (`));
+  const option = Array.from(liveSelect().options).find((candidate) => candidate.textContent === name || candidate.textContent.startsWith(`${name} (`));
   if (!option) throw new Error(`no live choice ${name}`);
   choose(liveSelect(), option.value);
 }
@@ -1129,13 +1129,18 @@ describe("the Recognition page", () => {
     expect(recognition().textContent).not.toContain("Live streams.");
   });
 
-  it("lists every live-kind entry in the Live recognizer drop-down by name and group, with the one in use chosen", async () => {
-    await open({ ...several(), stt: { entries: [{ ...SERVER }, { ...GATEWAY }, { ...OPENAI }, device(undefined, false)] } });
+  it.each([
+    ["On this computer", "On this computer"],
+    ["ON THIS Computer", "ON THIS Computer"],
+    [" on this computer ", " on this computer "],
+    ["Laptop model", "Laptop model (on this computer)"],
+  ])("lists every live-kind entry in the Live recognizer drop-down by name and group, unless the name says the group (%j), with the one in use chosen", async (name, label) => {
+    await open({ ...several(), stt: { entries: [{ ...SERVER }, { ...GATEWAY }, { ...OPENAI }, { ...device(undefined, false), name }] } });
     goTo("recognition");
     expect(Array.from(liveSelect().options).map((option) => [option.value, option.textContent])).toEqual([
       ["direct", "Realtime speech server (streaming)"],
       ["gateway", "LLM Gateway (after you stop)"],
-      ["on-device", "On this computer (on this computer)"],
+      ["on-device", label],
     ]);
     expect(liveSelect().value).toBe("direct");
   });

@@ -247,7 +247,7 @@ pub enum CueLog {
 type Log = Rc<RefCell<Vec<(Duration, CueLog)>>>;
 
 struct CueScript {
-    lengths: Vec<(Cue, Duration)>,
+    lengths: Vec<(Cue, Option<Duration>)>,
     failing: Vec<Cue>,
     timing: CueTiming,
     /// The microphone gate a muted cue turns off while it plays, once a test hands it over.
@@ -276,12 +276,13 @@ impl FakeCuePlayer {
         let origin = Instant::now();
         let log = Log::default();
         let script = Rc::new(RefCell::new(CueScript {
-            lengths: vec![(Cue::Wake, Duration::from_millis(230))],
+            lengths: vec![(Cue::Wake, Some(Duration::from_millis(230)))],
             failing: Vec::new(),
             gate: None,
             timing: CueTiming {
                 start: Duration::from_millis(25),
                 output: Some(Duration::from_millis(15)),
+                rebuilt: false,
             },
         }));
         (
@@ -307,7 +308,12 @@ impl CueControl {
 
     /// How long `cue` takes to play.
     pub fn set_length(&self, cue: Cue, length: Duration) {
-        self.script.borrow_mut().lengths.push((cue, length));
+        self.script.borrow_mut().lengths.push((cue, Some(length)));
+    }
+
+    /// Keeps a cue playing until it is cancelled.
+    pub fn never_finishes(&self, cue: Cue) {
+        self.script.borrow_mut().lengths.push((cue, None));
     }
 
     /// What every cue reports as the timing of its first sample.
@@ -377,6 +383,11 @@ impl FakeCuePlayer {
 }
 
 impl CuePlayer for FakeCuePlayer {
+    fn timing_since(&self, _: std::time::Instant) -> Option<CueTiming> {
+        matches!(self.log.borrow().last(), Some((_, CueLog::Started(_))))
+            .then(|| self.script.borrow().timing)
+    }
+
     async fn play(&self, cue: Cue, mic: Mic) -> Result<Option<CueTiming>, CueError> {
         let (length, fails, timing, gate) = {
             let script = self.script.borrow();
@@ -385,7 +396,7 @@ impl CuePlayer for FakeCuePlayer {
                 .iter()
                 .rev()
                 .find(|(known, _)| *known == cue)
-                .map_or(Duration::from_millis(100), |(_, length)| *length);
+                .map_or(Some(Duration::from_millis(100)), |(_, length)| *length);
             let gate = script.gate.clone().filter(|_| mic == Mic::Muted);
             (length, script.failing.contains(&cue), script.timing, gate)
         };
@@ -396,7 +407,10 @@ impl CuePlayer for FakeCuePlayer {
             cue,
             done: false,
         };
-        tokio::time::sleep(length).await;
+        match length {
+            Some(length) => tokio::time::sleep(length).await,
+            None => std::future::pending().await,
+        }
         cut.done = true;
         self.record(CueLog::Finished(cue));
         if fails {

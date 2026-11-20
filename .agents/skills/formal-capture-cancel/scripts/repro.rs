@@ -222,6 +222,10 @@ async fn settings_apply_reports_presses_during_successful_and_failed_rebuilds() 
 
 struct ImmediateCues;
 impl CuePlayer for ImmediateCues {
+    fn timing_since(&self, _: std::time::Instant) -> Option<CueTiming> {
+        None
+    }
+
     async fn play(&self, _: Cue, _: Mic) -> Result<Option<CueTiming>, CueError> {
         Ok(None)
     }
@@ -277,6 +281,10 @@ async fn a_press_while_close_is_pending_is_reported_without_losing_delivery() {
 }
 
 async fn closing_capture(cancel: bool) {
+    tokio::task::LocalSet::new().run_until(closing_capture_local(cancel)).await;
+}
+
+async fn closing_capture_local(cancel: bool) {
     let config = DesktopConfig::from_json_str(r#"{"ending_pause":{"paste":0}}"#).unwrap();
     let (inner, mut server) = FakeRecognizer::new();
     let (entered_tx, entered) = oneshot::channel();

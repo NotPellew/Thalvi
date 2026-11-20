@@ -992,6 +992,12 @@ function isLive(entry: SpeechEntry): entry is LiveEntry {
   return entry.kind !== "extra";
 }
 
+/** An entry's label in the Live recognizer drop-down: its name, then its group unless the name already says it. */
+function liveChoice(entry: LiveEntry): string {
+  const group = LIVE_GROUP[entry.kind];
+  return entry.name.trim().toLowerCase() === group ? entry.name : `${entry.name} (${group})`;
+}
+
 /** Whether the entry also transcribes as an extra recognizer: an upload extra when active, a live one when flagged. */
 function isExtraOn(entry: SpeechEntry): boolean {
   return isLive(entry) ? entry.extra === true : entry.active;
@@ -1400,7 +1406,7 @@ function speech(context: PageContext): SpeechRows {
   });
 
   function syncLiveChoice(): void {
-    liveSelect.replaceChildren(...entries().filter(isLive).map((entry) => el("option", { value: entry.id }, `${entry.name} (${LIVE_GROUP[entry.kind]})`)));
+    liveSelect.replaceChildren(...entries().filter(isLive).map((entry) => el("option", { value: entry.id }, liveChoice(entry))));
     liveSelect.value = activeLive()?.id ?? "";
   }
 

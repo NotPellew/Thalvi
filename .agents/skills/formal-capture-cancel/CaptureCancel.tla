@@ -60,6 +60,8 @@ DrainOne == /\ phase \in {"pre", "finish"} /\ Len(queue) > 0
                            cueDone, cueAccepted, closeDone, secondary, writing, cleaning, result, delivered,
                            extraVars>>
 
+\* Engine::listen cuts and drains the previous capture's cue before this flow starts.
+\* Its watch version is consumed at capture entry; this model covers only the new capture.
 \* No control branch precedes the capture's first poll (biased select). Engine::capture starts
 \* the streaming extras' tasks when it is first polled, so a capture that never starts has none.
 PreEmpty == /\ phase = "pre" /\ queue = <<>>
@@ -69,10 +71,10 @@ PreEmpty == /\ phase = "pre" /\ queue = <<>>
                            stopRequested, cancelPending, cueDone, cueAccepted,
                            closeDone, secondary, writing, cleaning, result, delivered, extras, merged, starting>>
 
-\* The engine is Pending here: capture, a submit's cleanup, ending join, second pass or writing.
+\* The engine is Pending here: capture, a submit's cleanup, recognizer release, second pass or writing.
 Receive == /\ phase \in {"active", "cleaning", "ending", "secondary", "writing"}
            /\ ~quit /\ Len(queue) > 0
-           /\ (~cancelPending \/ (phase = "ending" /\ cueDone))
+           /\ (~cancelPending \/ phase = "ending")
            /\ (Scenario = "all" \/ ~cueDone)
            /\ LET c == Head(queue) IN
               /\ off' = NextOff(c, off) /\ quit' = (quit \/ (c = "quit"))
@@ -136,27 +138,22 @@ ActiveCancelled == /\ phase = "active" /\ cancelPending
 
 AfterEnding == IF secondary THEN "secondary" ELSE IF writing THEN "writing" ELSE "finish"
 
-\* Engine::end_cue polls cancellation first, but no longer polls once completed. When it ends the
-\* capture as cancelled, conclude cancels the extras.
-CueReturns == /\ phase = "ending" /\ ~cueDone
+\* The accepted cue runs independently: its completion or cancellation only records feedback.
+\* It may end while close, later processing or delivery admission has already finished.
+CueReturns == /\ (phase = "ending" \/ closeDone) /\ ~cueDone
               /\ cueDone' = TRUE /\ cueAccepted' = ~cancelPending
-              /\ phase' = IF ~closeDone THEN "ending"
-                           ELSE IF ~cancelPending /\ (secondary \/ writing) THEN AfterEnding ELSE "finish"
-              /\ result' = IF ~closeDone \/ (~cancelPending /\ (secondary \/ writing)) THEN "none"
-                            ELSE IF cancelPending THEN "cancelled" ELSE "accepted"
-              /\ extra' = IF phase' = "finish" /\ result' = "cancelled" THEN Released(extra) ELSE extra
-              /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
-                             stopRequested, cancelPending, closeDone, secondary, writing, cleaning, delivered,
-                             extras, merged, starting>>
+              /\ UNCHANGED <<phase, queue, sent, off, quit, preEnds, ended, intentOff,
+                             stopRequested, cancelPending, closeDone, secondary, writing, cleaning,
+                             result, delivered, extras, extra, merged, starting>>
 
-\* end_with's join retains the cue's earlier bool while close is Pending.
+\* Accepted end_with awaits only recognizer release, polling cancellation first.
+\* The runner's completion drain still guards admission when release returns Accepted.
 CloseReturns == /\ phase = "ending" /\ ~closeDone
                 /\ closeDone' = TRUE
-                /\ phase' = IF ~cueDone THEN "ending"
-                             ELSE IF cueAccepted /\ (secondary \/ writing) THEN AfterEnding ELSE "finish"
-                /\ result' = IF ~cueDone \/ (cueAccepted /\ (secondary \/ writing)) THEN "none"
-                              ELSE IF cueAccepted THEN "accepted" ELSE "cancelled"
-                /\ extra' = IF phase' = "finish" /\ result' = "cancelled" THEN Released(extra) ELSE extra
+                /\ phase' = IF ~cancelPending /\ (secondary \/ writing) THEN AfterEnding ELSE "finish"
+                /\ result' = IF ~cancelPending /\ (secondary \/ writing) THEN "none"
+                              ELSE IF cancelPending THEN "cancelled" ELSE "accepted"
+                /\ extra' = IF cancelPending THEN Released(extra) ELSE extra
                 /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                stopRequested, cancelPending, cueDone, cueAccepted,
                                secondary, writing, cleaning, delivered, extras, merged, starting>>
