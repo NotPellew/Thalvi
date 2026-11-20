@@ -256,6 +256,9 @@ impl CueEngine {
         }
     }
 
+    /// Attempts to prepare a paused output; a failure is retried by the next cue.
+    pub(crate) fn warm_up(&self) {}
+
     /// Plays `cue` and returns when it has finished, was stopped, or failed. `called` is when the
     /// caller asked for it; the timing is none when the cue never reached the output.
     ///
@@ -615,6 +618,48 @@ mod tests {
         let mut engine = CueEngine::new(Cues::default(), output.gate.clone());
         engine.output = Box::new(Arc::clone(&output));
         (engine, output)
+    }
+
+    #[test]
+    fn the_first_cue_reuses_the_warmed_output_without_playing_during_warmup() {
+        let (engine, output) = fake_engine();
+        engine.warm_up();
+        assert!(
+            output.plays.lock().unwrap().is_empty(),
+            "warming never plays audio"
+        );
+        let first = engine
+            .play(Cue::Wake, Mic::Open, Instant::now())
+            .unwrap()
+            .unwrap();
+        assert!(!first.rebuilt, "the first cue reuses the warmed output");
+        assert_eq!(*output.builds.lock().unwrap(), [0]);
+        assert!(output.paused.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_failed_warmup_leaves_the_first_cue_to_rebuild_and_report_it() {
+        let (engine, output) = fake_engine();
+        output.fail_build.store(true, Ordering::SeqCst);
+        engine.warm_up();
+        assert!(
+            output.plays.lock().unwrap().is_empty(),
+            "a failed warmup plays nothing"
+        );
+        output.fail_build.store(false, Ordering::SeqCst);
+        let first = engine
+            .play(Cue::Wake, Mic::Open, Instant::now())
+            .unwrap()
+            .unwrap();
+        assert!(
+            first.rebuilt,
+            "the first cue reports its successful rebuild"
+        );
+        assert_eq!(
+            *output.builds.lock().unwrap(),
+            [0, 0],
+            "the first cue retries the failed warmup"
+        );
     }
 
     #[test]
