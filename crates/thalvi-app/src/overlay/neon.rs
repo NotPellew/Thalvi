@@ -51,7 +51,7 @@ const TARGET: Style = Style {
     tracking: 0.0,
 };
 /// The card shows the draft's last lines; earlier ones scroll out of its top.
-const DRAFT_LINES: f32 = 3.0;
+const DRAFT_LINES: u16 = 3;
 const CARD_WIDTH: f32 = (WIDTH - 2.0 * SIDE) * 0.92;
 const CARD_INNER: f32 = CARD_WIDTH - 2.0 - 26.0;
 
@@ -507,7 +507,7 @@ fn card(
         count += 1.0;
         end_x = 0.0;
     }
-    let shown = count.min(DRAFT_LINES);
+    let shown = count.min(f32::from(DRAFT_LINES));
     let text_height = shown * DRAFT.line_height;
     let counting = words.ending.is_some();
     let height = 2.0 + 18.0 + text_height + if counting { 12.0 } else { 0.0 };
@@ -567,12 +567,8 @@ pub(super) fn preview_fits(text: &mut Text, value: &str, scale: f32) -> bool {
     let lines = text.line_widths(&[(value, color)], DRAFT, layout, scale);
     let last = lines.last().copied().unwrap_or(0.0);
     let extra_line = last + 5.2 + ending_width(text, "submit", color, scale) > CARD_INNER;
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "the preview shows at most three lines"
-    )]
-    let count = (lines.len().max(1) + usize::from(extra_line)) as f32;
-    count <= DRAFT_LINES && lines.iter().all(|width| *width <= CARD_INNER)
+    let count = lines.len().max(1) + usize::from(extra_line);
+    count <= usize::from(DRAFT_LINES) && lines.iter().all(|width| *width <= CARD_INNER)
 }
 
 /// A soft shadow 6 points under a rounded rectangle.
