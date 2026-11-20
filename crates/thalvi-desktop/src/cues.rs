@@ -281,7 +281,7 @@ impl CueEngine {
     /// Why the cue could not be played.
     pub fn play(&self, cue: Cue, mic: Mic, called: Instant) -> Result<Option<CueTiming>, CueError> {
         let mut timing = None;
-        self.play_gated(cue, Mic::Open, |playback| {
+        self.play_gated(cue, |playback| {
             let id = self.output.default_device()?;
             let mut cache = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
             let (kept, rebuilt) = match cache.take() {
@@ -341,14 +341,12 @@ impl CueEngine {
     fn play_gated(
         &self,
         cue: Cue,
-        mic: Mic,
         run: impl FnOnce(&Arc<Playback>) -> Result<(), CueError>,
     ) -> Result<(), CueError> {
         if !self.cues.enabled(cue) {
             return Ok(());
         }
         let _turn = self.serial.lock().unwrap_or_else(PoisonError::into_inner);
-        let _muted = (mic == Mic::Muted).then(|| Muted::new(&self.gate));
         let playback = Arc::new(Playback::new());
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&playback));
         let result = run(&playback);
@@ -550,6 +548,7 @@ mod tests {
         plays: Mutex<Vec<usize>>,
         states: Mutex<Vec<Arc<OutputState>>>,
         fail_build: AtomicBool,
+        fail_play: AtomicBool,
         gate: InputGate,
         build_input: Mutex<Vec<bool>>,
         play_input: Mutex<Vec<bool>>,
@@ -607,6 +606,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(self.output.gate.is_enabled());
+            if self.output.fail_play.load(Ordering::SeqCst) {
+                return Err(CueError::NoOutputDevice);
+            }
             let voice = self.state.voice.lock().unwrap();
             let playback = &voice.as_ref().unwrap().playback;
             playback
@@ -749,19 +751,41 @@ mod tests {
 
     #[test]
     fn a_muted_cue_keeps_input_enabled_during_build_and_mutes_only_playback() {
-        let (engine, output) = fake_engine();
-        engine.play(Cue::Wake, Mic::Muted, Instant::now()).unwrap();
-        assert_eq!(
-            *output.build_input.lock().unwrap(),
-            [true],
-            "input stays enabled during stream build"
-        );
-        assert_eq!(
-            *output.play_input.lock().unwrap(),
-            [false],
-            "input is muted while the cue sounds"
-        );
-        assert!(output.gate.is_enabled());
+        for enabled in [false, true] {
+            for mic in [Mic::Muted, Mic::Open] {
+                for fails in [false, true] {
+                    let (engine, output) = fake_engine();
+                    output.gate.set_enabled(enabled);
+                    output.fail_play.store(fails, Ordering::SeqCst);
+                    let epoch = output.gate.state().1;
+                    let result = engine.play(Cue::Wake, mic, Instant::now());
+                    assert_eq!(result.is_ok(), !fails);
+                    if fails {
+                        assert_eq!(result, Err(CueError::NoOutputDevice));
+                    }
+                    assert_eq!(
+                        *output.build_input.lock().unwrap(),
+                        [enabled],
+                        "building leaves the input state alone"
+                    );
+                    assert_eq!(
+                        *output.play_input.lock().unwrap(),
+                        [enabled && mic == Mic::Open],
+                        "only a muted cue turns input off while it sounds"
+                    );
+                    assert_eq!(
+                        output.gate.is_enabled(),
+                        enabled,
+                        "input returns to its original state even on failure"
+                    );
+                    assert_eq!(
+                        output.gate.state().1 > epoch,
+                        mic == Mic::Muted,
+                        "an open cue never touches input"
+                    );
+                }
+            }
+        }
     }
 
     /// (Hz, seconds, samples at 24 kHz)
@@ -867,42 +891,6 @@ mod tests {
     }
 
     #[test]
-    fn a_muted_cue_turns_input_off_for_its_length_and_an_open_one_leaves_it_alone() {
-        for (mic, heard, epoch_moves) in [(Mic::Muted, false, true), (Mic::Open, true, false)] {
-            let gate = InputGate::default();
-            let engine = CueEngine::new(Cues::default(), gate.clone());
-            let epoch_before = gate.state().1;
-            let result = engine.play_gated(Cue::Wake, mic, |_| {
-                assert_eq!(gate.is_enabled(), heard, "{mic:?} while the cue plays");
-                Ok(())
-            });
-            assert_eq!(result, Ok(()));
-            assert!(gate.is_enabled(), "{mic:?} after");
-            assert_eq!(gate.state().1 > epoch_before, epoch_moves, "{mic:?}");
-        }
-    }
-
-    #[test]
-    fn input_stays_off_after_a_cue_if_it_was_off_before() {
-        let gate = InputGate::default();
-        gate.set_enabled(false);
-        let engine = CueEngine::new(Cues::default(), gate.clone());
-        engine
-            .play_gated(Cue::Accepted, Mic::Muted, |_| Ok(()))
-            .expect("played");
-        assert!(!gate.is_enabled());
-    }
-
-    #[test]
-    fn input_comes_back_when_the_cue_fails() {
-        let gate = InputGate::default();
-        let engine = CueEngine::new(Cues::default(), gate.clone());
-        let result = engine.play_gated(Cue::Error, Mic::Muted, |_| Err(CueError::NoOutputDevice));
-        assert_eq!(result, Err(CueError::NoOutputDevice));
-        assert!(gate.is_enabled());
-    }
-
-    #[test]
     fn a_switched_off_cue_neither_plays_nor_touches_input() {
         let gate = InputGate::default();
         let cues = Cues {
@@ -913,7 +901,7 @@ mod tests {
         let epoch_before = gate.state().1;
         let ran = AtomicBool::new(false);
         engine
-            .play_gated(Cue::Wake, Mic::Muted, |_| {
+            .play_gated(Cue::Wake, |_| {
                 ran.store(true, Ordering::SeqCst);
                 Ok(())
             })
@@ -926,7 +914,7 @@ mod tests {
     fn stop_ends_the_cue_that_is_playing_and_input_returns() {
         let gate = InputGate::default();
         let engine = CueEngine::new(Cues::default(), gate.clone());
-        let result = engine.play_gated(Cue::Wake, Mic::Muted, |playback| {
+        let result = engine.play_gated(Cue::Wake, |playback| {
             engine.stop();
             playback.wait(Duration::from_secs(5))
         });
