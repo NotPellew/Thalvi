@@ -1224,6 +1224,20 @@ describe("the Recognition page", () => {
   });
 
   it.each([
+    ["an Extra switch", async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
+    ["a removal", async () => { edit("Meta"); within(editorEl(), "Remove").click(); await settle(); }, () => listOf("extra").parentElement],
+    ["a saved edit", async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, () => entryNamed("Cybrex2")],
+  ] as const)("after a Live choice, shows only the Applied. of %s", async (_case, act, owner) => {
+    await openSeveral();
+    use("Cybrex2");
+    await settle();
+    await act();
+    const shown = Array.from(recognition().querySelectorAll<HTMLElement>(".applied")).filter((node) => node.textContent === APPLIED_TEXT);
+    expect(shown).toHaveLength(1);
+    expect(owner()?.contains(shown[0] ?? null)).toBe(true);
+  });
+
+  it.each([
     ["realtime", "Meta realtime ASR", ["Name", "Address", "API key", "Model"]],
     ["open_ai", "OpenAI transcriptions", ["Name", "Address", "API key", "Model", "Request", "Language"]],
     ["on_device", "On this computer 2", ["Name", "Show models for", "Speech model"]],
