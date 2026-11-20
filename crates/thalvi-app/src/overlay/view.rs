@@ -490,7 +490,7 @@ mod tests {
             waiting_for_quiet: quiet,
             pause_ms: 2500,
             copies: false,
-            final_confirmation: false,
+            final_confirmation: None,
         };
         let mut view = View::new(false);
         view.set_status(pending(false), 1.0);
@@ -674,7 +674,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
-            final_confirmation: false,
+            final_confirmation: None,
         };
         let writing = Status::Writing {
             target: None,
@@ -720,7 +720,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
-            final_confirmation: false,
+            final_confirmation: None,
         };
         let capturing = Status::Capturing {
             target: None,
@@ -783,7 +783,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
-            final_confirmation: false,
+            final_confirmation: None,
         };
         let working = Status::Working {
             target: None,

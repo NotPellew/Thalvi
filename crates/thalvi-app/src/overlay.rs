@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use thalvi_desktop::config::Look;
+use thalvi_desktop::engine::PreviewError;
 use thalvi_desktop::host::{
     HostError, OverlayEvent, OverlayFrame, OverlayPlan, OverlaySurface, OverlayWaker,
     overlay_failure,
@@ -519,6 +520,9 @@ impl Overlaying {
 
     /// The surface vanished or its connection ended: the next show makes it again.
     fn lost(&mut self) {
+        if let Some(preview) = self.view.status.final_preview() {
+            preview.failed(PreviewError::Unavailable);
+        }
         self.shown = Shown::Hidden;
         self.retry_at = None;
     }
@@ -557,6 +561,17 @@ impl Overlaying {
         }
         let clock = self.clock(now);
         painter.restyle(self.style.0, self.style.1);
+        if let Status::Pending {
+            text,
+            final_confirmation: Some(preview),
+            ..
+        } = &self.view.status
+            && !painter.preview_fits(text)
+        {
+            preview.failed(PreviewError::TooLong);
+            self.frame_at = None;
+            return Draw::Idle;
+        }
         let next = match (self.view.poll(clock, level), painter.motion(clock)) {
             (Some(view), Some(look)) => Some(view.min(look)),
             (view, look) => view.or(look),
@@ -571,6 +586,9 @@ impl Overlaying {
         let first_frame = !matches!(self.shown, Shown::Showing { .. });
         let outcome = match drawn {
             Ok(()) => {
+                if let Some(preview) = self.view.status.final_preview() {
+                    preview.shown();
+                }
                 self.shown = Shown::Showing { stale: false };
                 self.failure = None;
                 self.retry_at = None;
@@ -585,6 +603,9 @@ impl Overlaying {
                 Draw::Waiting
             }
             Err(error) => {
+                if let Some(preview) = self.view.status.final_preview() {
+                    preview.failed(PreviewError::Unavailable);
+                }
                 let message = error.to_string();
                 self.shown = Shown::Hidden;
                 // A vanished surface is shown again as soon as the next status asks. A refusal waits.
@@ -764,7 +785,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms,
             copies: false,
-            final_confirmation: false,
+            final_confirmation: None,
         }
     }
 

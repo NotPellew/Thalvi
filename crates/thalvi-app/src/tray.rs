@@ -386,7 +386,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms,
             copies: false,
-            final_confirmation: false,
+            final_confirmation: None,
         }
     }
 

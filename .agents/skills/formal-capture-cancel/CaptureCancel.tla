@@ -76,7 +76,7 @@ PreEmpty == /\ phase = "pre" /\ queue = <<>>
                            closeDone, secondary, writing, cleaning, result, delivered, extras, merged, starting, finalMode>>
 
 \* The engine is Pending here: capture, a submit's cleanup, recognizer release, second pass or writing.
-Receive == /\ phase \in {"active", "cleaning", "ending", "finalPass", "finalCleanup", "confirm", "secondary", "writing"}
+Receive == /\ phase \in {"active", "cleaning", "ending", "finalPass", "finalCleanup", "preview", "confirm", "secondary", "writing"}
            /\ ~quit /\ Len(queue) > 0
            /\ (~cancelPending \/ phase = "ending")
            /\ (Scenario = "all" \/ ~cueDone)
@@ -181,7 +181,7 @@ SecondaryReturns == /\ phase = "secondary"
 \* The final-pass task may run during close; an early, late or failed reply cannot deliver.
 \* The engine waits under cancellation before passing one immutable text to cleanup or confirmation.
 AfterFinal == IF cleaning THEN "finalCleanup"
-              ELSE IF finalMode = "submit" THEN "confirm"
+              ELSE IF finalMode = "submit" THEN "preview"
               ELSE IF writing THEN "writing" ELSE "finish"
 
 FinalReturns == /\ phase = "finalPass"
@@ -193,16 +193,25 @@ FinalReturns == /\ phase = "finalPass"
                                closeDone, secondary, writing, cleaning, delivered, extraVars>>
 
 FinalCleanupReturns == /\ phase = "finalCleanup"
-                       /\ phase' = IF cancelPending \/ finalMode # "submit" THEN "finish" ELSE "confirm"
+                       /\ phase' = IF cancelPending \/ finalMode # "submit" THEN "finish" ELSE "preview"
                        /\ result' = IF cancelPending THEN "cancelled"
                                      ELSE IF finalMode = "submit" THEN "none" ELSE "accepted"
                        /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                       stopRequested, cancelPending, cueDone, cueAccepted,
                                       closeDone, secondary, writing, cleaning, delivered, extraVars>>
 
-\* ConfirmingSubmit always opens a review interval. Time spent waiting stutters here.
-ConfirmReturns == /\ phase = "confirm" /\ phase' = "finish"
-                  /\ result' = IF cancelPending THEN "cancelled" ELSE "accepted"
+\* The renderer must report the full text was presented before the review interval starts.
+PreviewReturns(shown) == /\ phase = "preview"
+                         /\ phase' = IF cancelPending \/ ~shown THEN "finish" ELSE "confirm"
+                         /\ result' = IF cancelPending THEN "cancelled"
+                                       ELSE IF shown THEN "none" ELSE "failed"
+                         /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
+                                        stopRequested, cancelPending, cueDone, cueAccepted,
+                                        closeDone, secondary, writing, cleaning, delivered, extraVars>>
+
+ConfirmReturns(stillShown) == /\ phase = "confirm" /\ phase' = "finish"
+                  /\ result' = IF cancelPending THEN "cancelled"
+                                ELSE IF stillShown THEN "accepted" ELSE "failed"
                   /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                  stopRequested, cancelPending, cueDone, cueAccepted,
                                  closeDone, secondary, writing, cleaning, delivered, extraVars>>
@@ -226,10 +235,11 @@ FinishEmpty == /\ phase = "finish" /\ queue = <<>> /\ phase' = "done"
 Next == (\E c \in Commands : Send(c)) \/ DrainOne \/ PreEmpty \/ Receive
         \/ Loaded \/ LoadFailed \/ Prepare \/ CleanupReturns \/ Accept \/ ActiveCancelled
         \/ CueReturns \/ CloseReturns
-        \/ SecondaryReturns \/ FinalReturns \/ FinalCleanupReturns \/ ConfirmReturns \/ WritingReturns \/ FinishEmpty
+        \/ SecondaryReturns \/ FinalReturns \/ FinalCleanupReturns \/ WritingReturns \/ FinishEmpty
+        \/ (\E shown \in BOOLEAN : PreviewReturns(shown) \/ ConfirmReturns(shown))
 Spec == Init /\ [][Next]_vars
 \* The shape of every variable; the chart command checks only this.
-TypeOK == /\ phase \in {"pre", "active", "cleaning", "ending", "finalPass", "finalCleanup", "confirm", "secondary", "writing", "finish", "done"}
+TypeOK == /\ phase \in {"pre", "active", "cleaning", "ending", "finalPass", "finalCleanup", "preview", "confirm", "secondary", "writing", "finish", "done"}
           /\ queue \in Seq(Commands) /\ Len(queue) <= MaxControls /\ sent \in 0..MaxControls
           /\ \A b \in {off, quit, preEnds, ended, intentOff, stopRequested, cancelPending, cueDone,
                        cueAccepted, closeDone, secondary, writing, cleaning, delivered, extras,
@@ -244,7 +254,7 @@ ExtrasNeverLeftOpen == phase = "done" => extra # "open"
 ReleasedWhenCancelled == (phase = "done" /\ result = "cancelled" /\ ~merged)
                          => extra \in {"none", "released"}
 \* Nothing is accepted while the model is still loading.
-AcceptedOnlyAfterLoad == phase \in {"cleaning", "ending", "finalPass", "finalCleanup", "confirm", "secondary", "writing"} => ~starting
+AcceptedOnlyAfterLoad == phase \in {"cleaning", "ending", "finalPass", "finalCleanup", "preview", "confirm", "secondary", "writing"} => ~starting
 \* Only a completed merge stage (including skipped text merging) hands extras off without cancellation.
 LateOnlyAfterMerge == extra = "late" => merged
 =============================================================================

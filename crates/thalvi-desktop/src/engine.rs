@@ -6,6 +6,7 @@
 pub mod fakes;
 mod final_pass;
 mod streaming;
+mod submit_preview;
 
 use std::collections::VecDeque;
 use std::future::{Future, pending};
@@ -48,6 +49,8 @@ use crate::writing::{self, Destination, Endpoint, Piece, Writing, WritingError};
 use final_pass::{FinalPass, Record as FinalPassRecord};
 pub use streaming::StreamingExtra;
 use streaming::Streams;
+use submit_preview::Presentation;
+pub use submit_preview::{PreviewError, SubmitPreview};
 
 /// How long the wake cue and a recognizer that is not loading a model have to be ready before the capture is abandoned.
 const READY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -234,6 +237,7 @@ pub enum EngineState {
     ConfirmingSubmit {
         text: String,
         pause: Duration,
+        preview: SubmitPreview,
     },
     /// The extra recognizers' texts are being merged with the live text, as far as they arrive in time.
     Merging {
@@ -296,6 +300,8 @@ pub enum CaptureError {
     #[error("Capture stopped after {} without an ending.", plain_duration(*.0))]
     TooLong(Duration),
     #[error(transparent)]
+    SubmitPreview(#[from] PreviewError),
+    #[error(transparent)]
     Full(#[from] CaptureFullError),
 }
 
@@ -315,6 +321,7 @@ impl UserError for CaptureError {
             Self::NothingHeard | Self::NoWords(_) => "No words heard",
             Self::NoEnding(_) => "No ending heard",
             Self::TooLong(_) => "Capture too long — not delivered",
+            Self::SubmitPreview(_) => "Submit needs review",
             Self::Full(_) => "Capture full — finish or cancel",
         }
     }
@@ -346,6 +353,7 @@ impl CaptureError {
             Self::NothingHeard => "hold_empty",
             Self::NoWords(_) | Self::NoEnding(_) => "no_ending",
             Self::TooLong(_) => "too_long",
+            Self::SubmitPreview(_) => "submit_preview",
             Self::Full(_) => "full",
         }
     }
@@ -3027,14 +3035,39 @@ where
             .pauses
             .get(submit)
             .max(EndingPauses::default().get(submit));
+        let preview = SubmitPreview::default();
+        let mut presentation = preview.watch();
         self.set_state(EngineState::ConfirmingSubmit {
             text: request.text.clone(),
             pause,
+            preview,
         });
-        tokio::select! {
+        let shown = tokio::select! {
             biased;
-            _ = self.cancel.changed() => CaptureOutcome::cancelled_with(request.text),
-            () = tokio::time::sleep(pause) => CaptureOutcome::Accepted(request),
+            _ = self.cancel.changed() => return CaptureOutcome::cancelled_with(request.text),
+            result = presentation.wait_for(|state| *state != Presentation::Waiting) => {
+                result.map_or(Presentation::Failed(PreviewError::Unavailable), |state| *state)
+            }
+            () = tokio::time::sleep(Duration::from_secs(1)) => Presentation::Failed(PreviewError::Unavailable),
+        };
+        let failure = match shown {
+            Presentation::Failed(error) => error,
+            Presentation::Waiting => PreviewError::Unavailable,
+            Presentation::Shown => tokio::select! {
+                biased;
+                _ = self.cancel.changed() => return CaptureOutcome::cancelled_with(request.text),
+                result = presentation.wait_for(|state| matches!(state, Presentation::Failed(_))) => {
+                    match result.as_deref() {
+                        Ok(Presentation::Failed(error)) => *error,
+                        _ => PreviewError::Unavailable,
+                    }
+                }
+                () = tokio::time::sleep(pause) => return CaptureOutcome::Accepted(request),
+            },
+        };
+        CaptureOutcome::Failed {
+            error: failure.into(),
+            recoverable_text: Some(request.text),
         }
     }
 

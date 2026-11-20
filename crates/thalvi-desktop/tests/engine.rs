@@ -20,7 +20,7 @@ use thalvi_desktop::engine::fakes::{
 };
 use thalvi_desktop::engine::{
     CaptureError, CaptureOutcome, Engine, EngineHandle, EngineState, FrameSource, ListenError,
-    Parts, StreamingExtra, WakeTrigger,
+    Parts, PreviewError, StreamingExtra, SubmitPreview, WakeTrigger,
 };
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
@@ -5655,6 +5655,28 @@ impl Rig {
             self.state()
         );
     }
+
+    async fn final_preview(&self, expected: &str, expected_pause: Duration) -> SubmitPreview {
+        let mut states = self.handle.state();
+        let observed = tokio::time::timeout(
+            Duration::from_secs(5),
+            states.wait_for(|state| matches!(state, EngineState::ConfirmingSubmit { .. })),
+        )
+        .await
+        .expect("the engine should ask for a Submit preview")
+        .unwrap();
+        let EngineState::ConfirmingSubmit {
+            text,
+            pause,
+            preview,
+        } = &*observed
+        else {
+            unreachable!()
+        };
+        assert_eq!(text, expected);
+        assert_eq!(*pause, expected_pause);
+        preview.clone()
+    }
 }
 
 impl Ask {
@@ -7965,11 +7987,7 @@ async fn final_pass_replaces_hold_and_wake_text_and_sends_the_word_list() {
                     assert!(!header.contains("name=\"prompt\""));
                 } else {
                     assert!(header.contains("name=\"prompt\"\r\n\r\nCybrex2, Thalvi\r\n"));
-                    rig.state_is(EngineState::ConfirmingSubmit {
-                        text: "Run tests".to_owned(),
-                        pause: ms(2500),
-                    })
-                    .await;
+                    rig.final_preview("Run tests", ms(2500)).await.shown();
                     assert!(captures.try_recv().is_err(), "confirmation is still up");
                 }
                 let expected = if held {
@@ -8224,11 +8242,9 @@ async fn final_pass_is_cleaned_before_submit_confirmation_and_pauses_extras() {
             let cleanup = request(&mut chat_requests).await;
             assert_eq!(cleanup.body["messages"][0]["content"], CLEANUP_PROMPT);
             assert_eq!(cleanup.body["messages"][1]["content"], "better dictation");
-            rig.state_is(EngineState::ConfirmingSubmit {
-                text: "Cleaned final pass.".to_owned(),
-                pause: ms(2500),
-            })
-            .await;
+            rig.final_preview("Cleaned final pass.", ms(2500))
+                .await
+                .shown();
             assert_eq!(
                 captures.recv().await.unwrap().outcome,
                 accepted(CaptureRoute::Submit, "Cleaned final pass.")
@@ -8254,11 +8270,8 @@ async fn final_submit_can_be_reviewed_and_cancelled_with_no_spoken_pause() {
             rig.feed_until(1000, Kind::Quiet).await;
             rig.finals("live words submit").await;
             uploads.recv().await.unwrap();
-            rig.state_is(EngineState::ConfirmingSubmit {
-                text: "Final words".to_owned(),
-                pause: ms(2500),
-            })
-            .await;
+            rig.final_preview("Final words", ms(2500)).await.shown();
+            settle().await;
             rig.at(rig.now() + 2000).await;
             assert!(
                 captures.try_recv().is_err(),
@@ -8270,6 +8283,52 @@ async fn final_submit_can_be_reviewed_and_cancelled_with_no_spoken_pause() {
                 CaptureOutcome::Cancelled { .. }
             ));
             finished(worker).await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_submit_keeps_the_text_if_the_full_preview_is_not_visible() {
+    LocalSet::new()
+        .run_until(async {
+            for (presented, reported, reason) in [
+                (false, Some(PreviewError::TooLong), PreviewError::TooLong),
+                (false, None, PreviewError::Unavailable),
+                (
+                    true,
+                    Some(PreviewError::Unavailable),
+                    PreviewError::Unavailable,
+                ),
+            ] {
+                let (url, mut uploads) =
+                    serve(Reply::Json(r#"{"text":"Final words submit"}"#)).await;
+                let mut config = with_final_pass(&url, &[]);
+                config["ending_pause"]["submit"] = json!(0);
+                let (mut rig, engine, frames) = Rig::new(&config.to_string());
+                let (worker, mut captures) =
+                    final_captures(&rig, engine, frames, &[WakeTrigger::Capture]);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals("live words submit").await;
+                uploads.recv().await.unwrap();
+                let preview = rig.final_preview("Final words", ms(2500)).await;
+                if presented {
+                    preview.shown();
+                    settle().await;
+                    rig.at(rig.now() + 1000).await;
+                }
+                if let Some(error) = reported {
+                    preview.failed(error);
+                }
+                assert_eq!(
+                    captures.recv().await.unwrap().outcome,
+                    CaptureOutcome::Failed {
+                        error: reason.into(),
+                        recoverable_text: Some("Final words".to_owned()),
+                    }
+                );
+                finished(worker).await;
+            }
         })
         .await;
 }

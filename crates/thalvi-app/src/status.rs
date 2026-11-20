@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::device::{Export, Step};
-use thalvi_desktop::engine::EngineState;
+use thalvi_desktop::engine::{EngineState, SubmitPreview};
 use thalvi_desktop::report::{UserError, causes};
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
@@ -50,7 +50,7 @@ pub enum Status {
         copies: bool,
         /// The exact text behind a final-pass Submit must be visible during review.
         #[serde(skip)]
-        final_confirmation: bool,
+        final_confirmation: Option<SubmitPreview>,
     },
     /// The writing model is putting the dictation into proper text; `text` is what has come in so far.
     Writing {
@@ -117,13 +117,16 @@ pub enum Status {
 impl Status {
     /// Whether the overlay must show these exact words before they are sent.
     pub(crate) const fn requires_final_preview(&self) -> bool {
-        matches!(
-            self,
+        self.final_preview().is_some()
+    }
+
+    pub(crate) const fn final_preview(&self) -> Option<&SubmitPreview> {
+        match self {
             Self::Pending {
-                final_confirmation: true,
-                ..
-            }
-        )
+                final_confirmation, ..
+            } => final_confirmation.as_ref(),
+            _ => None,
+        }
     }
 }
 
@@ -331,13 +334,9 @@ impl View {
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
                 EngineState::Listening if self.wake_words => Status::Listening,
                 EngineState::Listening => Status::KeyboardOnly,
-                EngineState::StartingCapture => Status::Starting {
+                EngineState::StartingCapture | EngineState::LoadingModel => Status::Starting {
                     target,
-                    loading: false,
-                },
-                EngineState::LoadingModel => Status::Starting {
-                    target,
-                    loading: true,
+                    loading: matches!(engine, EngineState::LoadingModel),
                 },
                 EngineState::Capturing {
                     committed,
@@ -354,9 +353,17 @@ impl View {
                     text,
                     waiting_for_quiet,
                 } => self.pending_status(target, *route, text, *waiting_for_quiet, None),
-                EngineState::ConfirmingSubmit { text, pause } => {
-                    self.pending_status(target, CaptureRoute::Submit, text, false, Some(*pause))
-                }
+                EngineState::ConfirmingSubmit {
+                    text,
+                    pause,
+                    preview,
+                } => self.pending_status(
+                    target,
+                    CaptureRoute::Submit,
+                    text,
+                    false,
+                    Some((*pause, preview)),
+                ),
                 EngineState::FinalPass { route } => Status::FinalPass {
                     target,
                     route: *route,
@@ -390,9 +397,12 @@ impl View {
         route: CaptureRoute,
         text: &str,
         waiting_for_quiet: bool,
-        final_preview: Option<Duration>,
+        final_preview: Option<(Duration, &SubmitPreview)>,
     ) -> Status {
-        let pause = final_preview.unwrap_or_else(|| self.pauses.get(route));
+        let (pause, final_confirmation) = final_preview.map_or_else(
+            || (self.pauses.get(route), None),
+            |(pause, preview)| (pause, Some(preview.clone())),
+        );
         Status::Pending {
             target,
             route,
@@ -400,7 +410,7 @@ impl View {
             waiting_for_quiet,
             pause_ms: u64::try_from(pause.as_millis()).unwrap_or(u64::MAX),
             copies: self.copies,
-            final_confirmation: final_preview.is_some(),
+            final_confirmation,
         }
     }
 }
@@ -570,7 +580,7 @@ mod tests {
                     waiting_for_quiet,
                     pause_ms,
                     copies: false,
-                    final_confirmation: false,
+                    final_confirmation: None,
                 },
                 "{route:?}",
             );
@@ -860,7 +870,7 @@ mod tests {
                     waiting_for_quiet: false,
                     pause_ms: 2500,
                     copies: true,
-                    final_confirmation: false,
+                    final_confirmation: None,
                 },
                 json!({"state": "pending", "target": "kitty", "route": "submit", "text": "hi",
                        "waitingForQuiet": false, "pauseMs": 2500, "copies": true}),

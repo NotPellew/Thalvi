@@ -1877,7 +1877,7 @@ mod tests {
                     waiting_for_quiet: false,
                     pause_ms: 2500,
                     copies: false,
-                    final_confirmation: false,
+                    final_confirmation: None,
                 },
                 "pending",
                 "countdown",
@@ -1891,7 +1891,7 @@ mod tests {
                     waiting_for_quiet: true,
                     pause_ms: 2500,
                     copies: false,
-                    final_confirmation: false,
+                    final_confirmation: None,
                 },
                 "pending",
                 "quiet",
@@ -2021,7 +2021,7 @@ mod tests {
             waiting_for_quiet: true,
             pause_ms: 2500,
             copies: false,
-            final_confirmation: false,
+            final_confirmation: None,
         };
         rig.fake.set_status(submit.clone());
         let state = rig.ask(&Request::State);
@@ -2264,7 +2264,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 700,
             copies: false,
-            final_confirmation: false,
+            final_confirmation: None,
         };
         let loading = Status::Loading {
             notice: String::new(),
@@ -2701,7 +2701,7 @@ mod tests {
                 waiting_for_quiet: false,
                 pause_ms: 700,
                 copies: false,
-                final_confirmation: false,
+                final_confirmation: None,
             },
             said("my password is hunter2"),
             Status::Done {
