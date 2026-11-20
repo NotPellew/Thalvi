@@ -36,6 +36,22 @@ else
 fi
 rm -f "$unknown"
 
+software=$(mktemp)
+if "$rig" up --software >/dev/null 2>"$software"; then
+  fail '--software without GNOME is rejected'
+elif grep -q 'only for a --gnome run' "$software"; then
+  pass '--software without GNOME is rejected'
+else
+  fail "--software without GNOME is rejected ($(tr '\n' ' ' < "$software"))"
+fi
+rm -f "$software"
+
+if [[ $help == *'--software'* ]]; then
+  pass 'rig help offers software GNOME without a GPU node'
+else
+  fail 'rig help offers software GNOME without a GPU node'
+fi
+
 have_check() {
   if [[ -f $check ]]; then return 0; fi
   fail "$1: check is absent ($check)"
