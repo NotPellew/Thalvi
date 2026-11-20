@@ -7791,6 +7791,16 @@ async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
                     && row["outcome"] == "cancelled"),
                 "cutting the old cue keeps its cancellation metric"
             );
+            let cut = rows
+                .iter()
+                .find(|row| row["event"] == "desktop_end_cue" && row["outcome"] == "cancelled")
+                .unwrap();
+            assert_eq!(
+                cut["start_ms"], 25.0,
+                "cutting a sounding cue keeps its first-sample timing"
+            );
+            assert_eq!(cut["output_ms"], 15.0);
+            assert_eq!(cut["audible_ms"], 40.0);
             rig.handle.cancel();
             settle().await;
             engine.finish().await;
