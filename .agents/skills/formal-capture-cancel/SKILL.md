@@ -15,8 +15,8 @@ after the user cancels or pauses.
 
 ## Covers
 
-Sync commit: `9b0d28b2fa35e35007a9cc5dac5bf9d7656fb624`. The source hashes describe this commit.
-The previous sync was `c099dd7`, the initial trigger repair on this branch.
+Sync commit: `50f02168f697ede85f3a79fdb0b1d431bd444a31`. The source hashes describe this commit.
+The previous sync was `b22e38a`, the initial trigger repair on this branch.
 The covered changes through this commit include buffered live recognition,
 extra recognizer merging and streaming, deferred reload after download, and
 waiting for an on-device load. Their mapped actions remain below. Microphone
