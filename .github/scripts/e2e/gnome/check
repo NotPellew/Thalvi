@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Compares a GNOME dictation result with the committed transcript, and rejects a Recognition
+# page that does not show its labels. A mismatch prints the actual clipboard or page text.
+set -euo pipefail
+
+usage() {
+  echo "usage: check transcript EXPECTED ACTUAL | page | page-image PNG" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+case $1 in
+  transcript)
+    [[ $# -eq 3 ]] || usage
+    python3 - "$2" "$3" <<'PY'
+import re
+import sys
+import unicodedata
+
+def normalized(text):
+    kept = "".join(ch for ch in text.casefold() if not unicodedata.category(ch).startswith("P"))
+    return re.sub(r"\s+", " ", kept).strip()
+
+expected, actual = sys.argv[1], sys.argv[2]
+if normalized(expected) != normalized(actual):
+    raise SystemExit(f"clipboard {actual!r} does not match the expected transcript {expected!r}")
+print("transcript matches")
+PY
+    ;;
+  page)
+    text=$(cat)
+    python3 - "$text" <<'PY'
+import sys
+
+text = sys.argv[1]
+folded = text.casefold()
+labels = ("recognition", "live recognizer")
+missing = [label for label in labels if label not in folded]
+if not missing:
+    print("recognition page shows its labels")
+    raise SystemExit(0)
+shown = text.strip()
+if "recognition" not in folded:
+    detail = f": {shown!r}" if shown else ""
+    raise SystemExit(f"Recognition page is blank{detail}")
+raise SystemExit(f"Recognition page is missing {', '.join(missing)}: {shown!r}")
+PY
+    ;;
+  page-image)
+    [[ $# -eq 2 && -f $2 ]] || usage
+    if ! command -v tesseract >/dev/null 2>&1; then
+      echo "tesseract is not installed, so the Recognition screenshot cannot be read" >&2
+      exit 1
+    fi
+    err=$(mktemp)
+    if ! text=$(tesseract "$2" stdout 2>"$err"); then
+      echo "tesseract could not read $2: $(tr '\n' ' ' < "$err")" >&2
+      rm -f "$err"
+      exit 1
+    fi
+    rm -f "$err"
+    printf '%s' "$text" | "$0" page
+    ;;
+  *) usage ;;
+esac
