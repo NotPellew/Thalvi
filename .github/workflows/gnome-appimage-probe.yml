@@ -22,7 +22,7 @@ jobs:
           cat /etc/os-release | tee probe-out/os-release
           ls -l /dev/fuse /dev/dri | tee probe-out/devices || true
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends             bwrap dbus-x11 ffmpeg fuse3 gir1.2-gtk-3.0 gnome-shell             libasound2-plugins libayatana-appindicator3-1 libegl-mesa0 libgl1-mesa-dri             libgtk-3-0t64 libwebkit2gtk-4.1-0 libxdo3 pipewire python3-gi             wireplumber wl-clipboard x11-utils xdotool xwayland
+          sudo apt-get install -y --no-install-recommends             bubblewrap dbus-x11 ffmpeg fuse3 gir1.2-gtk-3.0 gnome-shell             libasound2-plugins libayatana-appindicator3-1 libegl-mesa0 libgl1-mesa-dri             libgtk-3-0t64 libwebkit2gtk-4.1-0 libxdo3 pipewire python3-gi             wireplumber wl-clipboard x11-utils xdotool xwayland
           gnome-shell --version | tee probe-out/gnome-version
           if ! bwrap --unshare-user --ro-bind / / true 2>probe-out/userns-before; then
             cat probe-out/userns-before
