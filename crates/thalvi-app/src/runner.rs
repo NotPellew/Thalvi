@@ -1392,8 +1392,7 @@ impl<S: Rig> Runner<S> {
         }
     }
 
-    /// Replaces the engine by one built from `config`; the old one stays if that fails. A change
-    /// to the recordings or the history alone only retunes the running engine.
+    /// Applies `config` to the running engine where possible. A failed rebuild keeps the old engine.
     async fn apply(&mut self, config: DesktopConfig) {
         if config == self.config {
             return;
@@ -1805,6 +1804,7 @@ fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
         recordings: old.recordings,
         history: old.history,
         update_channel: old.update_channel,
+        themes: old.themes.clone(),
         wake: new.wake.clone().with_enabled(old.wake.enabled()),
         ..new.clone()
     }
@@ -2813,12 +2813,16 @@ mod tests {
     }
 
     #[test]
-    fn only_the_recordings_and_the_history_are_taken_without_rebuilding_the_engine() {
+    fn desktop_only_settings_and_the_wake_switch_do_not_rebuild_the_engine() {
         let old = DesktopConfig::from_json_str("{}").unwrap();
         for (change, rebuilds) in [
             (r#"{"recordings": {"text": true}}"#, false),
             (r#"{"update_channel": "development"}"#, false),
             (r#"{"history": {"enabled": false}}"#, false),
+            (
+                r#"{"themes":{"version":1,"gunmetal":{"font":{"scale":1.25}}}}"#,
+                false,
+            ),
             (
                 r#"{"history": {"limit": 5}, "recordings": {"audio": true}}"#,
                 false,
