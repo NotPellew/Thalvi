@@ -1437,7 +1437,7 @@ function speech(context: PageContext): SpeechRows {
   function forgetNotes(): void {
     rowNote = null;
     liveApplied.textContent = "";
-    for (const { applied } of groups) applied.textContent = "";
+    for (const { node } of groups) for (const note of node.querySelectorAll(".applied")) note.textContent = "";
   }
 
   function extraSwitch(entry: SpeechEntry): HTMLElement {
