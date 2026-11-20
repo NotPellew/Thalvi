@@ -262,7 +262,6 @@ impl CueEngine {
         let mut cache = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
         if cache.is_none()
             && let Ok(kept) = self.output.build()
-            && kept.speaker.pause().is_ok()
         {
             *cache = Some(kept);
         }
@@ -379,6 +378,7 @@ impl Drop for Muted<'_> {
 
 trait Output {
     fn default_device(&self) -> Result<cpal::DeviceId, CueError>;
+    /// Builds the stream in its initial stopped state.
     fn build(&self) -> Result<Kept, CueError>;
 }
 
