@@ -576,6 +576,7 @@ mod tests {
             if self.fail_build.load(Ordering::SeqCst) {
                 return Err(CueError::NoOutputDevice);
             }
+            self.paused.store(true, Ordering::SeqCst);
             self.states.lock().unwrap().push(Arc::clone(&state));
             Ok(Kept {
                 id,
@@ -621,6 +622,9 @@ mod tests {
             Ok(())
         }
         fn pause(&self) -> Result<(), CueError> {
+            if self.state.voice.lock().unwrap().is_none() {
+                return Err(CueError::Failed(cpal::Error::new(ErrorKind::InvalidInput)));
+            }
             self.output.paused.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -640,6 +644,10 @@ mod tests {
         assert!(
             output.plays.lock().unwrap().is_empty(),
             "warming never plays audio"
+        );
+        assert!(
+            output.paused.load(Ordering::SeqCst),
+            "the warmed output stays stopped"
         );
         let first = engine
             .play(Cue::Wake, Mic::Open, Instant::now())
