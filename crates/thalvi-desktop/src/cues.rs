@@ -568,6 +568,7 @@ mod tests {
         states: Mutex<Vec<Arc<OutputState>>>,
         fail_build: AtomicBool,
         fail_play: AtomicBool,
+        wait_for_stop: Mutex<Option<std::sync::mpsc::Sender<()>>>,
         gate: InputGate,
         build_input: Mutex<Vec<bool>>,
         play_input: Mutex<Vec<bool>>,
@@ -640,7 +641,11 @@ mod tests {
                     voice.as_ref().unwrap().rebuilt,
                 ))
                 .unwrap();
-            playback.set(Phase::Drained(Instant::now()));
+            if let Some(started) = self.output.wait_for_stop.lock().unwrap().take() {
+                started.send(()).unwrap();
+            } else {
+                playback.set(Phase::Drained(Instant::now()));
+            }
             Ok(())
         }
         fn pause(&self) -> Result<(), CueError> {
@@ -952,14 +957,20 @@ mod tests {
 
     #[test]
     fn stop_ends_the_cue_that_is_playing_and_input_returns() {
-        let gate = InputGate::default();
-        let engine = CueEngine::new(Cues::default(), gate.clone());
-        let result = engine.play_gated(Cue::Wake, Instant::now(), |playback| {
+        let (engine, output) = fake_engine();
+        let (started, playing) = std::sync::mpsc::channel();
+        *output.wait_for_stop.lock().unwrap() = Some(started);
+        std::thread::scope(|scope| {
+            let task = scope.spawn(|| engine.play(Cue::Wake, Mic::Muted, Instant::now()));
+            playing.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(
+                !output.gate.is_enabled(),
+                "playback mutes input until stopped"
+            );
             engine.stop();
-            playback.wait(Duration::from_secs(5))
+            assert!(task.join().unwrap().is_ok());
         });
-        assert_eq!(result, Ok(()));
-        assert!(gate.is_enabled());
+        assert!(output.gate.is_enabled());
     }
 
     #[test]
