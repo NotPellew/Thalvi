@@ -361,6 +361,20 @@ resampling to 16 kHz. Keep request timing, the terminal-frame assertion and
 the recognized sentence. This proves synthesis and recognition through the
 app, not audible playback or a physical microphone.
 
+### Mounted AppImage smoke test
+
+From the checkout root, pass an existing AppImage and a fresh evidence directory.
+
+```sh
+.github/scripts/e2e/gnome/appimage-smoke /path/to/Thalvi.AppImage /var/tmp/thalvi-gnome-smoke
+```
+
+The smoke test mounts the AppImage with FUSE outside the rig and binds the mount read-only into headless software GNOME. Use the GNOME rig packages plus `fuse3`, `jq`, `xdotool`, and `tesseract-ocr` with English language data, as installed by the `gnome-appimage` job in [Heavy](../../../.github/workflows/heavy.yml). The host needs `/dev/fuse` and working unprivileged user namespaces.
+
+The script looks for the Nemotron and wake models in `THALVI_MODEL_CACHE` and then in the local Thalvi model directory. It copies a complete set into the rig and runs offline. A cold run allows the app to download models and saves them back to `THALVI_MODEL_CACHE` when set.
+
+The evidence directory keeps the package digest, isolation and mount proof, clipboard and editor text, capture metrics, Recognition screenshot, and teardown results.
+
 ## Synthetic audio scope
 
 The private microphone above makes wake, recognition, endings, cancellation

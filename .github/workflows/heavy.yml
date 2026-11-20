@@ -76,10 +76,7 @@ jobs:
   mutants:
     name: mutants (${{ matrix.shard }})
     needs: start
-    if: >-
-      needs.start.outputs.superseded == 'false' &&
-      (inputs.scope || 'all') != 'desktop-ui' &&
-      !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/gnome-appimage')
+    if: needs.start.outputs.superseded == 'false' && (inputs.scope || 'all') != 'desktop-ui'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -192,14 +189,10 @@ jobs:
           echo "seed: $seed" | tee -a "$GITHUB_STEP_SUMMARY"
           EXPLORE_SEED=$seed npm run explore --prefix crates/thalvi-app/ui
 
-  # Qualification only: a full manual Heavy run, on the same run's desktop-linux artifact.
-  # After five consecutive hosted passes, add gnome-appimage to verified.needs and report.needs
-  # and require needs.gnome-appimage.result == 'success' in verified's if. Until then a failure
-  # here does not move verified and does not open the ci-regression issue.
   gnome-appimage:
     name: gnome-appimage
     needs: [start, ci]
-    if: needs.start.outputs.superseded == 'false' && github.event_name == 'workflow_dispatch' && (inputs.scope || 'all') == 'all'
+    if: needs.start.outputs.superseded == 'false' && (inputs.scope || 'all') == 'all'
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     defaults:
@@ -265,8 +258,13 @@ jobs:
 
   verified:
     name: verified
-    needs: [start, ci, mutants]
-    if: github.ref == 'refs/heads/main' && (inputs.scope || 'all') == 'all' && needs.ci.result == 'success' && needs.mutants.result == 'success'
+    needs: [start, ci, mutants, gnome-appimage]
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (inputs.scope || 'all') == 'all' &&
+      needs.ci.result == 'success' &&
+      needs.mutants.result == 'success' &&
+      needs.gnome-appimage.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -293,7 +291,7 @@ jobs:
 
   report:
     name: report
-    needs: [start, ci, mutants, explore]
+    needs: [start, ci, mutants, explore, gnome-appimage]
     if: failure() && github.ref == 'refs/heads/main' && (inputs.scope || 'all') == 'all'
     runs-on: ubuntu-latest
     timeout-minutes: 5
