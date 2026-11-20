@@ -279,12 +279,10 @@ def run_clip_set(text):
     Gtk.main()
 
 
-def run_victim(log_path):
-    """A window with a text entry that logs every focus change and writes its buffer to victim.txt.
-
-    The entry is an X11 window so a later Ctrl+V from xdotool reaches it.
-    """
-    os.environ["GDK_BACKEND"] = "x11"
+def run_victim(log_path, x11):
+    """A window that logs every focus change and writes its text buffer to victim.txt."""
+    if x11:
+        os.environ["GDK_BACKEND"] = "x11"
     import gi
 
     gi.require_version("Gtk", "3.0")
@@ -340,10 +338,10 @@ def main(argv):
         run_clip()
     elif verb == "clip-set" and len(argv) >= 3:
         run_clip_set(" ".join(argv[2:]))
-    elif verb == "victim" and len(argv) == 3:
-        run_victim(argv[2])
+    elif verb in ("victim", "victim-x11") and len(argv) == 3:
+        run_victim(argv[2], x11=verb == "victim-x11")
     else:
-        sys.exit("usage: thalvi-gnome-rig.py logind|input|mic FIFO QUEUE|shot FILE|windows|focus|key NAME|type TEXT|clip|clip-set TEXT|victim LOG")
+        sys.exit("usage: thalvi-gnome-rig.py logind|input|mic FIFO QUEUE|shot FILE|windows|focus|key NAME|type TEXT|clip|clip-set TEXT|victim LOG|victim-x11 LOG")
 
 
 main(sys.argv)

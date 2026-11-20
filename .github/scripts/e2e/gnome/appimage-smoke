@@ -47,9 +47,11 @@ await() {
 }
 
 models_ready() {
-  local dir=$1
-  [[ -f $dir/nemotron_160ms.tokens.txt && -f $dir/nemotron_160ms.encoder.int8.onnx \
-    && -f $dir/melspectrogram.onnx && -f $dir/embedding_model.onnx ]] || return 1
+  local dir=$1 file
+  for file in nemotron_160ms.{tokens.txt,encoder.int8.onnx,decoder.int8.onnx,joiner.int8.onnx} \
+    melspectrogram.onnx embedding_model.onnx; do
+    [[ -s $dir/$file ]] || return 1
+  done
   compgen -G "$dir/hey_thalvi*.onnx" > /dev/null
 }
 
@@ -135,12 +137,18 @@ unmount_image() {
 }
 
 cleanup() {
-  local rc=$? app_holder='' comp_holder='' app_gone=yes comp_gone=yes
-  trap - EXIT TERM INT
+  local rc=$? app_holder='' comp_holder='' app_gone=yes comp_gone=yes candidate
+  trap - EXIT
+  trap '' TERM INT
   set +e
   if [[ -n $victim_pid ]]; then
     kill "$victim_pid" 2>/dev/null || true
     wait "$victim_pid" 2>/dev/null || true
+  fi
+  if [[ -z $run ]]; then
+    for candidate in "$THALVI_RIG_BASE"/run-*; do
+      [[ -d $candidate ]] && run=$candidate && break
+    done
   fi
   if [[ -n $run && -d $run ]]; then
     [[ -s $run/app.pid ]] && app_holder=$(cat "$run/app.pid")
@@ -148,14 +156,12 @@ cleanup() {
     timeout 8 "$rig" ctl "$run" quit > "$out/quit.json" 2>/dev/null || true
     "$rig" down "$run" > "$out/down.txt" 2>/dev/null || true
     if [[ -n $app_holder ]] && kill -0 "$app_holder" 2>/dev/null; then
-      kill -KILL "$app_holder" 2>/dev/null || true
-      wait "$app_holder" 2>/dev/null || true
-      kill -0 "$app_holder" 2>/dev/null && app_gone=no
+      app_gone=no
+      rc=1
     fi
     if [[ -n $comp_holder ]] && kill -0 "$comp_holder" 2>/dev/null; then
-      kill -KILL "$comp_holder" 2>/dev/null || true
-      wait "$comp_holder" 2>/dev/null || true
-      kill -0 "$comp_holder" 2>/dev/null && comp_gone=no
+      comp_gone=no
+      rc=1
     fi
     copy_evidence
     save_models
@@ -169,7 +175,9 @@ cleanup() {
   rm -rf "$probe"
   exit "$rc"
 }
-trap cleanup EXIT TERM INT
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 cat /etc/os-release > "$out/os-release"
 gnome-shell --version > "$out/gnome-version"
@@ -283,7 +291,7 @@ if env.get("APPDIR") != appdir:
     raise SystemExit("the running package is not the read-only mount")
 PY
 
-"$rig" gnome "$run" victim /tmp/out/victim-focus.log > "$out/victim-process.log" 2>&1 &
+"$rig" gnome "$run" victim-x11 /tmp/out/victim-focus.log > "$out/victim-process.log" 2>&1 &
 victim_pid=$!
 focused() { timeout 8 "$rig" gnome "$run" focus | grep -q '"victim"'; }
 await 20 'the editor to take focus' focused
@@ -296,6 +304,8 @@ before=$(count_file_captures)
 timeout 30 "$rig" ctl "$run" feed "$probe/dictation-feed.wav" | tee "$run/out/committed-feed.json" | jq -e '.ok == true' >/dev/null
 file_landed() { [[ $(count_file_captures) -gt $before ]]; }
 await 40 'a new successful file capture' file_landed
+jq -se 'any(.[]; .event == "desktop_local_stt" and .model == "nemotron_160ms" and .outcome == "ok")' \
+  "$run/home/.local/share/thalvi/recordings/metrics.jsonl" > /dev/null
 timeout 10 "$rig" shot "$run" delivery >/dev/null
 timeout 8 "$rig" gnome "$run" clip > "$run/out/clipboard.txt"
 "$check" transcript "$expected" "$(cat "$run/out/clipboard.txt")"
