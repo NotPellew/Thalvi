@@ -402,6 +402,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
             cancellable: true, ..
         }
         | Status::Transcribing { .. } => "transcribing",
+        Status::FinalPass { .. } => "finalPass",
         Status::Merging { .. } => "merging",
         Status::CleaningUp { .. } => "cleaning",
         Status::Working { .. } => "delivering",
@@ -412,7 +413,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
 
 /// What the overlay shows for `status`.
 fn overlay_word(status: &Status, on: bool) -> &'static str {
-    if !on {
+    if !on && !status.requires_final_preview() {
         return "hidden";
     }
     match status {
@@ -435,6 +436,7 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
         Status::Thinking { .. } => "thinking",
         Status::Working { .. } => "working",
         Status::Transcribing { .. } => "transcribing",
+        Status::FinalPass { .. } => "finalPass",
         Status::Merging { .. } => "merging",
         Status::CleaningUp { .. } => "cleaning",
         Status::Done { .. } => "delivered",
@@ -527,6 +529,7 @@ fn capturing(status: &Status) -> bool {
                 cancellable: true,
                 ..
             }
+            | Status::FinalPass { .. }
             | Status::Merging { .. }
             | Status::CleaningUp { .. }
     )
@@ -1874,6 +1877,7 @@ mod tests {
                     waiting_for_quiet: false,
                     pause_ms: 2500,
                     copies: false,
+                    final_confirmation: None,
                 },
                 "pending",
                 "countdown",
@@ -1887,6 +1891,7 @@ mod tests {
                     waiting_for_quiet: true,
                     pause_ms: 2500,
                     copies: false,
+                    final_confirmation: None,
                 },
                 "pending",
                 "quiet",
@@ -2007,6 +2012,24 @@ mod tests {
     }
 
     #[test]
+    fn state_reports_the_final_submit_countdown_with_the_overlay_setting_off() {
+        let rig = Rig::new("final-submit-countdown", "{}");
+        rig.fake.overlay.store(false, Ordering::SeqCst);
+        rig.fake.set_status(Status::Pending {
+            target: None,
+            route: CaptureRoute::Submit,
+            text: "final words".to_owned(),
+            waiting_for_quiet: false,
+            pause_ms: 2500,
+            copies: false,
+            final_confirmation: Some(thalvi_desktop::engine::SubmitPreview::default()),
+        });
+        let state = rig.ask(&Request::State);
+        assert_eq!(state["overlay"]["state"], "countdown");
+        assert_eq!(state["awaiting_confirmation"], true);
+    }
+
+    #[test]
     fn a_confirmation_stays_with_the_user() {
         let rig = Rig::new("confirmation", "{}");
         let submit = Status::Pending {
@@ -2016,6 +2039,7 @@ mod tests {
             waiting_for_quiet: true,
             pause_ms: 2500,
             copies: false,
+            final_confirmation: None,
         };
         rig.fake.set_status(submit.clone());
         let state = rig.ask(&Request::State);
@@ -2258,6 +2282,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 700,
             copies: false,
+            final_confirmation: None,
         };
         let loading = Status::Loading {
             notice: String::new(),
@@ -2694,6 +2719,7 @@ mod tests {
                 waiting_for_quiet: false,
                 pause_ms: 700,
                 copies: false,
+                final_confirmation: None,
             },
             said("my password is hunter2"),
             Status::Done {

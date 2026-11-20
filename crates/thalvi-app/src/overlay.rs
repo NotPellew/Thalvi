@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use thalvi_desktop::config::Look;
+use thalvi_desktop::engine::PreviewError;
 use thalvi_desktop::host::{
     HostError, OverlayEvent, OverlayFrame, OverlayPlan, OverlaySurface, OverlayWaker,
     overlay_failure,
@@ -45,9 +46,12 @@ pub enum Visibility {
 
 impl Visibility {
     /// Shown from the wake word until the delivery has been confirmed, and briefly for a failure,
-    /// which `dismiss_error` can hide sooner; never when `enabled` is off.
+    /// which `dismiss_error` can hide sooner. Final Submit still shows the exact text when disabled.
     #[must_use]
     pub fn of(status: &Status, enabled: bool) -> Self {
+        if status.requires_final_preview() {
+            return Self::Show;
+        }
         if !enabled {
             return Self::Hide;
         }
@@ -66,6 +70,7 @@ impl Visibility {
             | Status::StartingChat { .. }
             | Status::Working { .. }
             | Status::Transcribing { .. }
+            | Status::FinalPass { .. }
             | Status::Merging { .. }
             | Status::CleaningUp { .. }
             | Status::Loading {
@@ -515,6 +520,9 @@ impl Overlaying {
 
     /// The surface vanished or its connection ended: the next show makes it again.
     fn lost(&mut self) {
+        if let Some(preview) = self.view.status.final_preview() {
+            preview.failed(PreviewError::Unavailable);
+        }
         self.shown = Shown::Hidden;
         self.retry_at = None;
     }
@@ -553,6 +561,17 @@ impl Overlaying {
         }
         let clock = self.clock(now);
         painter.restyle(self.style.0, self.style.1);
+        if let Status::Pending {
+            text,
+            final_confirmation: Some(preview),
+            ..
+        } = &self.view.status
+            && !painter.preview_fits(text)
+        {
+            preview.failed(PreviewError::TooLong);
+            self.frame_at = None;
+            return Draw::Idle;
+        }
         let next = match (self.view.poll(clock, level), painter.motion(clock)) {
             (Some(view), Some(look)) => Some(view.min(look)),
             (view, look) => view.or(look),
@@ -567,6 +586,9 @@ impl Overlaying {
         let first_frame = !matches!(self.shown, Shown::Showing { .. });
         let outcome = match drawn {
             Ok(()) => {
+                if let Some(preview) = self.view.status.final_preview() {
+                    preview.shown();
+                }
                 self.shown = Shown::Showing { stale: false };
                 self.failure = None;
                 self.retry_at = None;
@@ -581,6 +603,9 @@ impl Overlaying {
                 Draw::Waiting
             }
             Err(error) => {
+                if let Some(preview) = self.view.status.final_preview() {
+                    preview.failed(PreviewError::Unavailable);
+                }
                 let message = error.to_string();
                 self.shown = Shown::Hidden;
                 // A vanished surface is shown again as soon as the next status asks. A refusal waits.
@@ -752,6 +777,18 @@ mod tests {
         );
     }
 
+    fn paste_countdown(target: Option<String>, text: &str, pause_ms: u64) -> Status {
+        Status::Pending {
+            target,
+            route: CaptureRoute::Paste,
+            text: text.to_owned(),
+            waiting_for_quiet: false,
+            pause_ms,
+            copies: false,
+            final_confirmation: None,
+        }
+    }
+
     #[test]
     fn the_overlay_shows_from_the_wake_word_and_hides_after_a_confirmation_or_a_failure() {
         let target = Some("kitty".to_owned());
@@ -775,17 +812,7 @@ mod tests {
                 },
                 Visibility::Show,
             ),
-            (
-                Status::Pending {
-                    target: target.clone(),
-                    route: CaptureRoute::Paste,
-                    text: String::new(),
-                    waiting_for_quiet: false,
-                    pause_ms: 700,
-                    copies: false,
-                },
-                Visibility::Show,
-            ),
+            (paste_countdown(target.clone(), "", 700), Visibility::Show),
             (
                 Status::Writing {
                     target: target.clone(),
@@ -888,14 +915,7 @@ mod tests {
         let at = |ms: u64| start + Duration::from_millis(ms);
         let mut painter = Painter::new(1.0, Look::Gunmetal, true).unwrap();
         let (mut surface, mut overlay) = (Fake::default(), Overlaying::new(false, start));
-        let pending = Status::Pending {
-            target: None,
-            route: CaptureRoute::Paste,
-            text: "hello".to_owned(),
-            waiting_for_quiet: false,
-            pause_ms: 2500,
-            copies: false,
-        };
+        let pending = paste_countdown(None, "hello", 2500);
         overlay.take(
             Message::Status(Box::new(pending), Visibility::Show),
             at(10_000),

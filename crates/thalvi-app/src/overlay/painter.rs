@@ -68,6 +68,13 @@ impl Painter {
         &self.frame
     }
 
+    pub(super) fn preview_fits(&mut self, value: &str) -> bool {
+        match &self.skin {
+            Skin::Module(_) => super::module::preview_fits(&mut self.text, value, self.scale),
+            Skin::Neon(_) => super::neon::preview_fits(&mut self.text, value, self.scale),
+        }
+    }
+
     /// How long until the look moves on its own while the view is still.
     pub(super) fn motion(&self, clock: f64) -> Option<Duration> {
         match &self.skin {
@@ -91,7 +98,7 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
-    use thalvi_desktop::capture::CaptureRoute;
+    use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 
     use super::*;
     use crate::status::{FailureKind, Status};
@@ -129,6 +136,46 @@ mod tests {
     }
 
     #[test]
+    fn final_submit_text_is_visible_even_with_the_overlay_and_draft_disabled() {
+        use crate::overlay::Visibility;
+        use crate::status::{Mode, View as StatusView};
+        use thalvi_desktop::engine::{EngineState, SubmitPreview};
+
+        for look in [Look::Gunmetal, Look::Holo, Look::Neon] {
+            let mut painter = Painter::new(1.0, look, true).unwrap();
+            let long = format!("Transfer 9000 dollars {}", "More words. ".repeat(80));
+            assert!(painter.preview_fits("Send thirty dollars"), "{look:?}");
+            assert!(!painter.preview_fits(&long), "{look:?}");
+            let mut view = View::new(false);
+            view.set_draft(false);
+            let mut preview = |text: &str| {
+                let status = StatusView {
+                    mode: Mode::Idle,
+                    engine: EngineState::ConfirmingSubmit {
+                        text: text.to_owned(),
+                        pause: Duration::from_millis(2500),
+                        preview: SubmitPreview::default(),
+                    },
+                    target: None,
+                    copies: false,
+                    pauses: EndingPauses::default(),
+                    loading: None,
+                    wake_words: true,
+                }
+                .status();
+                assert_eq!(Visibility::of(&status, false), Visibility::Show);
+                view.set_status(status, 0.0);
+                painter.draw(&view, 0.0).bgra.clone()
+            };
+            assert_ne!(
+                preview("Send thirty dollars"),
+                preview("Send two dollars"),
+                "{look:?}"
+            );
+        }
+    }
+
+    #[test]
     fn each_look_shows_each_state_in_its_tone() {
         let pending = Status::Pending {
             target: None,
@@ -137,6 +184,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2500,
             copies: false,
+            final_confirmation: None,
         };
         let done = Status::Done {
             target: None,
@@ -306,6 +354,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         }
     }
 
@@ -359,18 +408,26 @@ mod tests {
 
     #[test]
     fn the_cancel_button_shows_only_on_a_capture_the_desktop_lets_be_clicked() {
-        for (look, dark) in LOOKS {
-            let mut painter = Painter::new(1.0, look, dark).unwrap();
-            let with = painter.draw(&view(&capturing(), true), 0.0).bgra.clone();
-            let without = painter.draw(&view(&capturing(), false), 0.0).bgra.clone();
-            let differing = with
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(without.as_chunks::<4>().0)
-                .filter(|(a, b)| a != b)
-                .count();
-            assert!(differing > 40, "{look:?} dark {dark}: {differing}");
+        for status in [
+            capturing(),
+            Status::FinalPass {
+                target: None,
+                route: CaptureRoute::Paste,
+            },
+        ] {
+            for (look, dark) in LOOKS {
+                let mut painter = Painter::new(1.0, look, dark).unwrap();
+                let with = painter.draw(&view(&status, true), 0.0).bgra.clone();
+                let without = painter.draw(&view(&status, false), 0.0).bgra.clone();
+                let differing = with
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(without.as_chunks::<4>().0)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert!(differing > 40, "{look:?} dark {dark}: {differing}");
+            }
         }
     }
 

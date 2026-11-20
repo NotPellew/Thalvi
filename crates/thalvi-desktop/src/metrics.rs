@@ -62,6 +62,7 @@ pub enum Event {
     /// extra's latency is its request's; a streaming extra's is from the capture's end to its
     /// final text, and its `api` names the kind (`realtime`, `open_ai_live`, `on_device`).
     ExtraStt,
+    FinalPass,
     /// Merging the texts of a capture: the latency it adds after the ending, the chat call's own latency, and how it ended.
     Merge,
     LiveStt,
@@ -124,6 +125,7 @@ impl Event {
             Self::PartialLag => "desktop_partial_lag",
             Self::FinalLag => "desktop_final_lag",
             Self::ExtraStt => "desktop_extra_stt",
+            Self::FinalPass => "final_pass",
             Self::Merge => "desktop_merge",
             Self::LiveStt => "desktop_live_stt",
             Self::LiveSttFirstText => "desktop_live_stt_first_text",
@@ -370,6 +372,21 @@ impl Recorder {
                 line,
             });
         }
+    }
+
+    /// Holds a way to record a transcript that may arrive after delivery.
+    pub(crate) fn capture_text(
+        &self,
+        dictation: Dictation,
+    ) -> Option<impl FnOnce(String) + Send + use<>> {
+        let sender = self.sender.clone();
+        let dropped = Arc::clone(&self.dropped);
+        let kinds = Arc::clone(&self.kinds);
+        self.kinds().text.then_some(move |line| {
+            if kinds.get().text {
+                send(sender.as_ref(), &dropped, Message::Text { dictation, line });
+            }
+        })
     }
 
     /// Queues the 16 kHz mono audio heard up to the wake as the dictation's `wake.wav`.

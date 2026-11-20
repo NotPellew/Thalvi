@@ -51,7 +51,9 @@ const TARGET: Style = Style {
     tracking: 0.0,
 };
 /// The card shows the draft's last lines; earlier ones scroll out of its top.
-const DRAFT_LINES: f32 = 3.0;
+const DRAFT_LINES: u16 = 3;
+const CARD_WIDTH: f32 = (WIDTH - 2.0 * SIDE) * 0.92;
+const CARD_INNER: f32 = CARD_WIDTH - 2.0 - 26.0;
 
 /// The look's colours in one system theme.
 struct Palette {
@@ -369,6 +371,9 @@ fn pill_words(view: &View) -> (Tone, String, Option<&str>) {
         Status::Transcribing { target, .. } => {
             (Tone::Working, words("TRANSCRIBING…"), target.as_deref())
         }
+        Status::FinalPass { target, .. } => {
+            (Tone::Working, words("FINAL PASS…"), target.as_deref())
+        }
         Status::Merging { target, .. } => (Tone::Working, words("MERGING…"), target.as_deref()),
         Status::CleaningUp { target } => (Tone::Working, words("CLEANING UP…"), target.as_deref()),
         Status::Working { target, .. } => (Tone::Working, words("WORKING"), target.as_deref()),
@@ -430,7 +435,7 @@ fn draft(view: &View) -> Option<Draft> {
             notice: true,
             ..words(notice, "", false)
         }),
-        _ if !view.show_draft => None,
+        _ if !view.show_draft && !view.status.requires_final_preview() => None,
         Status::Capturing {
             committed, partial, ..
         } => Some(words(
@@ -474,9 +479,9 @@ fn card(
     top: f32,
 ) {
     let scale = canvas.scale_of();
-    let width = (WIDTH - 2.0 * SIDE) * 0.92;
+    let width = CARD_WIDTH;
     let left = (WIDTH - width) / 2.0;
-    let inner = width - 2.0 - 26.0;
+    let inner = CARD_INNER;
     let committed_color = if words.notice {
         colors.amber
     } else {
@@ -494,9 +499,7 @@ fn card(
     let mut count = lines.len().max(1) as f32;
     // The ending sits after the last word, or on a line of its own when it does not fit.
     let ending_width = words.ending.map_or(0.0, |(word, ..)| {
-        text.measure(&[(word, colors.amber)], DRAFT, Layout::Line, scale)
-            .0
-            + 8.0
+        ending_width(text, word, colors.amber, scale)
     });
     let caret_width = if words.caret { 3.0 } else { 0.0 };
     let mut end_x = last + 5.2;
@@ -504,7 +507,7 @@ fn card(
         count += 1.0;
         end_x = 0.0;
     }
-    let shown = count.min(DRAFT_LINES);
+    let shown = count.min(f32::from(DRAFT_LINES));
     let text_height = shown * DRAFT.line_height;
     let counting = words.ending.is_some();
     let height = 2.0 + 18.0 + text_height + if counting { 12.0 } else { 0.0 };
@@ -552,6 +555,20 @@ fn card(
         let bar = colors.amber.alpha(if running { 1.0 } else { 0.35 });
         canvas.rect((text_left, y, inner * share, 4.0), 2.0, &Fill::Solid(bar));
     }
+}
+
+fn ending_width(text: &mut Text, word: &str, color: Rgba, scale: f32) -> f32 {
+    text.measure(&[(word, color)], DRAFT, Layout::Line, scale).0 + 8.0
+}
+
+pub(super) fn preview_fits(text: &mut Text, value: &str, scale: f32) -> bool {
+    let color = Rgba::rgb(255, 255, 255);
+    let layout = Layout::Wrapped { width: CARD_INNER };
+    let lines = text.line_widths(&[(value, color)], DRAFT, layout, scale);
+    let last = lines.last().copied().unwrap_or(0.0);
+    let extra_line = last + 5.2 + ending_width(text, "submit", color, scale) > CARD_INNER;
+    let count = lines.len().max(1) + usize::from(extra_line);
+    count <= usize::from(DRAFT_LINES) && lines.iter().all(|width| *width <= CARD_INNER)
 }
 
 /// A soft shadow 6 points under a rounded rectangle.
@@ -759,6 +776,7 @@ mod tests {
             waiting_for_quiet,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         };
         let writing = Status::Writing {
             target: None,
@@ -939,6 +957,7 @@ mod tests {
             waiting_for_quiet,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         };
         let working = Status::Working {
             target: None,

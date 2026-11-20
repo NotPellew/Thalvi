@@ -233,6 +233,7 @@ impl View {
             Status::StartingChat { again: false, .. } => self.working("STARTING MODEL…"),
             Status::StartingChat { again: true, .. } => self.working("RESTARTING MODEL…"),
             Status::Transcribing { .. } => self.working("TRANSCRIBING…"),
+            Status::FinalPass { .. } => self.working("FINAL PASS…"),
             Status::Merging { .. } => self.working("MERGING…"),
             Status::CleaningUp { .. } => self.working("CLEANING UP…"),
             Status::Working { .. } => self.working("WORKING"),
@@ -271,8 +272,9 @@ impl View {
 
     /// The line `status` shows with the draft switch as it is now.
     fn line_of(&self, status: &Status) -> Line {
+        let required = status.requires_final_preview();
         let words = |committed: &str, partial: &str, caret| {
-            if self.show_draft {
+            if self.show_draft || required {
                 Line::Words {
                     committed: committed.to_owned(),
                     partial: partial.to_owned(),
@@ -326,6 +328,7 @@ impl View {
                     | Status::Pending { .. }
                     | Status::Writing { .. }
                     | Status::CleaningUp { .. }
+                    | Status::FinalPass { .. }
                     | Status::Thinking { .. }
                     | Status::StartingChat { .. }
                     | Status::Working {
@@ -487,6 +490,7 @@ mod tests {
             waiting_for_quiet: quiet,
             pause_ms: 2500,
             copies: false,
+            final_confirmation: None,
         };
         let mut view = View::new(false);
         view.set_status(pending(false), 1.0);
@@ -670,6 +674,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         };
         let writing = Status::Writing {
             target: None,
@@ -715,6 +720,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         };
         let capturing = Status::Capturing {
             target: None,
@@ -777,6 +783,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         };
         let working = Status::Working {
             target: None,

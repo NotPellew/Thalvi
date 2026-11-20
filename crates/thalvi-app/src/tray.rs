@@ -51,6 +51,7 @@ impl Icon {
             Status::Pending { .. } => Self::Pending,
             Status::Working { .. }
             | Status::Transcribing { .. }
+            | Status::FinalPass { .. }
             | Status::Merging { .. }
             | Status::CleaningUp { .. }
             | Status::Writing { .. }
@@ -172,6 +173,7 @@ pub fn title(status: &Status) -> String {
         ),
         Status::Working { .. } => "working".to_owned(),
         Status::Transcribing { .. } => "transcribing".to_owned(),
+        Status::FinalPass { .. } => "final pass".to_owned(),
         Status::Merging { .. } => "merging".to_owned(),
         Status::CleaningUp { .. } => "cleaning up".to_owned(),
         Status::Writing { .. } => "writing".to_owned(),
@@ -212,6 +214,7 @@ pub fn can_cancel(status: &Status) -> bool {
                 cancellable: true,
                 ..
             }
+            | Status::FinalPass { .. }
             | Status::Merging { .. }
             | Status::CleaningUp { .. }
     )
@@ -383,6 +386,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms,
             copies: false,
+            final_confirmation: None,
         }
     }
 

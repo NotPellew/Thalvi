@@ -17,6 +17,7 @@ const SLOT_X: f32 = 14.0;
 const SLANT: f32 = 13.0;
 const SLOT_W: f32 = MODULE_W - 2.0 * SLOT_X;
 const SLOT_H: f32 = MODULE_H - 6.0;
+const TICKER_WIDTH: f32 = SLOT_W - 48.0;
 /// The slot's top-left corner, in points from the overlay's.
 const SLOT: (f32, f32) = (MODULE_X + SLOT_X, 2.0);
 /// The cancel button, in points from the overlay's top-left corner.
@@ -523,7 +524,7 @@ fn tag(canvas: &mut Canvas, text: &mut Text, label: &str, color: Rgba, top: f32)
 /// at the start; a notice that overflows fades out at its end.
 fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
     let style = TICKER;
-    let (left, top, width) = (SLOT.0 + 24.0, SLOT.1 + 52.0, SLOT_W - 48.0);
+    let (left, top, width) = (SLOT.0 + 24.0, SLOT.1 + 52.0, TICKER_WIDTH);
     let right = left + width;
     let scale = canvas.scale_of();
     match line {
@@ -568,6 +569,11 @@ fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
             }
         }
     }
+}
+
+pub(super) fn preview_fits(text: &mut Text, value: &str, scale: f32) -> bool {
+    let lines = text.line_widths(&[(value, INK)], TICKER, Layout::Line, scale);
+    matches!(lines.as_slice(), [width] if *width <= TICKER_WIDTH - 3.0) && !value.contains('\n')
 }
 
 /// The button's face in `finish`; the colour its × is drawn in.
@@ -934,6 +940,7 @@ mod tests {
             waiting_for_quiet: true,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         };
         let centre = |status: &Status, draft| {
             let loud = drawn(Finish::Gunmetal, &shown(status.clone(), draft, 1.0, 1.0));
