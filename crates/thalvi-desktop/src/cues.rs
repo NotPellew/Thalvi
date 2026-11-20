@@ -568,6 +568,7 @@ mod tests {
         states: Mutex<Vec<Arc<OutputState>>>,
         fail_build: AtomicBool,
         fail_play: AtomicBool,
+        wait_for_build: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
         wait_for_stop: Mutex<Option<std::sync::mpsc::Sender<()>>>,
         gate: InputGate,
         build_input: Mutex<Vec<bool>>,
@@ -592,6 +593,10 @@ mod tests {
                 .push(self.gate.is_enabled());
             let device = id.id().parse().unwrap();
             self.builds.lock().unwrap().push(device);
+            if let Some((started, resume)) = self.wait_for_build.lock().unwrap().take() {
+                started.send(()).unwrap();
+                resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
             if self.fail_build.load(Ordering::SeqCst) {
                 return Err(CueError::NoOutputDevice);
             }
@@ -953,6 +958,45 @@ mod tests {
             .expect("nothing to play");
         assert!(!ran.load(Ordering::SeqCst));
         assert_eq!(gate.state().1, epoch_before);
+    }
+
+    #[test]
+    fn a_cue_stopped_during_build_never_mutes_or_plays_and_keeps_the_output() {
+        let (engine, output) = fake_engine();
+        let (started, building) = std::sync::mpsc::channel();
+        let (resume, released) = std::sync::mpsc::channel();
+        *output.wait_for_build.lock().unwrap() = Some((started, released));
+        let input = output.gate.state();
+        let called = Instant::now();
+        let stopped = std::thread::scope(|scope| {
+            let task = scope.spawn(|| engine.play(Cue::Accepted, Mic::Muted, called));
+            building.recv_timeout(Duration::from_secs(5)).unwrap();
+            engine.stop();
+            resume.send(()).unwrap();
+            task.join().unwrap()
+        });
+        assert_eq!(
+            output.gate.state(),
+            input,
+            "a cue cancelled during build must never mute input"
+        );
+        assert!(
+            output.plays.lock().unwrap().is_empty(),
+            "a cue cancelled during build must never play"
+        );
+        assert_eq!(stopped, Ok(None));
+        assert_eq!(engine.timing_since(called), None);
+        let next = engine
+            .play(Cue::Wake, Mic::Open, Instant::now())
+            .unwrap()
+            .unwrap();
+        assert!(
+            !next.rebuilt,
+            "the next cue reuses the cancelled cue's output"
+        );
+        assert_eq!(*output.builds.lock().unwrap(), [0]);
+        assert_eq!(*output.plays.lock().unwrap(), [0]);
+        assert_eq!(output.gate.state(), input);
     }
 
     #[test]
