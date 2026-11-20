@@ -7749,13 +7749,16 @@ async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
                 "the first ending cue is still playing"
             );
 
+            rig.server.connect_again();
             rig.at(1300).await;
             rig.press().await;
             rig.server.ready();
             settle().await;
             assert!(
                 rig.gate.is_enabled(),
-                "the next hold hears from the press while the old end cue is cut"
+                "the next hold hears from the press while the old end cue is cut: {:?}, {:?}",
+                rig.state(),
+                rig.cue_log()
             );
             assert!(rig.cue_log().contains(&(1300, CueLog::Cut(Cue::Accepted))));
             assert_eq!(
