@@ -10,7 +10,10 @@ use thalvi_desktop::theme::overlay::{
 };
 
 use super::paint::{Canvas, Fill, Layout, Rgba, Style, Text, TextBounds};
-use super::view::{HEIGHT, Tone, View, WIDTH, copies_text, done_message, spaced};
+use super::view::{
+    HEIGHT, SUBMIT_DRAFT_SURFACE, SUBMIT_DRAFT_TEXT, Tone, View, WIDTH, copies_text, done_message,
+    spaced,
+};
 use crate::status::Status;
 
 /// The neon look's state between frames: its theme, the bars' eased level, and where it last
@@ -566,11 +569,12 @@ fn card(
     let width = (WIDTH - 2.0 * art::SIDE) * art::CARD_SHARE;
     let left = (WIDTH - width) / 2.0;
     let inner = width - 2.0 * art::BASE_EDGE - 2.0 * inset_x;
-    let committed_color = if words.notice {
-        theme.state.pending
-    } else {
-        theme.fg
-    };
+    let (surface, committed_color, ending_color) =
+        match (view.status.requires_final_preview(), words.notice) {
+            (true, _) => (SUBMIT_DRAFT_SURFACE, SUBMIT_DRAFT_TEXT, SUBMIT_DRAFT_TEXT),
+            (false, true) => (theme.card, theme.state.pending, theme.state.pending),
+            (false, false) => (theme.card, theme.fg, theme.state.pending),
+        };
     let committed = spaced(&words.committed, &words.partial);
     let spans = [
         (committed.as_str(), committed_color),
@@ -584,7 +588,7 @@ fn card(
     // The ending sits after the last word, or on a line of its own when it does not fit.
     let (ending_gap, ending_pad, ..) = art::ENDING;
     let ending_width = words.ending.map_or(0.0, |(word, ..)| {
-        text.measure(&[(word, theme.state.pending)], style, Layout::Line, scale)
+        text.measure(&[(word, ending_color)], style, Layout::Line, scale)
             .0
             + 2.0 * ending_pad
     });
@@ -602,7 +606,7 @@ fn card(
         + text_height
         + if counting { bar_gap + bar_height } else { 0.0 };
     shadow(canvas, (left, top, width, height), radius, theme);
-    canvas.rect((left, top, width, height), radius, &Fill::Solid(theme.card));
+    canvas.rect((left, top, width, height), radius, &Fill::Solid(surface));
     canvas.outline(
         (left, top, width, height),
         radius,
@@ -620,7 +624,7 @@ fn card(
         ending_badge(
             canvas,
             text,
-            (word, theme.state.pending),
+            (word, ending_color),
             style,
             (text_left + end_x, last_top, ending_width),
         );

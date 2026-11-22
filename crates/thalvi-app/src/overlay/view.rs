@@ -5,13 +5,17 @@ use std::time::Duration;
 
 use thalvi_desktop::capture::CaptureRoute;
 use thalvi_desktop::device::Step;
-use thalvi_desktop::theme::overlay::{WAVE_H, module};
+use thalvi_desktop::theme::overlay::{Rgba, WAVE_H, module};
 
 use crate::status::{FailureKind, Status, load_notice};
 
 /// The overlay surface, in points; every look draws inside it.
 pub const WIDTH: f32 = 460.0;
 pub const HEIGHT: f32 = 200.0;
+
+// The settled words must remain readable with every saved theme and desktop background.
+pub(super) const SUBMIT_DRAFT_SURFACE: Rgba = Rgba::rgb(16, 24, 35);
+pub(super) const SUBMIT_DRAFT_TEXT: Rgba = Rgba::rgb(255, 255, 255);
 
 pub(super) const MODULE_W: f32 = 370.0;
 pub(super) const MODULE_H: f32 = 84.0;

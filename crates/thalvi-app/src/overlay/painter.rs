@@ -237,6 +237,39 @@ mod tests {
     }
 
     #[test]
+    fn final_submit_remains_visible_with_transparent_theme_text() {
+        use thalvi_desktop::theme::{LookOverrides, Themes};
+
+        let colors = serde_json::json!({
+            "text": "#00000000", "background": "#ffffff", "surface": "#ffffff",
+            "raised": "#ffffff", "accent": "#005500"
+        });
+        for (look, dark) in LOOKS {
+            let scheme = if dark { "dark" } else { "light" };
+            let name = look.name();
+            let themes = Themes::load(&serde_json::json!({
+                "version": 1,
+                name: {"colors": {scheme: colors}},
+            }));
+            let overrides = themes.of(look);
+            assert!(matches!(overrides, Some(LookOverrides::Usable(_))));
+            let style = Arc::new(Style::resolve(look, overrides));
+            let mut painter = Painter::new(1.0, style, dark).unwrap();
+            let mut pixels = |text| {
+                let shown = view(&submit_preview(text), true);
+                let (frame, complete) = painter.render(&shown, 0.0);
+                assert!(complete, "{look:?} dark {dark}");
+                frame.bgra.clone()
+            };
+            assert_ne!(
+                pixels("Pay 1111 dollars"),
+                pixels("Pay 9999 dollars"),
+                "{look:?} dark {dark}"
+            );
+        }
+    }
+
+    #[test]
     fn each_look_shows_each_state_in_its_tone() {
         let pending = Status::Pending {
             target: None,

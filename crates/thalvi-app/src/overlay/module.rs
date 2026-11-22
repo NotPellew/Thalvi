@@ -11,8 +11,8 @@ use thalvi_desktop::theme::overlay::{
 
 use super::paint::{Canvas, Fill, Layout, Rgba, Text, TextBounds};
 use super::view::{
-    CANCEL, FRAME, HEIGHT, Line, MODULE_H, MODULE_W, MODULE_X, SLOT, SLOT_H, SLOT_W, Tone, View,
-    WIDTH, done_message, spaced,
+    CANCEL, FRAME, HEIGHT, Line, MODULE_H, MODULE_W, MODULE_X, SLOT, SLOT_H, SLOT_W,
+    SUBMIT_DRAFT_SURFACE, SUBMIT_DRAFT_TEXT, Tone, View, WIDTH, done_message, spaced,
 };
 use crate::status::Status;
 
@@ -141,7 +141,14 @@ impl Module {
             false
         } else if has_text {
             rule(canvas, theme);
-            ticker(canvas, text, &view.line, view.caret_on(), theme)
+            ticker(
+                canvas,
+                text,
+                &view.line,
+                view.caret_on(),
+                theme,
+                view.status.requires_final_preview(),
+            )
         } else {
             false
         };
@@ -574,6 +581,7 @@ fn ticker(
     line: &Line,
     blink_on: bool,
     theme: &Theme,
+    final_preview: bool,
 ) -> bool {
     let style = theme.measures.text(TICKER);
     let inset = art::TICKER_LEFT * theme.measures.spacing;
@@ -605,10 +613,17 @@ fn ticker(
             caret,
         } => {
             let committed = spaced(committed, partial);
-            let spans = [
-                (committed.as_str(), theme.text),
-                (partial.as_str(), theme.muted),
-            ];
+            let color = if final_preview {
+                canvas.rect(
+                    (left, top, width, style.line_height),
+                    0.0,
+                    &Fill::Solid(SUBMIT_DRAFT_SURFACE),
+                );
+                SUBMIT_DRAFT_TEXT
+            } else {
+                theme.text
+            };
+            let spans = [(committed.as_str(), color), (partial.as_str(), theme.muted)];
             let (used, _) = text.measure(&spans, style, Layout::Line, scale);
             // A line too long to fit ends 3 points short of the right edge, leaving room for the caret.
             let start = (right - art::CARET_INSETS.0 - art::CARET_WIDTH - used).min(left);
@@ -768,7 +783,14 @@ mod tests {
     }
 
     fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
-        super::ticker(canvas, text, line, blink_on, &built_in(Finish::Gunmetal));
+        super::ticker(
+            canvas,
+            text,
+            line,
+            blink_on,
+            &built_in(Finish::Gunmetal),
+            false,
+        );
     }
 
     thread_local! {
