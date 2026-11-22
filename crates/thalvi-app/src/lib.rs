@@ -19,3 +19,5 @@ mod updater;
 mod watch;
 
 pub use app::run;
+pub use overlay::{View, render_rgba};
+pub use status::{FailureKind, Status};
