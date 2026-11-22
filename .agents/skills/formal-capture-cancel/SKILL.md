@@ -125,6 +125,12 @@ recovery queued during the capture clears it; that notice is shown only after se
 delivery path. `drive`, `Runner::capture` and `Settling::settle` are unchanged, so the model actions
 are unchanged.
 
+When a finished clip is the only input (#604), `Runner::step` closes the source, restores the
+microphone failure and proceeds to the existing wait in the same iteration. This path runs between
+captures, outside the single-capture model. `Requests::take`, `Requests::read_queued`, `drive`,
+`Runner::capture` and `Settling::settle` keep the same cancellation writes, delivery paths and await
+boundaries, so the model actions are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
