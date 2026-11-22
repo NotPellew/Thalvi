@@ -223,16 +223,20 @@ mod tests {
     #[test]
     fn final_submit_rejects_text_that_the_larger_theme_would_clip() {
         for (look, dark) in LOOKS {
-            let mut built_in = painter(1.0, look, dark);
-            let style = customized(look, dark, "font.scale", serde_json::json!(1.25));
-            let mut enlarged = Painter::new(1.0, style, dark).unwrap();
-            assert!(
-                (1..=25).any(|words| {
-                    let shown = view(&submit_preview(&"wide words ".repeat(words)), true);
-                    built_in.render(&shown, 0.0).1 && !enlarged.render(&shown, 0.0).1
-                }),
-                "{look:?} dark {dark}"
-            );
+            // The fixture's H advances 0.6 em. Neon has a wider draft area than the module looks.
+            let draft = "H".repeat(if look == Look::Neon { 43 } else { 32 });
+            let shown = view(&submit_preview(&draft), true);
+            let scales = [
+                Arc::new(defaults_of(look)),
+                customized(look, dark, "font.scale", serde_json::json!(1.25)),
+            ];
+            let complete = scales.map(|style| {
+                let mut painter = Painter::new(1.0, style, dark).unwrap();
+                let family = painter.text.load_weight_fixture();
+                painter.text.set_families(family, family);
+                painter.render(&shown, 0.0).1
+            });
+            assert_eq!(complete, [true, false], "{look:?} dark {dark}");
         }
     }
 
