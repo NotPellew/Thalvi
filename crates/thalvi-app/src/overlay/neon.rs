@@ -5,109 +5,32 @@ use std::f32::consts::PI;
 
 use thalvi_desktop::capture::CaptureRoute;
 
-use super::paint::{Canvas, Fill, Layout, Rgba, Style, Text};
-use super::view::{Tone, View, WIDTH, copies_text, done_message, spaced};
+use thalvi_desktop::theme::overlay::{
+    CONFIRMATION, DRAFT, LABEL, NEON_CANCEL, Neon as Theme, TARGET, neon as art,
+};
+
+use super::paint::{Canvas, Fill, Layout, Rgba, Style, Text, TextBounds};
+use super::view::{HEIGHT, Tone, View, WIDTH, copies_text, done_message, spaced};
 use crate::status::Status;
-
-/// Space around the pill and the card inside the overlay.
-const TOP: f32 = 26.0;
-const SIDE: f32 = 12.0;
-const GAP: f32 = 6.0;
-const BARS: usize = 9;
-const BAR_W: f32 = 3.0;
-/// The nine bars with a bar's width between each two.
-const STRIP: f32 = 17.0 * BAR_W;
-const BAR_H: f32 = 22.0;
-/// A bar's height while nothing moves, as a share of its full height.
-const FLAT: f32 = 4.0 / 22.0;
-const ENVELOPE: [f32; BARS] = [0.45, 0.65, 0.82, 0.95, 1.0, 0.95, 0.82, 0.65, 0.45];
-const DRAFT: Style = Style {
-    size: 13.0,
-    line_height: 13.0 * 1.45,
-    weight: 400,
-    mono: false,
-    tracking: 0.0,
-};
-/// The pill's label, its message once a capture ends, and the target it names.
-const LABEL: Style = Style {
-    size: 11.0,
-    line_height: 14.0,
-    weight: 700,
-    mono: true,
-    tracking: 1.32,
-};
-const MESSAGE: Style = Style {
-    size: 13.0,
-    line_height: 17.0,
-    weight: 600,
-    mono: false,
-    tracking: 0.0,
-};
-const TARGET: Style = Style {
-    size: 12.0,
-    line_height: 15.0,
-    weight: 400,
-    mono: true,
-    tracking: 0.0,
-};
-/// The card shows the draft's last lines; earlier ones scroll out of its top.
-const DRAFT_LINES: u16 = 3;
-const CARD_WIDTH: f32 = (WIDTH - 2.0 * SIDE) * 0.92;
-const CARD_INNER: f32 = CARD_WIDTH - 2.0 - 26.0;
-
-/// The look's colours in one system theme.
-struct Palette {
-    glass: Rgba,
-    card: Rgba,
-    line: Rgba,
-    fg: Rgba,
-    muted: Rgba,
-    neon: Rgba,
-    blue: Rgba,
-    warn: Rgba,
-    amber: Rgba,
-}
-
-const DARK: Palette = Palette {
-    glass: Rgba::rgb(2, 6, 23).alpha(0.92),
-    card: Rgba::rgb(4, 18, 46).alpha(0.95),
-    line: Rgba::rgb(0x12, 0x31, 0x5e),
-    fg: Rgba::rgb(0xea, 0xff, 0xf3),
-    muted: Rgba::rgb(0x9c, 0xc7, 0xb4),
-    neon: Rgba::rgb(0x2b, 0xff, 0x88),
-    blue: Rgba::rgb(0x3b, 0x82, 0xf6),
-    warn: Rgba::rgb(0xff, 0x6b, 0x5e),
-    amber: Rgba::rgb(0xff, 0xc2, 0x4b),
-};
-
-const LIGHT: Palette = Palette {
-    glass: Rgba::rgb(247, 251, 255).alpha(0.94),
-    card: Rgba::rgb(255, 255, 255).alpha(0.96),
-    line: Rgba::rgb(0xb9, 0xcb, 0xdd),
-    fg: Rgba::rgb(0x07, 0x18, 0x2e),
-    muted: Rgba::rgb(0x3d, 0x5a, 0x73),
-    neon: Rgba::rgb(0x00, 0x7a, 0x43),
-    blue: Rgba::rgb(0x0b, 0x3d, 0x91),
-    warn: Rgba::rgb(0xb4, 0x23, 0x18),
-    amber: Rgba::rgb(0x8a, 0x5a, 0x00),
-};
 
 /// The neon look's state between frames: its theme, the bars' eased level, and where it last
 /// drew its cancel button.
 pub(super) struct Neon {
-    dark: bool,
+    theme: Theme,
     shown: f32,
     last: Option<f64>,
     pub(super) cancel: Option<(f32, f32, f32, f32)>,
+    built_in_cancel: Option<CancelAnchor>,
 }
 
 impl Neon {
-    pub(super) fn new(dark: bool) -> Self {
+    pub(super) fn new(theme: Theme) -> Self {
         Self {
-            dark,
+            theme,
             shown: 0.0,
             last: None,
             cancel: None,
+            built_in_cancel: None,
         }
     }
 
@@ -118,26 +41,36 @@ impl Neon {
         })
     }
 
-    pub(super) fn draw(&mut self, canvas: &mut Canvas, text: &mut Text, view: &View) {
-        let colors = if self.dark { &DARK } else { &LIGHT };
+    pub(super) fn draw(&mut self, canvas: &mut Canvas, text: &mut Text, view: &View) -> bool {
         canvas.clear();
-        let elapsed = self
-            .last
-            .map_or(0.0, |last| (view.clock - last).clamp(0.0, 0.1));
+        let elapsed = self.last.map_or(0.0, |last| {
+            (view.clock - last).clamp(0.0, art::BAR_EASING.2)
+        });
         self.last = Some(view.clock);
         let moving = matches!(view.tone, Tone::Live | Tone::Quiet) && view.wave.is_some();
         if moving {
-            let rate = if view.level > self.shown { 0.6 } else { 0.2 };
+            let rate = if view.level > self.shown {
+                art::BAR_EASING.0
+            } else {
+                art::BAR_EASING.1
+            };
             #[expect(clippy::cast_possible_truncation, reason = "a fraction of a second")]
-            let pace = 1.0 - (1.0f32 - rate).powf(elapsed as f32 * 60.0);
+            let pace = 1.0 - (1.0f32 - rate).powf(elapsed as f32 * art::BAR_RATE);
             self.shown += (view.level - self.shown) * pace;
         } else {
             self.shown = 0.0;
         }
-        let pill = self.pill(canvas, text, view, colors, moving);
-        if let Some(words) = draft(view) {
-            card(canvas, text, view, colors, &words, pill.1 + pill.3 + GAP);
-        }
+        let pill = self.pill(canvas, text, view, moving);
+        draft(view).is_some_and(|words| {
+            card(
+                canvas,
+                text,
+                view,
+                &self.theme,
+                &words,
+                pill.1 + pill.3 + art::GAP * self.theme.measures.spacing,
+            )
+        })
     }
 
     /// Draws the pill; its rectangle.
@@ -146,101 +79,107 @@ impl Neon {
         canvas: &mut Canvas,
         text: &mut Text,
         view: &View,
-        colors: &Palette,
         moving: bool,
     ) -> (f32, f32, f32, f32) {
+        let theme = &self.theme;
+        let style = theme.measures;
         let scale = canvas.scale_of();
         let (tone, words, target) = pill_words(view);
         let ends = matches!(tone, Tone::Done | Tone::Failed);
-        let tint = match tone {
-            Tone::Live | Tone::Done => colors.neon,
-            Tone::Quiet | Tone::Working => colors.muted,
-            Tone::Pending => colors.amber,
-            Tone::Failed => colors.warn,
-        };
-        let label_style = if ends { MESSAGE } else { LABEL };
-        let label_color = match tone {
-            Tone::Pending | Tone::Done | Tone::Failed => tint,
-            _ => colors.muted,
-        };
-        let target_style = TARGET;
+        let (label_style, label_color) = pill_label(theme, tone);
+        let target_style = style.text(TARGET);
         let cancellable = view.cancellable();
-        let mut fixed = 10.0 + 14.0 + 2.0;
+        let custom_geometry = label_style != LABEL && !ends
+            || target_style != TARGET
+            || style.spacing.to_bits() != 1.0f32.to_bits()
+            || text.has_custom_families();
+        let [left_inset, right_inset] =
+            [art::PILL_INSETS.0, art::PILL_INSETS.1].map(|inset| inset * style.spacing);
+        let gap = art::PART_GAP * style.spacing;
+        let fixed_marks = art::DOT + art::STRIP;
+        let mut fixed = left_inset + right_inset + 2.0 * art::BASE_EDGE;
         let mut parts = 0.0;
         if !ends {
-            fixed += 10.0 + STRIP;
+            fixed += fixed_marks;
             parts += 2.0;
         }
         if cancellable {
-            fixed += 20.0;
+            fixed += art::CANCEL_SIZE;
             parts += 1.0;
         }
-        let room = WIDTH - 2.0 * SIDE;
         let target_words = target.map(|to| format!("→ {to}"));
-        let target_width = target_words.as_deref().map_or(0.0, |words| {
-            text.measure(&[(words, colors.muted)], target_style, Layout::Line, scale)
-                .0
-        });
-        if target_words.is_some() {
+        let label = (words.as_str(), label_color);
+        let target = target_words.as_deref().map(|words| (words, theme.muted));
+        if target.is_some() {
             parts += 1.0;
         }
-        let label_spans = [(words.as_str(), label_color)];
-        let gaps = 10.0 * parts;
-        let label_room = (room - fixed - gaps - target_width).max(40.0);
+        let gaps = gap * parts;
+        let original_cancel = (cancellable && custom_geometry).then(|| {
+            CancelAnchor::resolve(&mut self.built_in_cancel, text, label, target, parts, scale)
+        });
+        let right = original_cancel.map_or(WIDTH - art::SIDE, |x| {
+            x + art::CANCEL_SIZE + right_inset + art::BASE_EDGE
+        });
+        let room = right - art::SIDE;
+        let available = (room - fixed - gaps).max(art::MIN_LABEL_ROOM);
         let label_layout = if ends {
-            Layout::Wrapped { width: label_room }
+            Layout::Wrapped { width: available }
         } else {
             Layout::Line
         };
-        let (label_width, label_height) =
-            text.measure(&label_spans, label_style, label_layout, scale);
-        let label_width = label_width.min(label_room);
-        let inner = if ends { label_height } else { BAR_H };
-        let height = inner + 12.0 + 2.0;
-        let width = (fixed + gaps + label_width + target_width).min(room);
-        let (left, top) = ((WIDTH - width) / 2.0, TOP);
-        let border = match tone {
-            Tone::Pending => colors.amber,
-            Tone::Done => colors.neon,
-            Tone::Failed => colors.warn,
-            _ => colors.line,
+        let label = PillText::measure(text, label, label_style, label_layout, scale);
+        let mut target =
+            target.map(|span| PillText::measure(text, span, target_style, Layout::Line, scale));
+        if custom_geometry && let Some(target) = &mut target {
+            target.width = target.width.min((available - label.width).max(0.0));
+        }
+        let target_width = target.as_ref().map_or(0.0, |target| target.width);
+        let label = PillText {
+            width: label
+                .width
+                .min((available - target_width).max(art::MIN_LABEL_ROOM)),
+            ..label
         };
-        shadow(canvas, (left, top, width, height), height / 2.0);
-        canvas.rect(
-            (left, top, width, height),
-            height / 2.0,
-            &Fill::Solid(colors.glass),
-        );
-        canvas.outline((left, top, width, height), height / 2.0, border);
+        let inner = if ends { label.height } else { art::BAR_H };
+        let vertical = if cancellable {
+            art::PILL_VERTICAL
+        } else {
+            art::PILL_VERTICAL * style.spacing
+        };
+        let height = inner + 2.0 * vertical + 2.0 * art::BASE_EDGE;
+        let width = (fixed + gaps + label.width + target_width).min(room);
+        let left = original_cancel.map_or((WIDTH - width) / 2.0, |_| right - width);
+        let top = art::TOP;
+        let rect = (left, top, width, height);
+        pill_surface(canvas, theme, tone, rect);
         let middle = top + height / 2.0;
-        let mut x = left + 1.0 + 10.0;
+        let mut x = left + art::BASE_EDGE + left_inset;
         if !ends {
-            self.marks(canvas, view, colors, tone, moving, (x, middle));
-            x += 10.0 + 10.0 + STRIP + 10.0;
+            self.marks(canvas, view, tone, moving, (x, middle));
+            x += art::DOT + gap + art::STRIP + gap;
         }
-        text.draw(
-            canvas,
-            &label_spans,
-            label_style,
-            label_layout,
-            (x, middle - label_height / 2.0),
-        );
-        x += label_width + 10.0;
-        if let Some(words) = &target_words {
-            text.draw(
-                canvas,
-                &[(words.as_str(), colors.muted)],
-                target_style,
-                Layout::Line,
-                (x, middle - target_style.line_height / 2.0),
-            );
-            x += target_width + 10.0;
+        label.draw(canvas, text, (x, middle), custom_geometry && !ends);
+        x += label.width + gap;
+        if let Some(target) = target {
+            PillText {
+                height: target.style.line_height,
+                ..target
+            }
+            .draw(canvas, text, (x, middle), custom_geometry);
+            x += target.width + gap;
         }
-        self.cancel = cancellable.then_some((x, middle - 10.0, 20.0, 20.0));
+        canvas.set_text_bounds(None);
+        let x = original_cancel.unwrap_or(x);
+        self.cancel = cancellable.then_some((
+            x,
+            middle - art::CANCEL_SIZE / 2.0,
+            art::CANCEL_SIZE,
+            art::CANCEL_SIZE,
+        ));
         if cancellable {
-            cancel_mark(canvas, text, colors, (x, middle));
+            cancel_mark(canvas, text, theme, (x, middle));
         }
-        (left, top, width, height)
+        rect
     }
 
     /// The dot and the nine level bars, starting at `x` around `middle`.
@@ -248,79 +187,217 @@ impl Neon {
         &self,
         canvas: &mut Canvas,
         view: &View,
-        colors: &Palette,
         tone: Tone,
         moving: bool,
         (x, middle): (f32, f32),
     ) {
+        let theme = &self.theme;
         let dot = match tone {
-            Tone::Quiet => colors.muted,
-            Tone::Pending => colors.amber,
-            Tone::Working => {
+            Tone::Quiet => theme.state.quiet,
+            Tone::Pending => theme.state.pending,
+            Tone::Working if theme.measures.pulse => {
                 #[expect(clippy::cast_possible_truncation, reason = "a phase in seconds")]
-                let phase = (view.clock % 1.0) as f32;
-                colors
+                let phase = (view.clock % art::DOT_PULSE.0) as f32;
+                theme
                     .blue
-                    .alpha(1.0 - 0.65 * (0.5 - 0.5 * (2.0 * PI * phase).cos()))
+                    .faded(1.0 - art::DOT_PULSE.1 * (0.5 - 0.5 * (2.0 * PI * phase).cos()))
             }
-            _ => colors.neon,
+            Tone::Working => theme.blue,
+            _ => theme.accent,
         };
         if !matches!(tone, Tone::Quiet | Tone::Working) {
+            let (left, radius, opacity) = art::DOT_HALO;
             canvas.rect(
-                (x - 4.0, middle - 9.0, 18.0, 18.0),
-                9.0,
-                &Fill::Solid(dot.alpha(0.25)),
+                (x - left, middle - radius, 2.0 * radius, 2.0 * radius),
+                radius,
+                &Fill::Solid(
+                    theme
+                        .dot_halo
+                        .unwrap_or(dot)
+                        .faded(opacity * theme.measures.glow_ratio),
+                ),
             );
         }
-        canvas.rect((x, middle - 5.0, 10.0, 10.0), 5.0, &Fill::Solid(dot));
-        let bars = x + 20.0;
+        canvas.rect(
+            (x, middle - art::DOT / 2.0, art::DOT, art::DOT),
+            art::DOT / 2.0,
+            &Fill::Solid(dot),
+        );
+        let bars = x + art::DOT + art::PART_GAP * theme.measures.spacing;
         let bar_color = match tone {
-            Tone::Live => colors.neon,
-            Tone::Pending => colors.amber,
-            Tone::Working => colors.muted.alpha(0.6),
-            _ => colors.muted,
+            Tone::Live => theme.accent,
+            Tone::Pending => theme.state.pending,
+            Tone::Working => theme.state.working,
+            Tone::Quiet => theme.state.quiet,
+            _ => theme.muted,
         };
         #[expect(clippy::cast_possible_truncation, reason = "a clock in seconds")]
-        let now_ms = (view.clock * 1000.0) as f32;
-        for (index, envelope) in (0u8..).zip(ENVELOPE) {
+        let now_ms = (view.clock * art::MILLIS_PER_SECOND) as f32;
+        for (index, envelope) in (0u8..).zip(art::ENVELOPE) {
             let share = if moving {
-                let wobble = 0.75 + 0.25 * (now_ms / 110.0 + f32::from(index) * 1.3).sin();
-                FLAT + (1.0 - FLAT) * (self.shown * envelope * wobble * 1.2).min(1.0)
+                let wobble = if theme.measures.pulse {
+                    let (base, amplitude, period, phase) = art::BAR_WOBBLE;
+                    base + amplitude * (now_ms / period + f32::from(index) * phase).sin()
+                } else {
+                    1.0
+                };
+                art::FLAT
+                    + (1.0 - art::FLAT) * (self.shown * envelope * wobble * art::BAR_GAIN).min(1.0)
             } else {
-                FLAT
+                art::FLAT
             };
-            let bar = BAR_H * share;
+            let bar = art::BAR_H * share;
             canvas.rect(
                 (
-                    bars + f32::from(index) * 2.0 * BAR_W,
+                    bars + f32::from(index) * 2.0 * art::BAR_W,
                     middle - bar / 2.0,
-                    BAR_W,
+                    art::BAR_W,
                     bar,
                 ),
-                1.5,
+                art::BAR_RADIUS,
                 &Fill::Solid(bar_color),
             );
         }
     }
 }
 
-/// The 20-point cancel button at `x`, centred on `middle`.
-fn cancel_mark(canvas: &mut Canvas, text: &mut Text, colors: &Palette, (x, middle): (f32, f32)) {
-    let style = Style {
-        size: 16.0,
-        line_height: 20.0,
-        weight: 400,
-        mono: false,
-        tracking: 0.0,
+fn pill_label(theme: &Theme, tone: Tone) -> (Style, Rgba) {
+    let label = theme.measures.label(LABEL);
+    let message = theme.measures.text(CONFIRMATION);
+    match tone {
+        Tone::Done => (message, theme.state.done),
+        Tone::Failed => (message, theme.state.failed),
+        Tone::Pending => (label, theme.state.pending),
+        _ => (label, theme.muted),
+    }
+}
+
+fn pill_surface(canvas: &mut Canvas, theme: &Theme, tone: Tone, rect: (f32, f32, f32, f32)) {
+    let border = match tone {
+        Tone::Live => theme.state.live,
+        Tone::Pending => theme.state.pending,
+        Tone::Done => theme.state.done,
+        Tone::Failed => theme.state.failed,
+        _ => theme.line,
     };
-    let spans = [("×", colors.muted)];
+    let radius = (rect.3 / 2.0 + theme.measures.radius_delta).max(0.0);
+    shadow(canvas, rect, radius, theme);
+    canvas.rect(rect, radius, &Fill::Solid(theme.glass));
+    canvas.outline(rect, radius, border, theme.measures.border);
+}
+
+struct PillText<'a> {
+    span: (&'a str, Rgba),
+    style: Style,
+    layout: Layout,
+    width: f32,
+    height: f32,
+}
+
+impl<'a> PillText<'a> {
+    fn measure(
+        text: &mut Text,
+        span: (&'a str, Rgba),
+        style: Style,
+        layout: Layout,
+        scale: f32,
+    ) -> Self {
+        let (width, height) = text.measure(&[span], style, layout, scale);
+        Self {
+            span,
+            style,
+            layout,
+            width,
+            height,
+        }
+    }
+
+    fn draw(&self, canvas: &mut Canvas, text: &mut Text, (x, middle): (f32, f32), clip: bool) {
+        if clip {
+            text_width(canvas, x, self.width);
+        }
+        text.draw(
+            canvas,
+            &[self.span],
+            self.style,
+            self.layout,
+            (x, middle - self.height / 2.0),
+        );
+    }
+}
+
+struct CancelAnchor {
+    label: String,
+    target: Option<String>,
+    x: f32,
+}
+
+impl CancelAnchor {
+    fn resolve(
+        held: &mut Option<Self>,
+        text: &mut Text,
+        label: (&str, Rgba),
+        target: Option<(&str, Rgba)>,
+        parts: f32,
+        scale: f32,
+    ) -> f32 {
+        let name = target.map(|(name, _)| name);
+        if let Some(held) = held
+            .as_ref()
+            .filter(|held| held.label == label.0 && held.target.as_deref() == name)
+        {
+            return held.x;
+        }
+        let room = WIDTH - 2.0 * art::SIDE;
+        let target_width = target.map_or(0.0, |span| text.built_in_width(&[span], TARGET, scale));
+        let label_width = text.built_in_width(&[label], LABEL, scale);
+        let fixed = art::PILL_INSETS.0
+            + art::PILL_INSETS.1
+            + 2.0 * art::BASE_EDGE
+            + (art::DOT + art::STRIP)
+            + art::CANCEL_SIZE;
+        let gaps = art::PART_GAP * parts;
+        let label_width =
+            label_width.min((room - fixed - gaps - target_width).max(art::MIN_LABEL_ROOM));
+        let width = (fixed + gaps + label_width + target_width).min(room);
+        let mut x = (WIDTH - width) / 2.0 + art::BASE_EDGE + art::PILL_INSETS.0;
+        x += art::DOT + art::PART_GAP + art::STRIP + art::PART_GAP;
+        x += label_width + art::PART_GAP;
+        if name.is_some() {
+            x += target_width + art::PART_GAP;
+        }
+        *held = Some(Self {
+            label: label.0.to_owned(),
+            target: name.map(str::to_owned),
+            x,
+        });
+        x
+    }
+}
+
+fn text_width(canvas: &mut Canvas, left: f32, width: f32) {
+    canvas.set_text_bounds(Some(TextBounds {
+        left,
+        right: left + width,
+        fade_left: 0.0,
+        fade_right: 0.0,
+    }));
+}
+
+/// Draws the glyph centred inside the unchanged cancel area.
+fn cancel_mark(canvas: &mut Canvas, text: &mut Text, theme: &Theme, (x, middle): (f32, f32)) {
+    let style = theme.measures.text(NEON_CANCEL);
+    let spans = [("×", theme.muted)];
     let (used, _) = text.measure(&spans, style, Layout::Line, canvas.scale_of());
     text.draw(
         canvas,
         &spans,
         style,
         Layout::Line,
-        (x + (20.0 - used) / 2.0, middle - 10.0),
+        (
+            x + (art::CANCEL_SIZE - used) / 2.0,
+            middle - style.line_height / 2.0,
+        ),
     );
 }
 
@@ -474,115 +551,155 @@ fn card(
     canvas: &mut Canvas,
     text: &mut Text,
     view: &View,
-    colors: &Palette,
+    theme: &Theme,
     words: &Draft,
     top: f32,
-) {
+) -> bool {
+    let measures = theme.measures;
+    let style = measures.text(DRAFT);
+    let (inset_x, inset_y) = (
+        art::DRAFT_INSETS.0 * measures.spacing,
+        art::DRAFT_INSETS.1 * measures.spacing,
+    );
+    let radius = (art::CARD_RADIUS + measures.radius_delta).max(0.0);
     let scale = canvas.scale_of();
-    let width = CARD_WIDTH;
+    let width = (WIDTH - 2.0 * art::SIDE) * art::CARD_SHARE;
     let left = (WIDTH - width) / 2.0;
-    let inner = CARD_INNER;
+    let inner = width - 2.0 * art::BASE_EDGE - 2.0 * inset_x;
     let committed_color = if words.notice {
-        colors.amber
+        theme.state.pending
     } else {
-        colors.fg
+        theme.fg
     };
     let committed = spaced(&words.committed, &words.partial);
     let spans = [
         (committed.as_str(), committed_color),
-        (words.partial.as_str(), colors.muted),
+        (words.partial.as_str(), theme.muted),
     ];
     let layout = Layout::Wrapped { width: inner };
-    let lines = text.line_widths(&spans, DRAFT, layout, scale);
+    let lines = text.line_widths(&spans, style, layout, scale);
     let last = lines.last().copied().unwrap_or(0.0);
     #[expect(clippy::cast_precision_loss, reason = "a few lines")]
     let mut count = lines.len().max(1) as f32;
     // The ending sits after the last word, or on a line of its own when it does not fit.
+    let (ending_gap, ending_pad, ..) = art::ENDING;
     let ending_width = words.ending.map_or(0.0, |(word, ..)| {
-        ending_width(text, word, colors.amber, scale)
+        text.measure(&[(word, theme.state.pending)], style, Layout::Line, scale)
+            .0
+            + 2.0 * ending_pad
     });
-    let caret_width = if words.caret { 3.0 } else { 0.0 };
-    let mut end_x = last + 5.2;
+    let mut end_x = last + ending_gap;
     if words.ending.is_some() && end_x + ending_width > inner {
         count += 1.0;
         end_x = 0.0;
     }
-    let shown = count.min(f32::from(DRAFT_LINES));
-    let text_height = shown * DRAFT.line_height;
+    let shown = count.min(art::DRAFT_LINES);
+    let text_height = shown * style.line_height;
     let counting = words.ending.is_some();
-    let height = 2.0 + 18.0 + text_height + if counting { 12.0 } else { 0.0 };
-    shadow(canvas, (left, top, width, height), 12.0);
-    canvas.rect((left, top, width, height), 12.0, &Fill::Solid(colors.card));
-    canvas.outline((left, top, width, height), 12.0, colors.line);
-    let text_left = left + 1.0 + 13.0;
-    let text_top = top + 1.0 + 9.0;
-    let scrolled = (count - shown) * DRAFT.line_height;
+    let (bar_gap, bar_height, bar_radius, bar_waiting) = art::COUNTDOWN;
+    let height = 2.0 * art::BASE_EDGE
+        + 2.0 * inset_y
+        + text_height
+        + if counting { bar_gap + bar_height } else { 0.0 };
+    shadow(canvas, (left, top, width, height), radius, theme);
+    canvas.rect((left, top, width, height), radius, &Fill::Solid(theme.card));
+    canvas.outline(
+        (left, top, width, height),
+        radius,
+        theme.line,
+        measures.border,
+    );
+    let text_left = left + art::BASE_EDGE + inset_x;
+    let text_top = top + art::BASE_EDGE + inset_y;
+    let scrolled = (count - shown) * style.line_height;
     canvas.clip(Some((text_left, text_top, inner, text_height)));
     let origin = text_top - scrolled;
-    text.draw(canvas, &spans, DRAFT, layout, (text_left, origin));
-    let last_top = origin + (count - 1.0) * DRAFT.line_height;
+    text.draw(canvas, &spans, style, layout, (text_left, origin));
+    let last_top = origin + (count - 1.0) * style.line_height;
     if let Some((word, ..)) = words.ending {
-        let x = text_left + end_x;
-        canvas.rect(
-            (x, last_top + 1.0, ending_width, DRAFT.line_height - 2.0),
-            4.0,
-            &Fill::Solid(colors.amber.alpha(0.22)),
-        );
-        text.draw(
+        ending_badge(
             canvas,
-            &[(word, colors.amber)],
-            DRAFT,
-            Layout::Line,
-            (x + 4.0, last_top),
+            text,
+            (word, theme.state.pending),
+            style,
+            (text_left + end_x, last_top, ending_width),
         );
     }
     if words.caret && view.caret_on() {
+        let (left, top, width, height) = art::CARET;
         canvas.rect(
             (
-                text_left + last + 1.0,
-                last_top + 3.0,
-                caret_width - 1.0,
-                14.0,
+                text_left + last + left,
+                last_top + top,
+                width,
+                height * measures.font_scale,
             ),
             0.0,
-            &Fill::Solid(colors.neon),
+            &Fill::Solid(theme.accent),
         );
     }
     canvas.clip(None);
     if let Some((_, share, running)) = words.ending {
-        let y = text_top + text_height + 8.0;
-        canvas.rect((text_left, y, inner, 4.0), 2.0, &Fill::Solid(colors.line));
-        let bar = colors.amber.alpha(if running { 1.0 } else { 0.35 });
-        canvas.rect((text_left, y, inner * share, 4.0), 2.0, &Fill::Solid(bar));
+        let y = text_top + text_height + bar_gap;
+        canvas.rect(
+            (text_left, y, inner, bar_height),
+            bar_radius,
+            &Fill::Solid(theme.line),
+        );
+        let bar = theme
+            .state
+            .pending
+            .faded(if running { 1.0 } else { bar_waiting });
+        canvas.rect(
+            (text_left, y, inner * share, bar_height),
+            bar_radius,
+            &Fill::Solid(bar),
+        );
     }
+    count <= art::DRAFT_LINES
+        && text_top + text_height <= HEIGHT
+        && lines.iter().all(|width| *width <= inner)
 }
 
-fn ending_width(text: &mut Text, word: &str, color: Rgba, scale: f32) -> f32 {
-    text.measure(&[(word, color)], DRAFT, Layout::Line, scale).0 + 8.0
-}
-
-pub(super) fn preview_fits(text: &mut Text, value: &str, scale: f32) -> bool {
-    let color = Rgba::rgb(255, 255, 255);
-    let layout = Layout::Wrapped { width: CARD_INNER };
-    let lines = text.line_widths(&[(value, color)], DRAFT, layout, scale);
-    let last = lines.last().copied().unwrap_or(0.0);
-    let extra_line = last + 5.2 + ending_width(text, "submit", color, scale) > CARD_INNER;
-    let count = lines.len().max(1) + usize::from(extra_line);
-    count <= usize::from(DRAFT_LINES) && lines.iter().all(|width| *width <= CARD_INNER)
+fn ending_badge(
+    canvas: &mut Canvas,
+    text: &mut Text,
+    (word, color): (&str, Rgba),
+    style: Style,
+    (x, top, width): (f32, f32, f32),
+) {
+    let (_, pad, radius, inset, opacity) = art::ENDING;
+    canvas.rect(
+        (x, top + inset, width, style.line_height - 2.0 * inset),
+        radius,
+        &Fill::Solid(color.faded(opacity)),
+    );
+    text.draw(
+        canvas,
+        &[(word, color)],
+        style,
+        Layout::Line,
+        (x + pad, top),
+    );
 }
 
 /// A soft shadow 6 points under a rounded rectangle.
-fn shadow(canvas: &mut Canvas, (x, y, width, height): (f32, f32, f32, f32), radius: f32) {
-    for (spread, alpha) in [(12.0, 0.05), (8.0, 0.08), (4.0, 0.12)] {
+fn shadow(
+    canvas: &mut Canvas,
+    (x, y, width, height): (f32, f32, f32, f32),
+    radius: f32,
+    theme: &Theme,
+) {
+    for (spread, alpha) in art::SHADOW_LAYERS {
         canvas.rect(
             (
                 x - spread,
-                y + 6.0 - spread / 2.0,
+                y + art::SHADOW_OFFSET - spread / 2.0,
                 width + 2.0 * spread,
                 height + spread,
             ),
             radius + spread,
-            &Fill::Solid(Rgba::rgb(0, 0, 0).alpha(alpha)),
+            &Fill::Solid(theme.shadow.faded(alpha * theme.measures.glow_ratio)),
         );
     }
 }
@@ -590,6 +707,11 @@ fn shadow(canvas: &mut Canvas, (x, y, width, height): (f32, f32, f32, f32), radi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use thalvi_desktop::{config::Look, theme::defaults_of};
+
+    fn dark() -> Theme {
+        Theme::resolve(&defaults_of(Look::Neon), true)
+    }
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -629,7 +751,7 @@ mod tests {
         let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
         let mut view = View::new(false);
         view.clock = clock;
-        with_text(|text| card(&mut canvas, text, &view, &DARK, words, 10.0));
+        with_text(|text| card(&mut canvas, text, &view, &dark(), words, 10.0));
         canvas
     }
 
@@ -692,7 +814,7 @@ mod tests {
     #[test]
     fn neons_caret_follows_the_last_word_onto_new_lines_and_stays_in_view_as_the_card_scrolls() {
         let width = |words: &str| {
-            with_text(|text| text.measure(&[(words, DARK.fg)], DRAFT, Layout::Line, 1.0)).0
+            with_text(|text| text.measure(&[(words, dark().fg)], DRAFT, Layout::Line, 1.0)).0
         };
         let (short, long) = ("hi", "hello there");
         let (at_short, row) = caret(&words(short, true, None)).unwrap();
@@ -869,7 +991,7 @@ mod tests {
     #[test]
     fn neons_cancel_mark_is_centred_on_its_place() {
         let mut canvas = Canvas::new(WIDTH, HEIGHT, 1.0).unwrap();
-        with_text(|text| cancel_mark(&mut canvas, text, &DARK, (100.0, 50.0)));
+        with_text(|text| cancel_mark(&mut canvas, text, &dark(), (100.0, 50.0)));
         let width = COLUMNS;
         let inked: Vec<(usize, usize)> = pixels(&canvas)
             .iter()
@@ -892,14 +1014,14 @@ mod tests {
         let mut view = View::new(false);
         view.set_draft(false);
         view.set_status(status, 0.0);
-        with_text(|text| Neon::new(true).draw(&mut canvas, text, &view));
+        with_text(|text| Neon::new(dark()).draw(&mut canvas, text, &view));
         pixels(&canvas)
     }
 
     /// Whether `pixel` is `color` laid over the pill's glass at a third of its strength or more:
     /// thin or faint glyphs never reach the colour itself.
     fn tinted([b, g, r, _]: [u8; 4], color: Rgba) -> bool {
-        let glass = DARK.glass;
+        let glass = dark().glass;
         let from = |value: u8, base: u8| f32::from(value) - f32::from(base) * glass.a;
         let seen = [from(r, glass.r), from(g, glass.g), from(b, glass.b)];
         let full = [
@@ -994,29 +1116,47 @@ mod tests {
         );
         let (delivered, refused) = (look(done), look(failed));
         for (state, pixels, tinted, at, plain) in [
-            ("live", &live, Some(DARK.neon), bars(&live), DARK.amber),
+            (
+                "live",
+                &live,
+                Some(dark().accent),
+                bars(&live),
+                dark().state.pending,
+            ),
             (
                 "counting down",
                 &counting,
-                Some(DARK.amber),
+                Some(dark().state.pending),
                 bars(&counting),
-                DARK.neon,
+                dark().accent,
             ),
-            ("waiting for quiet", &waiting, None, all.clone(), DARK.neon),
-            ("working", &busy, Some(DARK.blue), all.clone(), DARK.neon),
+            (
+                "waiting for quiet",
+                &waiting,
+                None,
+                all.clone(),
+                dark().accent,
+            ),
+            (
+                "working",
+                &busy,
+                Some(dark().blue),
+                all.clone(),
+                dark().accent,
+            ),
             (
                 "delivered",
                 &delivered,
-                Some(DARK.neon),
+                Some(dark().accent),
                 label(&delivered),
-                DARK.amber,
+                dark().state.pending,
             ),
             (
                 "failed",
                 &refused,
-                Some(DARK.warn),
+                Some(dark().state.failed),
                 label(&refused),
-                DARK.neon,
+                dark().accent,
             ),
         ] {
             if let Some(tint) = tinted {
@@ -1025,7 +1165,11 @@ mod tests {
             }
             assert_eq!(count(pixels, plain, all.clone()), 0, "{state}");
         }
-        assert_eq!(count(&waiting, DARK.amber, all), 0, "waiting for quiet");
+        assert_eq!(
+            count(&waiting, dark().state.pending, all),
+            0,
+            "waiting for quiet"
+        );
     }
 
     #[test]

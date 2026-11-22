@@ -42,6 +42,7 @@ Init == /\ phase = "pre"
         /\ (finalMode = "submit" => ~writing)
 
 \* A producer can enqueue between any two receives, including drain iterations.
+\* Theme-only Apply retunes after capture. Apply is outside the ending controls in Send.
 Send(c) == /\ phase # "done" /\ sent < MaxControls
            /\ queue' = Append(queue, c) /\ sent' = sent + 1
            /\ intentOff' = NextOff(c, intentOff)

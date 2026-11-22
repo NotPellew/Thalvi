@@ -9,13 +9,17 @@
     reason = "pixel arithmetic on a small surface"
 )]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
+use cosmic_text::fontdb::{Database, ID as FontId, Style as FaceStyle};
 use cosmic_text::{
     Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight,
     Wrap,
 };
 use thalvi_desktop::host::OverlayFrame;
+use thalvi_desktop::theme::overlay::{MONO, SANS};
+pub use thalvi_desktop::theme::overlay::{Rgba, TextStyle as Style};
 use tiny_skia::{
     Color, FillRule, GradientStop, LinearGradient, Mask, Paint, PathBuilder, Pixmap, PixmapPaint,
     Point, Shader, SpreadMode, Stroke, Transform,
@@ -24,35 +28,14 @@ use tiny_skia::{
 /// Shaped lines kept for reuse; the overlay shows a handful at a time.
 const SHAPED_KEPT: usize = 32;
 
-/// A colour with straight alpha.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rgba {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub a: f32,
+fn skia(color: Rgba) -> Color {
+    Color::from_rgba8(
+        color.r,
+        color.g,
+        color.b,
+        (color.a.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
 }
-
-impl Rgba {
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b, a: 1.0 }
-    }
-
-    pub const fn alpha(self, a: f32) -> Self {
-        Self { a, ..self }
-    }
-
-    fn skia(self) -> Color {
-        Color::from_rgba8(
-            self.r,
-            self.g,
-            self.b,
-            (self.a.clamp(0.0, 1.0) * 255.0).round() as u8,
-        )
-    }
-}
-
-pub const TRANSPARENT: Rgba = Rgba::rgb(0, 0, 0).alpha(0.0);
 
 /// How a shape is painted.
 pub enum Fill<'a> {
@@ -68,19 +51,19 @@ pub enum Fill<'a> {
 impl Fill<'_> {
     fn paint(&self) -> Paint<'static> {
         let shader = match self {
-            Self::Solid(color) => Shader::SolidColor(color.skia()),
+            Self::Solid(color) => Shader::SolidColor(skia(*color)),
             Self::Linear { from, to, stops } => LinearGradient::new(
                 Point::from_xy(from.0, from.1),
                 Point::from_xy(to.0, to.1),
                 stops
                     .iter()
-                    .map(|(at, color)| GradientStop::new(*at, color.skia()))
+                    .map(|(at, color)| GradientStop::new(*at, skia(*color)))
                     .collect(),
                 SpreadMode::Pad,
                 Transform::identity(),
             )
             .unwrap_or(Shader::SolidColor(
-                stops.first().map_or(Color::TRANSPARENT, |s| s.1.skia()),
+                stops.first().map_or(Color::TRANSPARENT, |s| skia(s.1)),
             )),
         };
         Paint {
@@ -172,6 +155,40 @@ impl Canvas {
         );
     }
 
+    pub fn rounded_polygon(&mut self, points: &[(f32, f32); 4], radius: f32, fill: &Fill) {
+        if radius == 0.0 {
+            self.polygon(points, fill);
+            return;
+        }
+        let mut path = PathBuilder::new();
+        for (index, &(x, y)) in points.iter().enumerate() {
+            let towards = |(px, py): (f32, f32)| {
+                let (dx, dy) = (px - x, py - y);
+                let distance = dx.hypot(dy);
+                let share = (radius / distance).min(0.5);
+                (x + dx * share, y + dy * share)
+            };
+            let (left, top) = towards(points[(index + 3) % 4]);
+            let (right, bottom) = towards(points[(index + 1) % 4]);
+            if index == 0 {
+                path.move_to(left, top);
+            } else {
+                path.line_to(left, top);
+            }
+            path.quad_to(x, y, right, bottom);
+        }
+        path.close();
+        if let Some(path) = path.finish() {
+            self.pixmap.fill_path(
+                &path,
+                &fill.paint(),
+                FillRule::Winding,
+                self.transform(),
+                self.clip.as_ref(),
+            );
+        }
+    }
+
     /// An open line through `points`, `width` points wide with square-cut ends.
     pub fn stroke(&mut self, points: &[(f32, f32)], width: f32, fill: &Fill) {
         let Some(path) = polyline(points, false) else {
@@ -201,15 +218,28 @@ impl Canvas {
         );
     }
 
-    pub fn outline(&mut self, (x, y, w, h): (f32, f32, f32, f32), radius: f32, color: Rgba) {
-        let Some(path) = rounded(x + 0.5, y + 0.5, w - 1.0, h - 1.0, radius) else {
+    pub fn outline(
+        &mut self,
+        (x, y, w, h): (f32, f32, f32, f32),
+        radius: f32,
+        color: Rgba,
+        width: f32,
+    ) {
+        if width == 0.0 {
+            return;
+        }
+        let inset = width / 2.0;
+        let Some(path) = rounded(x + inset, y + inset, w - width, h - width, radius) else {
             return;
         };
         let transform = self.transform();
         self.pixmap.stroke_path(
             &path,
             &Fill::Solid(color).paint(),
-            &Stroke::default(),
+            &Stroke {
+                width,
+                ..Stroke::default()
+            },
             transform,
             self.clip.as_ref(),
         );
@@ -245,6 +275,19 @@ impl Canvas {
 
     pub fn set_text_bounds(&mut self, bounds: Option<TextBounds>) {
         self.text_bounds = bounds;
+    }
+
+    pub fn rgba(&self) -> (u32, u32, Vec<u8>) {
+        let rgba = self
+            .pixmap
+            .pixels()
+            .iter()
+            .flat_map(|pixel| {
+                let color = pixel.demultiply();
+                [color.red(), color.green(), color.blue(), color.alpha()]
+            })
+            .collect();
+        (self.pixmap.width(), self.pixmap.height(), rgba)
     }
 
     /// Fills `frame` with this canvas as premultiplied BGRA.
@@ -368,17 +411,6 @@ fn rounded(left: f32, top: f32, width: f32, height: f32, radius: f32) -> Option<
     path.finish()
 }
 
-/// How a piece of text is set.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Style {
-    pub size: f32,
-    pub line_height: f32,
-    pub weight: u16,
-    pub mono: bool,
-    /// Extra space after each character, in points.
-    pub tracking: f32,
-}
-
 /// Where a run of text sits: one line from its left edge, or wrapped in a width, each line from
 /// its left edge or centred.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -388,30 +420,13 @@ pub enum Layout {
     Centred { width: f32 },
 }
 
-/// The desktops' UI fonts, the first installed of which sets the overlay's text; Windows' and the
-/// Linux desktops' names together, since each system has only its own.
-const SANS: [&str; 6] = [
-    "Segoe UI",
-    "Adwaita Sans",
-    "Cantarell",
-    "Noto Sans",
-    "DejaVu Sans",
-    "Arial",
-];
-const MONO: [&str; 6] = [
-    "Cascadia Mono",
-    "Consolas",
-    "Adwaita Mono",
-    "Noto Sans Mono",
-    "DejaVu Sans Mono",
-    "Liberation Mono",
-];
-
 /// The system's fonts and the glyphs drawn from them so far.
 pub struct Text {
     fonts: FontSystem,
     glyphs: SwashCache,
     shaped: HashMap<String, Buffer>,
+    weight_axes: RefCell<HashMap<FontId, Option<(u16, u16)>>>,
+    families: (Option<String>, Option<String>),
 }
 
 impl Text {
@@ -440,7 +455,46 @@ impl Text {
             fonts,
             glyphs: SwashCache::new(),
             shaped: HashMap::new(),
+            weight_axes: RefCell::default(),
+            families: (None, None),
         }
+    }
+
+    pub fn set_families(&mut self, sans: &str, mono: &str) {
+        let installed = |name: &str| {
+            self.fonts
+                .db()
+                .faces()
+                .flat_map(|face| &face.families)
+                .find(|(family, _)| family.eq_ignore_ascii_case(name))
+                .map(|(family, _)| family.clone())
+        };
+        let families = (installed(sans), installed(mono));
+        if self.families != families {
+            self.families = families;
+            self.shaped.clear();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn alternative_family<'a>(&self, names: &'a [&'a str], mono: bool) -> Option<&'a str> {
+        let db = self.fonts.db();
+        let generic = if mono {
+            Family::Monospace
+        } else {
+            Family::SansSerif
+        };
+        let fallback = db.family_name(&generic);
+        names.iter().copied().find(|name| {
+            *name != fallback
+                && db
+                    .faces()
+                    .any(|face| face.families.iter().any(|(family, _)| family == name))
+        })
+    }
+
+    pub fn has_custom_families(&self) -> bool {
+        self.families.0.is_some() || self.families.1.is_some()
     }
 
     fn shape(
@@ -449,22 +503,31 @@ impl Text {
         style: Style,
         layout: Layout,
         scale: f32,
+        built_in: bool,
     ) -> &Buffer {
-        let key = format!("{spans:?}{style:?}{layout:?}{scale}");
+        let key = format!("{spans:?}{style:?}{layout:?}{scale}{built_in}");
         if !self.shaped.contains_key(&key) {
             if self.shaped.len() >= SHAPED_KEPT {
                 self.shaped.clear();
             }
-            let family = if style.mono {
-                Family::Monospace
+            let (chosen, fallback) = if style.mono {
+                (self.families.1.as_deref(), Family::Monospace)
             } else {
-                Family::SansSerif
+                (self.families.0.as_deref(), Family::SansSerif)
+            };
+            let family = match (built_in, chosen) {
+                (false, Some(name)) => Family::Name(name),
+                _ => fallback,
             };
             let metrics = Metrics::new(style.size * scale, style.line_height * scale);
             let mut buffer = Buffer::new(&mut self.fonts, metrics);
             let base = Attrs::new()
                 .family(family)
-                .weight(Weight(self.nearest_weight(family, style.weight)))
+                .weight(Weight(self.nearest_weight(
+                    family,
+                    style.weight,
+                    style.variable_weight,
+                )))
                 .letter_spacing(style.tracking / style.size);
             // Lines are centred when drawn; cosmic-text's own centring spreads the words apart.
             let width = match layout {
@@ -497,17 +560,39 @@ impl Text {
         &self.shaped[&key]
     }
 
-    /// The weight closest to `wanted` that `family` has. Asked for a weight its family lacks,
-    /// cosmic-text takes it from another family, and the spaces from yet another.
-    fn nearest_weight(&self, family: Family, wanted: u16) -> u16 {
+    /// Snaps to a registered weight so glyphs and spaces stay in the same family.
+    fn nearest_weight(&self, family: Family, wanted: u16, variable: bool) -> u16 {
         let fonts = self.fonts.db();
         let name = fonts.family_name(&family);
-        fonts
-            .faces()
-            .filter(|face| face.families.iter().any(|(named, _)| named == name))
+        let faces = || {
+            fonts
+                .faces()
+                .filter(|face| face.families.iter().any(|(named, _)| named == name))
+        };
+        let mut best = faces()
             .map(|face| face.weight.0)
             .min_by_key(|weight| weight.abs_diff(wanted))
-            .unwrap_or(wanted)
+            .unwrap_or(wanted);
+        if !variable || best == wanted {
+            return best;
+        }
+        let mut axes = self.weight_axes.borrow_mut();
+        for face in faces().filter(|face| face.style == FaceStyle::Normal) {
+            let Some((low, high)) = *axes
+                .entry(face.id)
+                .or_insert_with(|| weight_axis(fonts, face.id))
+            else {
+                continue;
+            };
+            let drawn = wanted.clamp(low, high);
+            if drawn.abs_diff(wanted) < best.abs_diff(wanted) {
+                best = drawn;
+            }
+            if best == wanted {
+                break;
+            }
+        }
+        best
     }
 
     /// The width of each line `spans` are set in, in points.
@@ -518,7 +603,7 @@ impl Text {
         layout: Layout,
         scale: f32,
     ) -> Vec<f32> {
-        self.shape(spans, style, layout, scale)
+        self.shape(spans, style, layout, scale, false)
             .layout_runs()
             .map(|run| run.line_w / scale)
             .collect()
@@ -532,7 +617,22 @@ impl Text {
         layout: Layout,
         scale: f32,
     ) -> (f32, f32) {
-        let buffer = self.shape(spans, style, layout, scale);
+        self.measure_as(spans, style, layout, scale, false)
+    }
+
+    pub fn built_in_width(&mut self, spans: &[(&str, Rgba)], style: Style, scale: f32) -> f32 {
+        self.measure_as(spans, style, Layout::Line, scale, true).0
+    }
+
+    fn measure_as(
+        &mut self,
+        spans: &[(&str, Rgba)],
+        style: Style,
+        layout: Layout,
+        scale: f32,
+        built_in: bool,
+    ) -> (f32, f32) {
+        let buffer = self.shape(spans, style, layout, scale, built_in);
         let (width, lines) = buffer
             .layout_runs()
             .fold((0.0f32, 0usize), |(width, lines), run| {
@@ -553,8 +653,8 @@ impl Text {
         let scale = canvas.scale;
         let origin = (at.0 * scale, at.1 * scale);
         // Kept apart from the cache, so both can be borrowed at once.
-        let key = format!("{spans:?}{style:?}{layout:?}{scale}");
-        self.shape(spans, style, layout, scale);
+        let key = format!("{spans:?}{style:?}{layout:?}{scale}false");
+        self.shape(spans, style, layout, scale, false);
         let Some(buffer) = self.shaped.remove(&key) else {
             return;
         };
@@ -595,6 +695,24 @@ impl Text {
     }
 }
 
+fn weight_axis(fonts: &Database, id: FontId) -> Option<(u16, u16)> {
+    use cosmic_text::skrifa::MetadataProvider;
+
+    fonts.with_face_data(id, |data, index| {
+        let font = cosmic_text::skrifa::FontRef::from_index(data, index).ok()?;
+        let axis = font
+            .axes()
+            .get_by_tag(cosmic_text::skrifa::Tag::new(b"wght"))?;
+        let (min, max) = (axis.min_value(), axis.max_value());
+        if !(0.0..=1000.0).contains(&min) || !(0.0..=1000.0).contains(&max) || min > max {
+            return None;
+        }
+        let low = min.ceil() as u16;
+        let high = max.floor() as u16;
+        (low <= high).then_some((low, high))
+    })?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,11 +725,12 @@ mod tests {
                 size: 13.0,
                 line_height: 17.0,
                 weight,
+                variable_weight: false,
                 mono: false,
                 tracking: 0.0,
             };
             let spans = [("Pasted into the editor. Delivered.", Rgba::rgb(0, 0, 0))];
-            let buffer = text.shape(&spans, style, Layout::Line, 1.0);
+            let buffer = text.shape(&spans, style, Layout::Line, 1.0, false);
             let fonts: std::collections::BTreeSet<_> = buffer
                 .layout_runs()
                 .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.font_id))
@@ -712,7 +831,7 @@ mod tests {
             (
                 "outline",
                 1.0,
-                Box::new(|c| c.outline((1.0, 1.0, 10.0, 10.0), 0.0, WHITE)),
+                Box::new(|c| c.outline((1.0, 1.0, 10.0, 10.0), 0.0, WHITE, 1.0)),
                 &[(1, 6), (10, 6), (6, 1), (6, 10)],
                 &[(6, 6), (0, 6), (11, 6), (6, 11)],
             ),
@@ -934,6 +1053,7 @@ mod tests {
             size: 13.0,
             line_height: 17.0,
             weight: 400,
+            variable_weight: false,
             mono: false,
             tracking: 0.0,
         };
@@ -1010,6 +1130,7 @@ mod tests {
             size: 13.0,
             line_height: 17.0,
             weight: 400,
+            variable_weight: false,
             mono: false,
             tracking: 0.0,
         };
@@ -1056,8 +1177,8 @@ mod tests {
             .faces()
             .any(|face| face.families.iter().any(|(family, _)| *family == name));
         let heavier = installed
-            && text.nearest_weight(Family::SansSerif, 700)
-                > text.nearest_weight(Family::SansSerif, 400);
+            && text.nearest_weight(Family::SansSerif, 700, false)
+                > text.nearest_weight(Family::SansSerif, 400, false);
         assert!(
             !heavier || bold * 10 > regular * 11,
             "bold is heavier where the family has a heavier face: {regular} {bold}"
@@ -1072,6 +1193,59 @@ mod tests {
     }
 
     #[test]
+    fn a_variable_font_draws_different_ink_at_weight_400_and_900() {
+        let mut text = Text::new();
+        let name = "Thalvi Test Weight";
+        // The synthetic face registers at 400 and gets a wider stroke at its axis limit of 700.
+        text.fonts
+            .db_mut()
+            .load_font_data(include_bytes!("fixtures/variable-weight.ttf").to_vec());
+        let face = text
+            .fonts
+            .db()
+            .faces()
+            .find(|face| face.families.iter().any(|(family, _)| family == name))
+            .unwrap();
+        assert_eq!(face.weight.0, 400);
+        let id = face.id;
+        text.set_families(name, name);
+        let [regular, built_in, heavy] =
+            [(400, false), (700, false), (900, true)].map(|(weight, variable_weight)| {
+                let style = Style {
+                    size: 14.0,
+                    line_height: 18.0,
+                    weight,
+                    variable_weight,
+                    mono: true,
+                    tracking: 0.0,
+                };
+                let spans = [("H", WHITE)];
+                let glyphs: Vec<_> = text
+                    .shape(&spans, style, Layout::Line, 1.0, false)
+                    .layout_runs()
+                    .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.font_id))
+                    .collect();
+                assert_eq!(glyphs, [id], "weight {weight} stays in the chosen font");
+                let mut canvas = Canvas::new(24.0, 24.0, 1.0).unwrap();
+                text.draw(&mut canvas, &spans, style, Layout::Line, (2.0, 2.0));
+                canvas
+                    .pixmap
+                    .pixels()
+                    .iter()
+                    .map(|pixel| u32::from(pixel.alpha()))
+                    .sum::<u32>()
+            });
+        assert_eq!(
+            regular, built_in,
+            "the built-in weight keeps its original raster"
+        );
+        assert!(
+            regular > 0 && heavy > regular,
+            "ink at 400: {regular}, at 900: {heavy}"
+        );
+    }
+
+    #[test]
     fn a_weight_is_the_nearest_one_the_family_has() {
         let text = Text::new();
         let fonts = text.fonts.db();
@@ -1082,7 +1256,7 @@ mod tests {
             .map(|face| face.weight.0)
             .collect();
         for wanted in [1, 400, 650, 1000] {
-            let got = text.nearest_weight(Family::SansSerif, wanted);
+            let got = text.nearest_weight(Family::SansSerif, wanted, false);
             // A family that is not installed keeps the weight asked for.
             let Some(best) = has.iter().map(|weight| weight.abs_diff(wanted)).min() else {
                 assert_eq!(got, wanted, "{name} is not installed");
