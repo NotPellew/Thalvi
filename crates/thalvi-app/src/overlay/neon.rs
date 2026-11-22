@@ -596,7 +596,7 @@ fn card(
     let shown = count.min(art::DRAFT_LINES);
     let text_height = shown * style.line_height;
     let counting = words.ending.is_some();
-    let (bar_gap, bar_height, bar_radius, bar_waiting) = art::COUNTDOWN;
+    let (bar_gap, bar_height, ..) = art::COUNTDOWN;
     let height = 2.0 * art::BASE_EDGE
         + 2.0 * inset_y
         + text_height
@@ -640,25 +640,37 @@ fn card(
     }
     canvas.clip(None);
     if let Some((_, share, running)) = words.ending {
-        let y = text_top + text_height + bar_gap;
-        canvas.rect(
-            (text_left, y, inner, bar_height),
-            bar_radius,
-            &Fill::Solid(theme.line),
-        );
-        let bar = theme
-            .state
-            .pending
-            .faded(if running { 1.0 } else { bar_waiting });
-        canvas.rect(
-            (text_left, y, inner * share, bar_height),
-            bar_radius,
-            &Fill::Solid(bar),
+        card_countdown(
+            canvas,
+            theme,
+            (text_left, text_top + text_height + bar_gap, inner),
+            share,
+            running,
         );
     }
     count <= art::DRAFT_LINES
         && text_top + text_height <= HEIGHT
         && lines.iter().all(|width| *width <= inner)
+}
+
+fn card_countdown(
+    canvas: &mut Canvas,
+    theme: &Theme,
+    (left, top, width): (f32, f32, f32),
+    share: f32,
+    running: bool,
+) {
+    let (_, height, radius, waiting) = art::COUNTDOWN;
+    canvas.rect((left, top, width, height), radius, &Fill::Solid(theme.line));
+    let bar = theme
+        .state
+        .pending
+        .faded(if running { 1.0 } else { waiting });
+    canvas.rect(
+        (left, top, width * share, height),
+        radius,
+        &Fill::Solid(bar),
+    );
 }
 
 fn ending_badge(
