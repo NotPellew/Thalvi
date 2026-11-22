@@ -5,15 +5,23 @@ use std::time::Duration;
 
 use thalvi_desktop::capture::CaptureRoute;
 use thalvi_desktop::device::Step;
+use thalvi_desktop::theme::overlay::{WAVE_H, module};
 
 use crate::status::{FailureKind, Status, load_notice};
 
 /// The overlay surface, in points; every look draws inside it.
 pub const WIDTH: f32 = 460.0;
 pub const HEIGHT: f32 = 200.0;
-/// The module looks' wave, in points.
-pub(super) const WAVE_W: f32 = 332.0;
-pub(super) const WAVE_H: f32 = 44.0;
+
+pub(super) const MODULE_W: f32 = 370.0;
+pub(super) const MODULE_H: f32 = 84.0;
+pub(super) const MODULE_X: f32 = (WIDTH - MODULE_W) / 2.0;
+pub(super) const SLOT_W: f32 = MODULE_W - 2.0 * module::SLOT_X;
+pub(super) const SLOT_H: f32 = MODULE_H - module::SLOT_TOP - module::SLOT_BOTTOM;
+pub(super) const SLOT: (f32, f32) = (MODULE_X + module::SLOT_X, module::SLOT_TOP);
+/// The cancel button, in points from the overlay's top-left corner.
+pub(super) const CANCEL: (f32, f32, f32, f32) = (SLOT.0 + SLOT_W - 24.0, SLOT.1 + 6.0, 18.0, 18.0);
+
 /// Longest target the countdown label spells out.
 const MAX_TARGET: usize = 10;
 

@@ -380,7 +380,7 @@ impl AppState {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
         self.overlay.show_draft(config.overlay.draft);
-        self.overlay.set_look(config.look);
+        self.overlay.set_style(overlay_style(config));
         self.overlay.set_recordings(config.recordings);
         self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
@@ -804,6 +804,13 @@ fn serve_requests(app: &AppHandle) {
     }
 }
 
+fn overlay_style(config: &DesktopConfig) -> Arc<thalvi_desktop::theme::Style> {
+    Arc::new(thalvi_desktop::theme::Style::resolve(
+        config.look,
+        config.themes.of(config.look),
+    ))
+}
+
 /// Starts the overlay's thread on this desktop's overlay surface; its cancel button reaches the
 /// engine. Where the desktop gives no surface, the overlay stays off.
 fn start_overlay(app: &AppHandle, state: &AppState) {
@@ -832,7 +839,7 @@ fn start_overlay(app: &AppHandle, state: &AppState) {
     }));
     let config = state.config();
     state.overlay.show_draft(config.overlay.draft);
-    state.overlay.set_look(config.look);
+    state.overlay.set_style(overlay_style(&config));
     // Kept for the thread's life: a later apply reaches it through set_recordings.
     let recorder = Recorder::per_user(config.recordings).unwrap_or_else(|_| Recorder::disabled());
     let handle = app.clone();
