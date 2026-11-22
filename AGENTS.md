@@ -133,7 +133,8 @@ Prerequisites the script does not install:
 - Issue sync: `pipx`.
 - Release (the updater signing and feed scripts): Node pinned in `.node-version`,
   `minisign`, and `pipx`.
-- Formal source hashes: Python pinned in `.python-version` (standard library only).
+- The formal source hash checks and the `server` lint-exception checks use the
+  standard library on the Python version pinned in `.python-version`.
 
 Two required checks are not in the script:
 

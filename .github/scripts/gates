@@ -61,6 +61,8 @@ gate_server() {
   step cargo fmt --all -- --check
   step python3 .github/scripts/rust-layout
   step .github/scripts/rust-layout.test.sh
+  step .github/scripts/lint-exceptions
+  step python3 .github/scripts/lint-exceptions.test.py
   step cargo lint
   tests --workspace
   RUSTDOCFLAGS="-D warnings" step cargo docs

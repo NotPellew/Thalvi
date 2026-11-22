@@ -6,6 +6,8 @@ use serde_json::{Map, Value};
 
 use crate::config::Look;
 
+pub mod overlay;
+
 /// The theme schema this build reads and writes.
 pub const VERSION: u32 = 1;
 
@@ -916,11 +918,27 @@ pub struct Scheme {
 /// A look resolved for the schemes it has.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Style {
+    look: Look,
     pub dark: Scheme,
     pub light: Option<Scheme>,
 }
 
 impl Style {
+    #[must_use]
+    pub const fn look(&self) -> Look {
+        self.look
+    }
+
+    /// The active palette, falling back to the look's only scheme.
+    #[must_use]
+    pub fn scheme(&self, dark: bool) -> &Scheme {
+        if dark {
+            &self.dark
+        } else {
+            self.light.as_ref().unwrap_or(&self.dark)
+        }
+    }
+
     /// Built-in defaults with `overrides` on top. Suspended or unreadable changes draw the defaults.
     #[must_use]
     pub fn resolve(look: Look, overrides: Option<&LookOverrides>) -> Self {
@@ -930,6 +948,7 @@ impl Style {
         };
         let defaults = defaults_of(look);
         Self {
+            look,
             dark: apply(&defaults.dark, usable.map(|item| &item.colors.dark), usable),
             light: defaults.light.as_ref().map(|light| {
                 apply(
@@ -1021,14 +1040,17 @@ fn apply(base: &Scheme, colors: Option<&SchemeColors>, rest: Option<&Overrides>)
 pub fn defaults_of(look: Look) -> Style {
     match look {
         Look::Neon => Style {
+            look,
             dark: neon_dark(),
             light: Some(neon_light()),
         },
         Look::Holo => Style {
+            look,
             dark: holo(),
             light: None,
         },
         Look::Gunmetal => Style {
+            look,
             dark: gunmetal(),
             light: None,
         },
