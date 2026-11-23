@@ -613,8 +613,7 @@ impl<L: Launcher> WhisperRecognizer<L> {
                 store,
                 metrics,
                 name: backend.name().to_owned(),
-                prompt: (!phrases.is_empty())
-                    .then(|| Arc::from(phrases.phrases().join(", "))),
+                prompt: (!phrases.is_empty()).then(|| Arc::from(phrases.hint())),
                 steps: watch::channel(Step::Reading).0,
                 files: OnceCell::new(),
                 slot: Mutex::new(Slot::Idle),
@@ -2379,17 +2378,10 @@ mod tests {
     async fn the_word_list_is_the_finals_and_a_previews_prompt_and_an_empty_list_sends_none() {
         for (case, words, prompt) in [
             ("an empty list", Vec::new(), None),
-            (
-                "a list",
-                vec!["Cybrex2", "Thalvi"],
-                Some("Cybrex2, Thalvi"),
-            ),
+            ("a list", vec!["Cybrex2", "Thalvi"], Some("Cybrex2, Thalvi")),
         ] {
             let scratch = Scratch::with_files("prompt");
-            let fake = Fake::new([vulkan(vec![
-                Reply::Text("a"),
-                Reply::Text("the final"),
-            ])]);
+            let fake = Fake::new([vulkan(vec![Reply::Text("a"), Reply::Text("the final")])]);
             let recognizer = recognizer_with(
                 &fake,
                 WhisperBackend::Vulkan,
@@ -3288,18 +3280,13 @@ mod tests {
                 dictate(&plain, &files.frames("qwen.wav")).await,
             );
             drop(plain);
-            eprintln!(
-                "Qwen 3.8: with the list: {spoken} | without the list: {without}"
-            );
+            eprintln!("Qwen 3.8: with the list: {spoken} | without the list: {without}");
 
             for (case, fixture) in [
                 ("five seconds of digital silence", "silence-5s.wav"),
                 ("five seconds of room noise", "room-noise-5s.wav"),
             ] {
-                let noise = heard(
-                    case,
-                    dictate(&with_list, &files.frames(fixture)).await,
-                );
+                let noise = heard(case, dictate(&with_list, &files.frames(fixture)).await);
                 eprintln!("{case}: {noise:?}");
                 for word in words.phrases() {
                     assert!(
