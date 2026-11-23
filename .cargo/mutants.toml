@@ -14,4 +14,6 @@ exclude_re = [
     "^crates/thalvi-app/src/runner.rs:\\d+:\\d+: replace EngineLink::quit with \\(\\)$",
     # Nothing reads a restart request's debug text.
     "^crates/thalvi-app/src/runner.rs:\\d+:\\d+: replace <impl std::fmt::Debug for Restart>::fmt ",
+    # Each caller has input frames, which pause clears, and step returns before any caller when stopping.
+    "^crates/thalvi-app/src/runner.rs:\\d+:\\d+: replace \\|\\| with && in Runner<S>::end_unopened_feed$",
 ]

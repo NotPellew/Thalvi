@@ -1181,12 +1181,16 @@ impl<S: Rig> Runner<S> {
         if self.feed_only() && !*self.feeding.borrow() {
             self.end_unopened_feed();
         }
-        let listening = !self.paused
-            && self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.frames.is_some());
-        if !listening {
+        let feed_only = self.feed_only();
+        let (
+            false,
+            Some(Session {
+                engine,
+                frames: Some(frames),
+                ..
+            }),
+        ) = (self.paused, self.session.as_mut())
+        else {
             let retry = (!self.paused && self.session.is_some())
                 .then_some(self.reopen_failures)
                 .flatten()
@@ -1205,36 +1209,21 @@ impl<S: Rig> Runner<S> {
                     Flow::Continue
                 }
             };
-        }
-        let feed_only = self.feed_only();
+        };
         let woke = {
-            let Self {
-                session,
-                control,
-                feeding,
-                ..
-            } = &mut *self;
-            let mut file_ended = feeding.subscribe();
-            let Some(Session {
-                engine,
-                frames: Some(frames),
-                ..
-            }) = session.as_mut()
-            else {
-                return Flow::Continue;
-            };
+            let mut file_ended = self.feeding.subscribe();
             if feed_only {
                 // A ready wake is taken before the file ending; controls keep their turn over that ending.
                 tokio::select! {
                     biased;
                     trigger = engine.listen(frames) => Woke::Trigger(trigger),
-                    control = control.recv() => Woke::Control(control),
+                    control = self.control.recv() => Woke::Control(control),
                     _ = file_ended.changed() => Woke::FileEnded,
                 }
             } else {
                 tokio::select! {
                     trigger = engine.listen(frames) => Woke::Trigger(trigger),
-                    control = control.recv() => Woke::Control(control),
+                    control = self.control.recv() => Woke::Control(control),
                 }
             }
         };
@@ -3709,6 +3698,7 @@ mod tests {
                 .handle(Control::HoldKeyFailed("Hyprland refused F9.".to_owned()))
                 .await;
             if show {
+                runner.open_microphone().await;
                 runner.show_hold_problem();
                 assert!(
                     matches!(&publisher.view.borrow().mode, Mode::Failed(f) if f.headline == "Hold key unavailable")
@@ -4015,6 +4005,8 @@ mod tests {
     struct MicLab {
         opens: Rc<Cell<u32>>,
         missing: Rc<Cell<bool>>,
+        /// The open stream, so a test can fail the microphone under the runner.
+        feed: Rc<RefCell<Option<thalvi_desktop::engine::fakes::FrameFeed>>>,
         wake: RefCell<Option<thalvi_desktop::engine::fakes::FakeWake>>,
         recognizer: RefCell<Option<thalvi_desktop::recognizer::FakeRecognizer>>,
         cues: RefCell<Option<thalvi_desktop::engine::fakes::FakeCuePlayer>>,
@@ -4025,8 +4017,8 @@ mod tests {
         opens: Rc<Cell<u32>>,
         missing: Rc<Cell<bool>>,
         opened: bool,
-        /// Holds the fake stream open; the test never sends room audio through it.
-        held: Option<thalvi_desktop::engine::fakes::FrameFeed>,
+        /// Holds the fake stream open; no room audio goes through it.
+        feed: Rc<RefCell<Option<thalvi_desktop::engine::fakes::FrameFeed>>>,
     }
 
     impl Rig for MicLab {
@@ -4066,7 +4058,7 @@ mod tests {
                 opens: Rc::clone(&self.opens),
                 missing: Rc::clone(&self.missing),
                 opened: false,
-                held: None,
+                feed: Rc::clone(&self.feed),
             }
         }
     }
@@ -4082,7 +4074,7 @@ mod tests {
 
         fn pause(&mut self) {
             self.opened = false;
-            self.held = None;
+            *self.feed.borrow_mut() = None;
         }
 
         fn open(
@@ -4103,7 +4095,7 @@ mod tests {
             self.opens.set(self.opens.get() + 1);
             if self.missing.get() {
                 self.opened = false;
-                self.held = None;
+                *self.feed.borrow_mut() = None;
                 return (
                     self,
                     Err(Failure::of(&thalvi_desktop::audio::AudioError::NoDevice)),
@@ -4111,7 +4103,7 @@ mod tests {
             }
             let (frames, feed) = thalvi_desktop::engine::fakes::FakeFrames::new(&self.gate);
             self.opened = true;
-            self.held = Some(feed);
+            *self.feed.borrow_mut() = Some(feed);
             (self, Ok(frames))
         }
     }
@@ -4142,6 +4134,7 @@ mod tests {
         wake: thalvi_desktop::engine::fakes::WakeControl,
         server: thalvi_desktop::recognizer::FakeControl,
         opens: Rc<Cell<u32>>,
+        feed: Rc<RefCell<Option<thalvi_desktop::engine::fakes::FrameFeed>>>,
         texts: Arc<Mutex<Vec<String>>>,
         status: watch::Receiver<Status>,
         audio: watch::Receiver<AudioStatus>,
@@ -4167,9 +4160,11 @@ mod tests {
                 cue_control.set_length(cue, Duration::ZERO);
             }
             let opens = Rc::new(Cell::new(0));
+            let feed = Rc::new(RefCell::new(None));
             let lab = MicLab {
                 opens: Rc::clone(&opens),
                 missing: Rc::new(Cell::new(missing)),
+                feed: Rc::clone(&feed),
                 wake: RefCell::new(Some(wake_detector)),
                 recognizer: RefCell::new(Some(recognizer)),
                 cues: RefCell::new(Some(cues)),
@@ -4195,11 +4190,21 @@ mod tests {
                 wake,
                 server,
                 opens,
+                feed,
                 texts,
                 status,
                 audio,
                 feeding,
             }
+        }
+
+        /// Fails the open microphone's stream, as a device unplugged while listening.
+        fn fail_microphone(&self, error: thalvi_desktop::audio::AudioError) {
+            self.feed
+                .borrow()
+                .as_ref()
+                .expect("the microphone was not open")
+                .fail(error);
         }
 
         fn missing_mic(&self) -> bool {
@@ -4564,5 +4569,49 @@ mod tests {
                 })
                 .await;
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_microphone_that_stops_while_listening_is_closed_and_reported_not_taken_for_a_clip() {
+        LocalSet::new()
+            .run_until(async {
+                let script = FedRun::start(false);
+                yield_until("listening never started", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                assert_eq!(
+                    script.audio.borrow().active.as_deref(),
+                    Some("Test microphone")
+                );
+                script.fail_microphone(thalvi_desktop::audio::AudioError::DeviceLost);
+                pump_until("the microphone failure was not reported", || {
+                    matches!(
+                        &*script.status.borrow(),
+                        Status::Failed { notice, .. }
+                            if notice == "The microphone was disconnected. Capture stopped without delivery."
+                    )
+                })
+                .await;
+                assert!(
+                    script.audio.borrow().active.is_none(),
+                    "a microphone that stopped was left open"
+                );
+                pump_until("the microphone was not reopened", || {
+                    script.opens.get() == 2
+                })
+                .await;
+                pump_until("the reopened microphone did not listen again", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                assert_eq!(
+                    script.audio.borrow().active.as_deref(),
+                    Some("Test microphone"),
+                    "the reopened microphone is the active one"
+                );
+                script.stop().await;
+            })
+            .await;
     }
 }
