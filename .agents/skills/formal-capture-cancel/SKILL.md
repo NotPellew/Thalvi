@@ -118,6 +118,17 @@ still dropped before input is restored, inside the same ending-cue task; no
 model action, delivery guard or bound changes. The replay's immediate player
 returns no timing because it produces no audio.
 
+The merge switch (#589) makes the merge optional: with `stt.merge` off,
+`Engine::conclude` takes the model's no-merge branch — it tells the streaming
+extras the capture ended, asks the upload extras without awaiting them, hands
+their tasks to `recorded_only` (`Engine::record_only`) and returns the accepted
+live text. `Engine::deliver_with_extras` only chooses between that and the
+existing `Engine::merge`. Extras on with the merge off was already reachable in
+the model (a scratched capture, or one with no words of its own), and no await,
+queue step or cancellation write is added before the final empty receive, so
+the model actions and bounds are unchanged. `engine/streaming.rs` changes only
+in its comments.
+
 Hold-key recovery (#566) adds `Control::HoldKeyWorks`, which `Requests::take` answers false, like
 `Overlay`: it never sets `ended` and neither admits nor blocks delivery. The runner now hands its
 pending hold notice into `Requests` before a capture's drains and takes it back after, so a

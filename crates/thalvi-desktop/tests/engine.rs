@@ -2290,8 +2290,8 @@ async fn serve_logged<T: Send + 'static>(
 }
 
 /// A config with a direct speech entry live, a chat endpoint at `chat_url` and these extras, in
-/// order: `(name, url, switched on)`.
-fn with_extras(chat_url: &str, extras: &[(&str, &str, bool)]) -> String {
+/// order: `(name, url, switched on)`. `merge` is written only when the test sets it.
+fn extras_config(chat_url: &str, merge: Option<bool>, extras: &[(&str, &str, bool)]) -> String {
     let extras: Vec<String> = extras
         .iter()
         .map(|(name, url, on)| {
@@ -2300,10 +2300,16 @@ fn with_extras(chat_url: &str, extras: &[(&str, &str, bool)]) -> String {
             )
         })
         .collect();
+    let merge = merge.map_or_else(String::new, |merge| format!(r#""merge": {merge}, "#));
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "writing": {{"url": "{chat_url}", "model": "chat"}}, "stt": {{"entries": [{{"kind": "realtime", "id": "s", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}{}]}}}}"#,
+        r#"{{"ending_pause": {{"paste": 2.5}}, "writing": {{"url": "{chat_url}", "model": "chat"}}, "stt": {{{merge}"entries": [{{"kind": "realtime", "id": "s", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}{}]}}}}"#,
         extras.concat()
     )
+}
+
+/// [`extras_config`] with no `stt.merge`, as a config from before the switch loads.
+fn with_extras(chat_url: &str, extras: &[(&str, &str, bool)]) -> String {
+    extras_config(chat_url, None, extras)
 }
 
 /// A capture that says "live words paste that" at 1000 and is delivered at 3500.
@@ -2361,6 +2367,51 @@ fn capture_and_listen(
 
 /// The extras go out as the capture ends, while the accepted cue plays.
 const MERGE_STARTS: u64 = 3500;
+
+/// Every state the engine enters from now on, in order; the task ends with the engine.
+fn watch_states(rig: &Rig) -> Rc<RefCell<Vec<EngineState>>> {
+    let mut states = rig.handle.state();
+    let seen: Rc<RefCell<Vec<EngineState>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    tokio::task::spawn_local(async move {
+        loop {
+            sink.borrow_mut().push(states.borrow_and_update().clone());
+            if states.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+    seen
+}
+
+/// Captures as [`capture_task`] does, once per wake word, then listens for 20 s so extras the
+/// delivery did not wait for can finish and be recorded.
+fn captures_and_listen(
+    rig: &Rig,
+    mut engine: TestEngine,
+    mut frames: FakeFrames,
+    count: usize,
+) -> (
+    JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<(CaptureOutcome, u64)>,
+) {
+    let origin = tokio::time::Instant::now() - ms(rig.now());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let worker = tokio::task::spawn_local(async move {
+        for _ in 0..count {
+            assert_eq!(
+                engine.listen(&mut frames).await.unwrap(),
+                WakeTrigger::Capture
+            );
+            let outcome = engine.capture(&mut frames, None).await;
+            let at = u64::try_from(origin.elapsed().as_millis()).unwrap();
+            tx.send((outcome, at)).unwrap();
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(20), engine.listen(&mut frames)).await;
+        engine.finish().await;
+    });
+    (worker, rx)
+}
 
 const ALL: RecordKinds = RecordKinds {
     metrics: true,
@@ -2720,6 +2771,145 @@ async fn an_extra_that_misses_the_merge_is_left_out_and_still_recorded() {
                  accepted (paste): A words\n\
                  extra (B): B words paste that\n"
             );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn merge_off_pastes_the_live_text_at_once_and_only_records_what_each_extra_heard() {
+    LocalSet::new()
+        .run_until(async {
+            for (name, reply, outcome, recorded) in [
+                (
+                    "Late",
+                    Reply::After(3000, A),
+                    "ok",
+                    Some("extra (Late): A words paste that\n"),
+                ),
+                ("Failing", Reply::Status(500), "error", None),
+                ("Silent", Reply::Stall, "timeout", None),
+            ] {
+                let dir = record_dir(&format!("merge-off-{outcome}"));
+                let (extra, _uploads) = serve(reply).await;
+                let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("unused"))).await;
+                let config = extras_config(&chat_url, Some(false), &[(name, &extra, true)]);
+                let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+                let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+                let states = watch_states(&rig);
+                let task = capture_and_listen(&rig, engine, frames, 0);
+                live_words(&mut rig).await;
+                let pasted = finished(task).await;
+
+                assert_eq!(pasted.outcome, accepted(CaptureRoute::Paste, "live words"));
+                assert_eq!(
+                    pasted.at, MERGE_STARTS,
+                    "{name}: pasted as the ending pause ended"
+                );
+                assert_eq!(pasted.notices, Vec::<String>::new(), "{name}");
+                assert_eq!(pasted.note, None, "{name}");
+                assert!(asked.try_recv().is_err(), "{name}: no chat request");
+                assert!(
+                    !states
+                        .borrow()
+                        .iter()
+                        .any(|state| matches!(state, EngineState::Merging { .. })),
+                    "{name}: never merged"
+                );
+                extras_were(&extra_metrics(&dir), &[(name, outcome, false)]);
+                let lines = read_lines(&dir.join("metrics.jsonl"));
+                assert!(
+                    lines.iter().all(|line| line["event"] != "desktop_merge"),
+                    "{name}: no merge metric"
+                );
+                if outcome == "timeout" {
+                    let took = lines
+                        .iter()
+                        .find(|line| line["event"] == "desktop_extra_stt")
+                        .unwrap()["duration_ms"]
+                        .as_f64()
+                        .unwrap();
+                    assert_eq!(took.round(), 10_000.0, "{name}: its own timeout");
+                }
+                let folder = dictation_dirs(&dir).pop().unwrap();
+                let text = std::fs::read_to_string(folder.join("text.txt")).unwrap();
+                match recorded {
+                    Some(line) => assert!(
+                        text.ends_with(&format!("accepted (paste): live words\n{line}")),
+                        "{name}: {text}"
+                    ),
+                    None => assert!(!text.contains("extra ("), "{name}: {text}"),
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_does_not_wait_for_the_previous_captures_extra() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("merge-off-next");
+            // The first capture's extra answers at 9500, after the second capture is delivered.
+            let (extra, mut uploads) = serve(Reply::After(6000, A)).await;
+            let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("unused"))).await;
+            let config = extras_config(&chat_url, Some(false), &[("A", &extra, true)]);
+            let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+            let states = watch_states(&rig);
+            let (worker, mut captures) = captures_and_listen(&rig, engine, frames, 2);
+            live_words(&mut rig).await;
+            let first = captures.recv().await.unwrap();
+            assert_eq!(first.0, accepted(CaptureRoute::Paste, "live words"));
+            assert_eq!(first.1, MERGE_STARTS);
+
+            // The accepted cue ends and the microphone gate opens, then the worker listens again
+            // before the next wake, which its reset would otherwise clear.
+            rig.at(MERGE_STARTS + 200).await;
+            settle().await;
+            let next = rig.now();
+            rig.server.connect_again();
+            rig.wake_word().await;
+            rig.server.ready();
+            rig.at(next + 230).await;
+            rig.feed_until(next + 1000, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(next + 3499, Kind::Quiet).await;
+            rig.at(next + 3500).await;
+            let second = tokio::time::timeout(Duration::from_secs(5), captures.recv())
+                .await
+                .expect("the next capture should finish without the first extra")
+                .unwrap();
+            assert_eq!(second.0, accepted(CaptureRoute::Paste, "live words"));
+            assert_eq!(second.1, next + 3500, "delivered before A's first answer");
+            finished(worker).await;
+
+            assert!(
+                uploads.recv().await.is_some(),
+                "the first capture's extra was asked"
+            );
+            assert!(
+                uploads.recv().await.is_some(),
+                "the second capture's extra was asked"
+            );
+            assert!(asked.try_recv().is_err(), "no chat request");
+            assert!(
+                !states
+                    .borrow()
+                    .iter()
+                    .any(|state| matches!(state, EngineState::Merging { .. })),
+                "never merged"
+            );
+            extras_were(
+                &extra_metrics(&dir),
+                &[("A", "ok", false), ("A", "ok", false)],
+            );
+            for folder in dictation_dirs(&dir) {
+                let text = std::fs::read_to_string(folder.join("text.txt")).unwrap();
+                assert!(
+                    text.ends_with("accepted (paste): live words\nextra (A): A words paste that\n"),
+                    "{text}"
+                );
+            }
         })
         .await;
 }
