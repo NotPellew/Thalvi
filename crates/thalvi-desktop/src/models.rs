@@ -1172,4 +1172,122 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// An HTTP response carrying `body` as the whole file.
+    fn response(body: &[u8]) -> Vec<u8> {
+        let mut message = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        message.extend_from_slice(body);
+        message
+    }
+
+    #[tokio::test]
+    async fn two_fetches_of_one_file_share_one_download_and_both_get_the_stored_path() {
+        use std::net::Ipv4Addr;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::sync::Notify;
+
+        const BODY: &[u8] = b"one pinned wake model";
+
+        let dir = std::env::temp_dir().join(format!("thalvi-shared-fetch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let sha256 = hex(&Sha256::digest(BODY));
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind a test server");
+        let url = format!("http://{}/wake.onnx", listener.local_addr().expect("its address"));
+        let connections = Arc::new(AtomicUsize::new(0));
+        let requested = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let server = tokio::spawn({
+            let connections = Arc::clone(&connections);
+            let requested = Arc::clone(&requested);
+            let release = Arc::clone(&release);
+            async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let first = connections.fetch_add(1, Ordering::SeqCst) == 0;
+                    let requested = Arc::clone(&requested);
+                    let release = Arc::clone(&release);
+                    tokio::spawn(async move {
+                        let mut head = [0; 1024];
+                        let _ = socket.read(&mut head).await;
+                        if first {
+                            requested.notify_one();
+                            release.notified().await;
+                        }
+                        let _ = socket.write_all(&response(BODY)).await;
+                    });
+                }
+            }
+        });
+        let fetch = |store: ModelStore| {
+            let url = url.clone();
+            let sha256 = sha256.clone();
+            async move {
+                let asset = Asset {
+                    kind: ModelKind::Wake,
+                    file_name: "wake.onnx",
+                    url: &url,
+                    size: u64::try_from(BODY.len()).expect("body size fits"),
+                    sha256: &sha256,
+                };
+                store.fetch(&asset).await
+            }
+        };
+        let first = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
+        let second = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
+        tokio::time::timeout(Duration::from_secs(10), requested.notified())
+            .await
+            .expect("the first fetch asked the server for the file");
+        // The lock is what keeps a second request from arriving; wait long enough to see one if it would.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), requested.notified())
+                .await
+                .is_err(),
+            "the second fetch asked the server for the file too"
+        );
+        release.notify_one();
+        let path = dir.join("wake.onnx");
+        for fetch in [first, second] {
+            let got = tokio::time::timeout(Duration::from_secs(10), fetch)
+                .await
+                .expect("a fetch returned")
+                .expect("the fetch ran");
+            assert_eq!(got.expect("the fetch found the file"), path);
+        }
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&path).expect("the stored file"), BODY);
+
+        // The file gone, the next fetch downloads it again rather than waiting on anything left over.
+        std::fs::remove_file(&path).expect("remove the stored file");
+        let asset = Asset {
+            kind: ModelKind::Wake,
+            file_name: "wake.onnx",
+            url: &url,
+            size: u64::try_from(BODY.len()).expect("body size fits"),
+            sha256: &sha256,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            ModelStore::in_dir(&dir).fetch(&asset),
+        )
+        .await
+        .expect("the next fetch returned")
+        .expect("the next fetch downloaded the file");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        assert_eq!(std::fs::read(&path).expect("the stored file"), BODY);
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
