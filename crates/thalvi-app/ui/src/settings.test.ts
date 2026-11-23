@@ -758,11 +758,41 @@ describe("the wake word picker", () => {
     stub.backend.downloadWakeModel.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
     choose(dictation, "hey_mycroft");
     await settle();
-    within(rowOf("Wake model (dictation)"), "Download").click();
+    expect(stub.backend.downloadWakeModel).toHaveBeenCalledTimes(1);
+    expect(stub.backend.downloadWakeModel).toHaveBeenCalledWith("hey_mycroft");
     expect(badge("Wake model (dictation)")).toBe("Downloading…");
+    expect(Array.from(dictation.options).map((option) => option.textContent)).toEqual([
+      "Hey Thalvi — Ready",
+      "Hey Mycroft — Downloading…",
+      "Hey Jarvis — Not downloaded",
+      "Custom model…",
+    ]);
+    expect(within(rowOf("Wake model (dictation)"), "Download").hidden).toBe(true);
     finish();
     await settle();
+    expect(badge("Wake model (dictation)")).toBe("Ready");
+  });
+
+  it("shows a failed download of a picked dictation head and offers Download again", async () => {
+    const stub = await openCapture();
+    stub.backend.downloadWakeModel.mockRejectedValueOnce("The download broke off.");
+    choose(control("Wake model (dictation)", "select"), "hey_mycroft");
+    await settle();
     expect(stub.backend.downloadWakeModel).toHaveBeenCalledWith("hey_mycroft");
+    expect(problem("Wake model (dictation)")).toBe("The download broke off.");
+    expect(badge("Wake model (dictation)")).toBe("Not downloaded");
+    expect(within(rowOf("Wake model (dictation)"), "Download").hidden).toBe(false);
+    within(rowOf("Wake model (dictation)"), "Download").click();
+    await settle();
+    expect(badge("Wake model (dictation)")).toBe("Ready");
+    expect(problem("Wake model (dictation)")).toBe("");
+  });
+
+  it("does not download a dictation head the user picks that is already cached", async () => {
+    const stub = await openCapture({ ...SETTINGS, wake: { ...SETTINGS.wake, capture: { model: "hey_mycroft", threshold: 0.5 } } });
+    choose(control("Wake model (dictation)", "select"), "hey_thalvi");
+    await settle();
+    expect(stub.backend.downloadWakeModel).not.toHaveBeenCalled();
     expect(badge("Wake model (dictation)")).toBe("Ready");
   });
 
