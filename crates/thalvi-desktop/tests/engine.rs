@@ -8407,7 +8407,10 @@ async fn final_pass_hold_deadline_includes_the_live_recognizers_release_tail() {
             rig.release(1000).await;
             rig.at(1200).await;
             rig.finals(" ").await;
-            uploads.recv().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), uploads.recv())
+                .await
+                .expect("releasing the hold starts the final pass")
+                .expect("the upload log stays open");
             rig.at(2999).await;
             assert!(captures.try_recv().is_err());
             rig.at(3000).await;
