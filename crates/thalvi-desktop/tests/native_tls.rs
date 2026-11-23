@@ -126,7 +126,7 @@ async fn check(fixture: &Fixture) {
             assert!(error.to_string().contains("Nothing was delivered"));
             session.close().await;
         } else {
-            assert_eq!(response.unwrap(), "Trusted transcription.");
+            assert_eq!(response.unwrap().text, "Trusted transcription.");
         }
         let websocket = tokio::time::timeout(
             Duration::from_secs(10),

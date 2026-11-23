@@ -478,6 +478,12 @@ struct NumberRules {
     language: Option<Language>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubmitConfirmation {
+    Live,
+    Settled,
+}
+
 /// Wake listening and capture, owning everything they share.
 pub struct Engine<R, W, C> {
     recognizer: R,
@@ -512,7 +518,7 @@ pub struct Engine<R, W, C> {
     language: Option<Language>,
     /// Whether a Submit is settled after the merge or final pass, so its own confirmation comes
     /// once that text exists.
-    submit_settled: bool,
+    submit_confirmation: SubmitConfirmation,
     chat: Option<crate::chat::Chat>,
     speech: SpeechSource,
     http: reqwest::Client,
@@ -1168,7 +1174,7 @@ where
                 language: config.stt.entries.active_live().language(),
             },
             language: config.stt.entries.active_live().language(),
-            submit_settled: false,
+            submit_confirmation: SubmitConfirmation::Live,
             chat: parts.chat,
             speech: config.speech_source(),
             http: parts.http,
@@ -1684,7 +1690,10 @@ where
 
     fn publish(&self, live: &Live<R::Session>) {
         self.set_state(match live.text.pending() {
-            Some(pending) if self.submit_settled && pending.route == CaptureRoute::Submit => {
+            Some(pending)
+                if self.submit_confirmation == SubmitConfirmation::Settled
+                    && pending.route == CaptureRoute::Submit =>
+            {
                 EngineState::Capturing {
                     committed: pending.text.clone(),
                     partial: live.partial.clone(),
@@ -1880,7 +1889,7 @@ where
             return Err((Done::Failed(self.not_ready()), decided));
         };
         self.language = self.number_rules.language;
-        self.submit_settled = false;
+        self.submit_confirmation = SubmitConfirmation::Live;
         let buffers_audio = session.buffers_audio();
         let live = Live {
             session,
@@ -2229,7 +2238,11 @@ where
                         || (self.merging.is_some()
                             && self.number_rules.as_digits
                             && has_words(&pending.text)));
-                self.submit_settled = settled;
+                self.submit_confirmation = if settled {
+                    SubmitConfirmation::Settled
+                } else {
+                    SubmitConfirmation::Live
+                };
                 if pending.route == CaptureRoute::Submit && !settled && self.number_rules.as_digits
                 {
                     pending.text = self.text_with_numbers(pending.route, &pending.text);
@@ -2627,7 +2640,8 @@ where
         };
         match outcome {
             CaptureOutcome::Accepted(request)
-                if request.route == CaptureRoute::Submit && self.submit_settled =>
+                if request.route == CaptureRoute::Submit
+                    && self.submit_confirmation == SubmitConfirmation::Settled =>
             {
                 self.confirm_final_submit(request).await
             }
@@ -3038,7 +3052,7 @@ where
     /// the text that will be sent. Paste is cleaned after its pause, in [`Self::conclude`].
     fn cleans_before_confirm(&self, pending: &PendingEnding) -> bool {
         pending.route == CaptureRoute::Submit
-            && !self.submit_settled
+            && self.submit_confirmation == SubmitConfirmation::Live
             && self.final_pass.is_none()
             && self
                 .writing
@@ -3156,7 +3170,8 @@ where
     /// formatted before its confirmation, so only the settled ones still wait for formatting.
     fn formats_on_delivery(&self, route: CaptureRoute) -> bool {
         matches!(route, CaptureRoute::Paste | CaptureRoute::Write)
-            || (route == CaptureRoute::Submit && self.submit_settled)
+            || (route == CaptureRoute::Submit
+                && self.submit_confirmation == SubmitConfirmation::Settled)
     }
 
     fn text_with_numbers(&self, route: CaptureRoute, text: &str) -> String {
