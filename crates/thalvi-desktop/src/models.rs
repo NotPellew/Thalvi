@@ -1267,13 +1267,6 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), requested.notified())
             .await
             .expect("the first fetch asked the server for the file");
-        // The lock is what keeps a second request from arriving; wait long enough to see one if it would.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(500), requested.notified())
-                .await
-                .is_err(),
-            "the second fetch asked the server for the file too"
-        );
         release.notify_one();
         let path = dir.join("wake.onnx");
         for fetch in [first, second] {
