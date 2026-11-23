@@ -52,7 +52,8 @@ On first launch, Thalvi writes default settings, opens Settings, and downloads t
 
 - **On this computer (default):** runs offline via ONNX Runtime (`Nemotron Streaming` English default; `Nemotron Unified` 25 European languages with optional WebGPU on Linux; `Parakeet TDT` 25 European languages) or an app-managed `whisper.cpp` helper (`Whisper Turbo` CPU or Vulkan GPU, experimental), or your own ONNX model folder.
 - **Streaming & after-you-stop servers:** connect a WebSocket streaming server (such as the self-hosted recognizer below) or any OpenAI-compatible `/v1/audio/transcriptions` or audio chat endpoint.
-- **Extra recognizers & Word list:** enable secondary recognizers to merge results through the chat model, and add custom names or terms to favour in recognition.
+- **Final pass:** select one recognizer other than the live one. It re-transcribes the finished audio and replaces the live text when it answers within two seconds and agrees with the spoken ending. A slow, failed, or mismatched pass keeps the live text and shows a notice. Tasks, empty captures, and captures that used “scratch that” skip the final pass. Cancelled captures deliver nothing.
+- **Extra recognizers & Word list:** enable extra recognizers to merge their text through a chat model, or select one as the final pass without a chat model. While a final pass is selected, the extras and merge pause and keep their settings. OpenAI-compatible final passes use the word list as a hint for names and terms.
 
 ### Writing & cleanup (**Settings → Chat model**)
 

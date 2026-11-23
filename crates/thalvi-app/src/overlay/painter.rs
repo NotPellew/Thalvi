@@ -86,10 +86,16 @@ impl Painter {
         true
     }
 
-    pub(super) fn draw(&mut self, view: &View, clock: f64) -> &OverlayFrame {
-        self.paint(view, clock);
+    /// Returns the frame and whether the draft fits in the active theme's text area.
+    pub(super) fn render(&mut self, view: &View, clock: f64) -> (&OverlayFrame, bool) {
+        let complete = self.paint(view, clock);
         self.canvas.frame_into(&mut self.frame);
-        &self.frame
+        (&self.frame, complete)
+    }
+
+    #[cfg(test)]
+    pub(super) fn draw(&mut self, view: &View, clock: f64) -> &OverlayFrame {
+        self.render(view, clock).0
     }
 
     pub(super) fn rgba(&mut self, view: &View) -> (u32, u32, Vec<u8>) {
@@ -97,7 +103,7 @@ impl Painter {
         self.canvas.rgba()
     }
 
-    fn paint(&mut self, view: &View, clock: f64) {
+    fn paint(&mut self, view: &View, clock: f64) -> bool {
         match &mut self.skin {
             Skin::Module(module) => module.draw(&mut self.canvas, &mut self.text, view, clock),
             Skin::Neon(neon) => neon.draw(&mut self.canvas, &mut self.text, view),
@@ -127,7 +133,7 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
-    use thalvi_desktop::capture::CaptureRoute;
+    use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 
     use super::*;
     use thalvi_desktop::theme::defaults_of;
@@ -169,6 +175,104 @@ mod tests {
             .all(|(got, want)| got.abs_diff(want) < 48)
     }
 
+    fn submit_preview(text: &str) -> Status {
+        use crate::status::{Mode, View as StatusView};
+        use thalvi_desktop::engine::{EngineState, SubmitPreview};
+
+        StatusView {
+            mode: Mode::Idle,
+            engine: EngineState::ConfirmingSubmit {
+                text: text.to_owned(),
+                pause: Duration::from_millis(2500),
+                preview: SubmitPreview::default(),
+            },
+            target: None,
+            copies: false,
+            pauses: EndingPauses::default(),
+            loading: None,
+            wake_words: true,
+        }
+        .status()
+    }
+
+    #[test]
+    fn final_submit_text_is_visible_even_with_the_overlay_and_draft_disabled() {
+        use crate::overlay::Visibility;
+
+        for (look, dark) in LOOKS {
+            let mut painter = painter(1.0, look, dark);
+            let mut preview = |text: &str| {
+                let status = submit_preview(text);
+                assert_eq!(Visibility::of(&status, false), Visibility::Show);
+                let mut view = view(&status, false);
+                view.set_draft(false);
+                let (frame, complete) = painter.render(&view, 0.0);
+                assert!(complete, "{look:?} dark {dark}: {text}");
+                frame.bgra.clone()
+            };
+            assert_ne!(
+                preview("Send thirty dollars"),
+                preview("Send two dollars"),
+                "{look:?}"
+            );
+            let long = format!("Transfer 9000 dollars {}", "More words. ".repeat(80));
+            assert!(!painter.render(&view(&submit_preview(&long), false), 0.0).1);
+        }
+    }
+
+    #[test]
+    fn final_submit_rejects_text_that_the_larger_theme_would_clip() {
+        for (look, dark) in LOOKS {
+            // The fixture's H advances 0.6 em. Neon has a wider draft area than the module looks.
+            let draft = "H".repeat(if look == Look::Neon { 43 } else { 32 });
+            let shown = view(&submit_preview(&draft), true);
+            let scales = [
+                Arc::new(defaults_of(look)),
+                customized(look, dark, "font.scale", serde_json::json!(1.25)),
+            ];
+            let complete = scales.map(|style| {
+                let mut painter = Painter::new(1.0, style, dark).unwrap();
+                let family = painter.text.load_weight_fixture();
+                painter.text.set_families(family, family);
+                painter.render(&shown, 0.0).1
+            });
+            assert_eq!(complete, [true, false], "{look:?} dark {dark}");
+        }
+    }
+
+    #[test]
+    fn final_submit_remains_visible_with_transparent_theme_text() {
+        use thalvi_desktop::theme::{LookOverrides, Themes};
+
+        let colors = serde_json::json!({
+            "text": "#00000000", "background": "#ffffff", "surface": "#ffffff",
+            "raised": "#ffffff", "accent": "#005500"
+        });
+        for (look, dark) in LOOKS {
+            let scheme = if dark { "dark" } else { "light" };
+            let name = look.name();
+            let themes = Themes::load(&serde_json::json!({
+                "version": 1,
+                name: {"colors": {scheme: colors}},
+            }));
+            let overrides = themes.of(look);
+            assert!(matches!(overrides, Some(LookOverrides::Usable(_))));
+            let style = Arc::new(Style::resolve(look, overrides));
+            let mut painter = Painter::new(1.0, style, dark).unwrap();
+            let mut pixels = |text| {
+                let shown = view(&submit_preview(text), true);
+                let (frame, complete) = painter.render(&shown, 0.0);
+                assert!(complete, "{look:?} dark {dark}");
+                frame.bgra.clone()
+            };
+            assert_ne!(
+                pixels("Pay 1111 dollars"),
+                pixels("Pay 9999 dollars"),
+                "{look:?} dark {dark}"
+            );
+        }
+    }
+
     #[test]
     fn each_look_shows_each_state_in_its_tone() {
         let pending = Status::Pending {
@@ -178,6 +282,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2500,
             copies: false,
+            final_confirmation: None,
         };
         let done = Status::Done {
             target: None,
@@ -343,6 +448,7 @@ mod tests {
             waiting_for_quiet: false,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         }
     }
 
@@ -396,18 +502,29 @@ mod tests {
 
     #[test]
     fn the_cancel_button_shows_only_on_a_capture_the_desktop_lets_be_clicked() {
-        for (look, dark) in LOOKS {
-            let mut painter = painter(1.0, look, dark);
-            let with = painter.draw(&view(&capturing(), true), 0.0).bgra.clone();
-            let without = painter.draw(&view(&capturing(), false), 0.0).bgra.clone();
-            let differing = with
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(without.as_chunks::<4>().0)
-                .filter(|(a, b)| a != b)
-                .count();
-            assert!(differing > 40, "{look:?} dark {dark}: {differing}");
+        for status in [
+            capturing(),
+            Status::FinalPass {
+                target: None,
+                route: CaptureRoute::Paste,
+            },
+        ] {
+            for (look, dark) in LOOKS {
+                let mut painter = painter(1.0, look, dark);
+                let with = painter.draw(&view(&status, true), 0.0).bgra.clone();
+                let without = painter.draw(&view(&status, false), 0.0).bgra.clone();
+                let differing = with
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(without.as_chunks::<4>().0)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                assert!(
+                    differing > 40,
+                    "{status:?} {look:?} dark {dark}: {differing}"
+                );
+            }
         }
     }
 
@@ -487,6 +604,7 @@ mod tests {
             waiting_for_quiet,
             pause_ms: 2500,
             copies: false,
+            final_confirmation: None,
         };
         [
             ("live", capturing()),

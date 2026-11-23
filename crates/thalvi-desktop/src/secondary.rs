@@ -356,9 +356,28 @@ pub async fn transcribe_events(
     frames: &[Frame],
     emit: impl FnMut(crate::recognizer::RecognizerEvent),
 ) -> Result<String, SecondaryError> {
+    request_audio(client, entry, frames, "", emit).await
+}
+
+pub(crate) async fn transcribe_finished(
+    client: &reqwest::Client,
+    entry: &OpenAiLive,
+    frames: &[Frame],
+    prompt: &str,
+) -> Result<String, SecondaryError> {
+    request_audio(client, entry, frames, prompt, |_| {}).await
+}
+
+async fn request_audio(
+    client: &reqwest::Client,
+    entry: &OpenAiLive,
+    frames: &[Frame],
+    prompt: &str,
+    emit: impl FnMut(crate::recognizer::RecognizerEvent),
+) -> Result<String, SecondaryError> {
     match entry.request {
-        LiveRequest::Transcriptions => transcribe_stream(client, entry, frames, emit).await,
-        LiveRequest::Chat => transcribe_chat(client, entry, frames).await,
+        LiveRequest::Transcriptions => transcribe_stream(client, entry, frames, prompt, emit).await,
+        LiveRequest::Chat => transcribe_chat(client, entry, frames, prompt).await,
     }
 }
 
@@ -366,13 +385,21 @@ async fn transcribe_stream(
     client: &reqwest::Client,
     entry: &OpenAiLive,
     frames: &[Frame],
-    mut emit: impl FnMut(crate::recognizer::RecognizerEvent),
+    prompt: &str,
+    emit: impl FnMut(crate::recognizer::RecognizerEvent),
 ) -> Result<String, SecondaryError> {
     let settings = &entry.settings;
     let language = entry.language.map_or_else(String::new, |language| {
         format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n{language}\r\n")
     });
-    let mut body = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\ntrue\r\n{language}--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n", settings.model).into_bytes();
+    let hint = if prompt.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n{prompt}\r\n"
+        )
+    };
+    let mut body = format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\ntrue\r\n{language}{hint}--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n", settings.model).into_bytes();
     body.extend_from_slice(&wav(frames));
     body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
     let mut request = client
@@ -394,76 +421,82 @@ async fn transcribe_stream(
         if !response.status().is_success() {
             return Err(SecondaryError::Status(response.status().as_u16()));
         }
-        if !response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("text/event-stream"))
-        {
-            let answer: Value = response
-                .json()
-                .await
-                .map_err(|_| SecondaryError::BadResponse)?;
-            let text = answer
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or(SecondaryError::BadResponse)?
-                .to_owned();
-            return Ok(text);
-        }
-        let mut stream = response.bytes_stream();
-        let mut pending = Vec::new();
-        let mut transcript = String::new();
-        let mut final_text = None;
-        while let Some(chunk) = stream.next().await {
-            pending.extend_from_slice(&chunk.map_err(|error| SecondaryError::connection(&error))?);
-            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
-                let line: Vec<_> = pending.drain(..=newline).collect();
-                let line = String::from_utf8_lossy(&line);
-                if let Some(data) = line.trim().strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        break;
-                    }
-                    let value: Value =
-                        serde_json::from_str(data).map_err(|_| SecondaryError::BadResponse)?;
-                    match value.get("type").and_then(Value::as_str) {
-                        Some("transcript.text.delta") => {
-                            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                                transcript.push_str(delta);
-                                emit(crate::recognizer::RecognizerEvent::Partial(
-                                    transcript.clone(),
-                                ));
-                            }
-                        }
-                        Some("transcript.text.done") => {
-                            if let Some(text) = value.get("text").and_then(Value::as_str) {
-                                final_text = Some(text.to_owned());
-                            }
-                        }
-                        None => {
-                            if let Some(text) = value.get("text").and_then(Value::as_str) {
-                                if !transcript.is_empty()
-                                    && !transcript.chars().last().is_some_and(char::is_whitespace)
-                                    && !text.chars().next().is_some_and(char::is_whitespace)
-                                {
-                                    transcript.push(' ');
-                                }
-                                transcript.push_str(text);
-                                emit(crate::recognizer::RecognizerEvent::Partial(
-                                    transcript.clone(),
-                                ));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        Ok(final_text.unwrap_or(transcript))
+        read_transcription(response, emit).await
     };
     tokio::time::timeout(TIMEOUT, upload)
         .await
         .map_err(|_| SecondaryError::Timeout)?
+}
+
+async fn read_transcription(
+    response: reqwest::Response,
+    mut emit: impl FnMut(crate::recognizer::RecognizerEvent),
+) -> Result<String, SecondaryError> {
+    if !response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/event-stream"))
+    {
+        let answer: Value = response
+            .json()
+            .await
+            .map_err(|_| SecondaryError::BadResponse)?;
+        let text = answer
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or(SecondaryError::BadResponse)?
+            .to_owned();
+        return Ok(text);
+    }
+    let mut stream = response.bytes_stream();
+    let mut pending = Vec::new();
+    let mut transcript = String::new();
+    while let Some(chunk) = stream.next().await {
+        pending.extend_from_slice(&chunk.map_err(|error| SecondaryError::connection(&error))?);
+        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<_> = pending.drain(..=newline).collect();
+            let line = String::from_utf8_lossy(&line);
+            if let Some(data) = line.trim().strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    return Ok(transcript);
+                }
+                let value: Value =
+                    serde_json::from_str(data).map_err(|_| SecondaryError::BadResponse)?;
+                match value.get("type").and_then(Value::as_str) {
+                    Some("transcript.text.delta") => {
+                        if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                            transcript.push_str(delta);
+                            emit(crate::recognizer::RecognizerEvent::Partial(
+                                transcript.clone(),
+                            ));
+                        }
+                    }
+                    Some("transcript.text.done") => {
+                        if let Some(text) = value.get("text").and_then(Value::as_str) {
+                            return Ok(text.to_owned());
+                        }
+                    }
+                    None => {
+                        if let Some(text) = value.get("text").and_then(Value::as_str) {
+                            if !transcript.is_empty()
+                                && !transcript.chars().last().is_some_and(char::is_whitespace)
+                                && !text.chars().next().is_some_and(char::is_whitespace)
+                            {
+                                transcript.push(' ');
+                            }
+                            transcript.push_str(text);
+                            emit(crate::recognizer::RecognizerEvent::Partial(
+                                transcript.clone(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(transcript)
 }
 
 /// One non-streaming chat completion that carries the WAV as `input_audio`.
@@ -471,15 +504,18 @@ async fn transcribe_chat(
     client: &reqwest::Client,
     entry: &OpenAiLive,
     frames: &[Frame],
+    prompt: &str,
 ) -> Result<String, SecondaryError> {
     let settings = &entry.settings;
-    let mut body = json!({
-        "model": settings.model,
-        "messages": [{"role": "user", "content": [{
-            "type": "input_audio",
-            "input_audio": {"data": STANDARD.encode(wav(frames)), "format": "wav"},
-        }]}],
-    });
+    let mut messages = Vec::new();
+    if !prompt.is_empty() {
+        messages.push(json!({"role": "system", "content": prompt}));
+    }
+    messages.push(json!({"role": "user", "content": [{
+        "type": "input_audio",
+        "input_audio": {"data": STANDARD.encode(wav(frames)), "format": "wav"},
+    }]}));
+    let mut body = json!({"model": settings.model, "messages": messages});
     if let (Some(language), Some(object)) = (entry.language, body.as_object_mut()) {
         object.insert("language".to_owned(), json!(language.to_string()));
     }

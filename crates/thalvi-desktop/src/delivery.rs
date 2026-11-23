@@ -61,6 +61,8 @@ impl UserError for TerminalLines {
 pub struct Finished {
     /// The text reached its destination; otherwise it is kept on the clipboard when possible.
     pub delivered: bool,
+    /// Where a successful text delivery left the text.
+    pub text_delivery: Option<Delivered>,
     /// It is not known whether the paste reached the window, so the text may be in it; never with `delivered`.
     pub maybe_partial: bool,
     /// Says what happened and where the dictated text went.
@@ -79,6 +81,7 @@ impl Finished {
     fn delivered(notice: String) -> Self {
         Self {
             delivered: true,
+            text_delivery: None,
             maybe_partial: false,
             notice,
             headline: "Delivered",
@@ -90,6 +93,7 @@ impl Finished {
     fn kept(notice: String, headline: &'static str) -> Self {
         Self {
             delivered: false,
+            text_delivery: None,
             maybe_partial: false,
             notice,
             headline,
@@ -205,15 +209,17 @@ where
             ))),
         };
         match result {
-            Ok(Delivered::InWindow) => Finished::delivered("Delivered.".to_owned()),
-            Ok(Delivered::OnClipboard) => Finished::delivered(
-                if enter {
-                    "Copied — press Ctrl+V then Enter"
-                } else {
-                    "Copied — press Ctrl+V to paste"
+            Ok(delivered) => {
+                let notice = match (delivered, enter) {
+                    (Delivered::InWindow, _) => "Delivered.",
+                    (Delivered::OnClipboard, true) => "Copied — press Ctrl+V then Enter",
+                    (Delivered::OnClipboard, false) => "Copied — press Ctrl+V to paste",
+                };
+                Finished {
+                    text_delivery: Some(delivered),
+                    ..Finished::delivered(notice.to_owned())
                 }
-                .to_owned(),
-            ),
+            }
             Err(error) => Finished {
                 maybe_partial: matches!(error, HostError::MaybePartial(_)),
                 ..self.keep(recorder, text, &error).await

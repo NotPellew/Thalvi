@@ -11,8 +11,8 @@ use thalvi_desktop::theme::overlay::{
 
 use super::paint::{Canvas, Fill, Layout, Rgba, Text, TextBounds};
 use super::view::{
-    CANCEL, FRAME, HEIGHT, Line, MODULE_H, MODULE_W, MODULE_X, SLOT, SLOT_H, SLOT_W, Tone, View,
-    WIDTH, done_message, spaced,
+    CANCEL, FRAME, HEIGHT, Line, MODULE_H, MODULE_W, MODULE_X, SLOT, SLOT_H, SLOT_W,
+    SUBMIT_DRAFT_SURFACE, SUBMIT_DRAFT_TEXT, Tone, View, WIDTH, done_message, spaced,
 };
 use crate::status::Status;
 
@@ -67,7 +67,13 @@ impl Module {
         })
     }
 
-    pub(super) fn draw(&mut self, canvas: &mut Canvas, text: &mut Text, view: &View, clock: f64) {
+    pub(super) fn draw(
+        &mut self,
+        canvas: &mut Canvas,
+        text: &mut Text,
+        view: &View,
+        clock: f64,
+    ) -> bool {
         canvas.copy(&self.background);
         let theme = &self.theme;
         if theme.shine {
@@ -111,7 +117,7 @@ impl Module {
         if let Some(label) = &view.label {
             tag(canvas, text, label, tone_color, wave_top, theme);
         }
-        if let Status::Done {
+        let complete = if let Status::Done {
             target,
             route,
             notice,
@@ -132,15 +138,26 @@ impl Module {
                 layout,
                 (SLOT.0 + inset, SLOT.1 + (SLOT_H - height) / 2.0),
             );
+            false
         } else if has_text {
             rule(canvas, theme);
-            ticker(canvas, text, &view.line, view.caret_on(), theme);
-        }
+            ticker(
+                canvas,
+                text,
+                &view.line,
+                view.caret_on(),
+                theme,
+                view.status.requires_final_preview(),
+            )
+        } else {
+            false
+        };
         if view.cancellable() {
             cancel_button(canvas, text, self.finish, theme);
         }
         canvas.clip(None);
         line_strip(canvas, view, tone_color, self.finish, theme);
+        complete
     }
 }
 
@@ -562,7 +579,14 @@ fn ticker_top(theme: &Theme) -> f32 {
         .min(SLOT_H - theme.measures.text(TICKER).line_height - art::TICKER_BOTTOM)
 }
 
-fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool, theme: &Theme) {
+fn ticker(
+    canvas: &mut Canvas,
+    text: &mut Text,
+    line: &Line,
+    blink_on: bool,
+    theme: &Theme,
+    final_preview: bool,
+) -> bool {
     let style = theme.measures.text(TICKER);
     let inset = art::TICKER_LEFT * theme.measures.spacing;
     let (left, top, width) = (
@@ -573,7 +597,7 @@ fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool, the
     let right = left + width;
     let scale = canvas.scale_of();
     match line {
-        Line::None => {}
+        Line::None => false,
         Line::Notice(notice) => {
             let spans = [(notice.as_str(), theme.text)];
             let (used, _) = text.measure(&spans, style, Layout::Line, scale);
@@ -585,6 +609,7 @@ fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool, the
             }));
             text.draw(canvas, &spans, style, Layout::Line, (left, top));
             canvas.set_text_bounds(None);
+            false
         }
         Line::Words {
             committed,
@@ -592,10 +617,17 @@ fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool, the
             caret,
         } => {
             let committed = spaced(committed, partial);
-            let spans = [
-                (committed.as_str(), theme.text),
-                (partial.as_str(), theme.muted),
-            ];
+            let color = if final_preview {
+                canvas.rect(
+                    (left, top, width, style.line_height),
+                    0.0,
+                    &Fill::Solid(SUBMIT_DRAFT_SURFACE),
+                );
+                SUBMIT_DRAFT_TEXT
+            } else {
+                theme.text
+            };
+            let spans = [(committed.as_str(), color), (partial.as_str(), theme.muted)];
             let (used, _) = text.measure(&spans, style, Layout::Line, scale);
             // A line too long to fit ends 3 points short of the right edge, leaving room for the caret.
             let start = (right - art::CARET_INSETS.0 - art::CARET_WIDTH - used).min(left);
@@ -620,6 +652,7 @@ fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool, the
                     &Fill::Solid(theme.accent),
                 );
             }
+            !long && !committed.contains('\n')
         }
     }
 }
@@ -761,7 +794,14 @@ mod tests {
     }
 
     fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
-        super::ticker(canvas, text, line, blink_on, &built_in(Finish::Gunmetal));
+        super::ticker(
+            canvas,
+            text,
+            line,
+            blink_on,
+            &built_in(Finish::Gunmetal),
+            false,
+        );
     }
 
     thread_local! {
@@ -987,7 +1027,9 @@ mod tests {
 
     fn drawn_with(finish: Finish, theme: Theme, view: &View) -> Vec<[u8; 4]> {
         let mut module = Module::new(finish, theme, 1.0).expect("a module to draw");
-        painted(|canvas, text| module.draw(canvas, text, view, view.clock))
+        painted(|canvas, text| {
+            module.draw(canvas, text, view, view.clock);
+        })
     }
 
     fn shown(status: Status, draft: bool, clock: f64, level: f32) -> View {
@@ -1048,6 +1090,7 @@ mod tests {
             waiting_for_quiet: true,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         };
         let centre = |status: &Status, draft| {
             let loud = drawn(Finish::Gunmetal, &shown(status.clone(), draft, 1.0, 1.0));

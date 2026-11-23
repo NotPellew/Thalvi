@@ -229,6 +229,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
       if (activeExtra) {
         return Promise.reject(new Error(`Speech server "${activeExtra.name}" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first.`));
       }
+      const finals = next.stt.entries.filter((entry) => entry.final_pass === true);
+      if (finals.length > 1) return Promise.reject(new Error("Choose only one speech server for the final pass."));
+      const activeFinal = finals.find((entry) => entry.kind !== "extra" && entry.active);
+      if (activeFinal) {
+        return Promise.reject(new Error(`Speech server "${activeFinal.name}" is the one in use, so it cannot also be the final pass.`));
+      }
       if (next.writing === null && next.stt.entries.some((entry) => (entry.kind === "extra" ? entry.active : entry.extra === true))) {
         return Promise.reject(
           new Error(
