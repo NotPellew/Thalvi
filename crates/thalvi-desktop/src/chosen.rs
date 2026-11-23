@@ -119,6 +119,7 @@ impl Chosen {
                 live.clone(),
                 http,
                 metrics,
+                phrases,
             )),
             LiveKind::OnDevice(SpeechChoice::Whisper(backend)) => Self::Whisper {
                 recognizer: Arc::new(WhisperRecognizer::new(*backend, helpers, store, metrics)),

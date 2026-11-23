@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{frame::Frame, recognizer::Upsampler};
+use crate::{frame::Frame, phrases::WordList, recognizer::Upsampler};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const SAMPLE_RATE: u32 = 24_000;
@@ -413,29 +413,48 @@ pub async fn transcribe(
     client: &reqwest::Client,
     settings: &SecondaryStt,
     frames: &[Frame],
+    words: &WordList,
 ) -> Result<Transcript, SecondaryError> {
-    let (endpoint, header, file_field, text_field) = match settings.api {
+    let (endpoint, header, hint, file_field, text_field) = match settings.api {
         SecondaryApi::OpenAi => (
             "/audio/transcriptions",
             format!(
                 "Content-Disposition: form-data; name=\"model\"\r\n\r\n{}",
                 settings.model
             ),
+            if words.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n{}\r\n",
+                    words.hint()
+                )
+            },
             "file",
             "text",
         ),
-        SecondaryApi::Meta => (
-            "/asr/transcribe",
-            format!(
-                "Content-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n{}",
-                json!({"mode": "PUSH_TO_TALK", "model": settings.model, "audioEncoding": "WAV"})
-            ),
-            "audio",
-            "transcript",
-        ),
+        SecondaryApi::Meta => {
+            let mut request = json!({
+                "mode": "PUSH_TO_TALK",
+                "model": settings.model,
+                "audioEncoding": "WAV",
+            });
+            if !words.is_empty() {
+                request["keywords"] = json!(words.phrases());
+            }
+            (
+                "/asr/transcribe",
+                format!(
+                    "Content-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n{request}"
+                ),
+                String::new(),
+                "audio",
+                "transcript",
+            )
+        }
     };
     let mut body = format!(
-        "--{BOUNDARY}\r\n{header}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+        "--{BOUNDARY}\r\n{header}\r\n{hint}--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
     )
     .into_bytes();
     body.extend_from_slice(&wav(frames));
@@ -497,9 +516,10 @@ pub async fn transcribe_events(
     client: &reqwest::Client,
     entry: &OpenAiLive,
     frames: &[Frame],
+    prompt: &str,
     emit: impl FnMut(crate::recognizer::RecognizerEvent),
 ) -> Result<Transcript, SecondaryError> {
-    request_audio(client, entry, frames, "", emit).await
+    request_audio(client, entry, frames, prompt, emit).await
 }
 
 pub(crate) async fn transcribe_finished(

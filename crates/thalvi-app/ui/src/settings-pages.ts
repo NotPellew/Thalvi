@@ -2125,10 +2125,16 @@ function speech(context: PageContext): SpeechRows {
     const request = (wordListRequest += 1);
     const active = activeLive();
     const finalPass = entries().find((entry) => entry.final_pass === true);
-    const uploadUsesWords = finalPass?.kind === "open_ai" || (finalPass?.kind === "extra" && finalPass.api === "openai");
+    const uploadUsesWords = finalPass?.kind === "open_ai" || finalPass?.kind === "extra";
     say(wordProblem, "");
     if (uploadUsesWords) {
       if (wordHint) wordHint.textContent = "The final pass uses this word list.";
+      words.enable(true);
+      return;
+    }
+    if (active?.kind === "open_ai") {
+      const named = `${active.name} uses this word list.`;
+      if (wordHint) wordHint.textContent = named.length <= HINT_BUDGET ? named : "This recognizer uses this word list.";
       words.enable(true);
       return;
     }
