@@ -318,9 +318,11 @@ function wakeHeads(context: PageContext): HTMLElement[] {
       },
     };
     if (state.custom) state.customPath = model();
-    const download = button("Download", () => {
-      const wanted = model();
+    function startDownload(wanted: string): void {
+      state.sayProblem("");
       downloading.add(wanted);
+      // Hiding a focused Download would drop focus to the page.
+      if (document.activeElement === download) picker.focus();
       state.render();
       backend.downloadWakeModel(wanted).then(
         () => {
@@ -332,9 +334,14 @@ function wakeHeads(context: PageContext): HTMLElement[] {
         (error: unknown) => {
           downloading.delete(wanted);
           state.sayProblem(errorText(error));
+          const onRow = field.node.contains(document.activeElement);
           state.render();
+          if (onRow) download.focus();
         },
       );
+    }
+    const download = button("Download", () => {
+      startDownload(model());
     });
 
     /** Applies a model, and the threshold it starts at when it has one; says why not, and keeps the model in use. */
@@ -418,13 +425,15 @@ function wakeHeads(context: PageContext): HTMLElement[] {
         else useFile(state.customPath, wasCustom);
       } else {
         state.custom = false;
-        const start = infos.get(picker.value)?.threshold;
+        const wanted = picker.value;
+        if (infos.get(wanted)?.cached === false && !downloading.has(wanted)) startDownload(wanted);
+        const start = infos.get(wanted)?.threshold;
         if (start !== undefined) {
           const slider = threshold.field as HTMLInputElement;
           slider.value = String(start);
           slider.dispatchEvent(new Event("input"));
         }
-        use(picker.value, start, wasCustom).then((used) => {
+        use(wanted, start, wasCustom).then((used) => {
           if (!used) {
             const slider = threshold.field as HTMLInputElement;
             slider.value = String(settings.wake.capture.threshold);
@@ -3050,7 +3059,7 @@ function grouped(nodes: HTMLElement[]): HTMLElement[] {
 export function buildPages(context: PageContext): Page[] {
   const rows = speech(context);
   return PAGES.map(([id, title, build]) => {
-    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}` }, el("h3", { id: `page-${id}` }, title), ...grouped(build(context, rows)));
+    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}`, tabindex: "-1" }, el("h3", { id: `page-${id}` }, title), ...grouped(build(context, rows)));
     return { id, title, node };
   });
 }

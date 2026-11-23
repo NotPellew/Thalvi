@@ -26,6 +26,7 @@ pub mod models;
 pub mod numbers;
 pub mod openai_live;
 pub mod phrases;
+pub mod private;
 pub mod realtime;
 pub mod recognizer;
 pub mod report;

@@ -33,6 +33,8 @@
 :is(#settings[data-look="holo"], #settings[data-look="gunmetal"]) input[type="range"]::-webkit-slider-runnable-track { height: var(--range-h); background: var(--clear); }
 :is(#settings[data-look="holo"], #settings[data-look="gunmetal"]) input[type="range"]::-webkit-slider-thumb { appearance: none; border: 0; }
 :is(#settings[data-look="holo"], #settings[data-look="gunmetal"]) main button { height: var(--button-height); padding: var(--button-pad-y) var(--button-pad-x); border: var(--button-bezel) solid var(--button-edge); border-left-width: var(--button-side-bezel); border-right-width: var(--button-side-bezel); border-radius: var(--radius-button); color: var(--button-text); font: var(--weight-label) var(--fs-10-5) var(--mono); letter-spacing: var(--track-button); text-transform: uppercase; }
+/* WebKitGTK keeps a form grid row's old height after a resize when its item has a fixed min-height. */
+:is(#settings[data-look="holo"], #settings[data-look="gunmetal"]) .fields > .row { min-height: auto; }
 :is(#settings[data-look="holo"], #settings[data-look="gunmetal"]) .fields > .row + .row { border-top: 0; }
 :is(#settings[data-look="holo"], #settings[data-look="gunmetal"]) .next-dictation { color: var(--neon); }
 :is(#settings[data-look="holo"], #settings[data-look="gunmetal"]) textarea { padding: var(--textarea-pad-y) var(--textarea-pad-x); font: var(--fs-12) var(--mono); color: var(--field-text); border-color: var(--field-edge); border-bottom-color: var(--field-edge-bottom); background-color: var(--field-bg); box-shadow: var(--field-shadow); }
