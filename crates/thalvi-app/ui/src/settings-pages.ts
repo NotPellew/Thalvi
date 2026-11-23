@@ -319,6 +319,7 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     };
     if (state.custom) state.customPath = model();
     function startDownload(wanted: string): void {
+      state.sayProblem("");
       downloading.add(wanted);
       state.render();
       backend.downloadWakeModel(wanted).then(
