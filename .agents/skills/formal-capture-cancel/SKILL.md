@@ -142,6 +142,11 @@ captures, outside the single-capture model. `Requests::take`, `Requests::read_qu
 `Runner::capture` and `Settling::settle` keep the same cancellation writes, delivery paths and await
 boundaries, so the model actions are unchanged.
 
+The word list on every upload (#624) only adds request data: `OpenAiSession` clones the list's hint
+into its existing request task, `Engine::ask_all` and the final pass's task pass the list to
+`secondary::transcribe`, and `Engine::ask_merge` passes it to `start_merge` under the same `bounded`
+call. No await, queue step, cancellation write or delivery path is added, so the model actions are unchanged.
+
 A selected final pass (#586) keeps streaming extras off. At acceptance it starts one finished-audio
 task while the live recognizer closes. Its reply can only supply text through
 `Engine::wait_final_pass`, which polls cancellation before both the reply and the deadline. A
