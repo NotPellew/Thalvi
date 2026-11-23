@@ -1253,10 +1253,31 @@ describe("the Recognition page", () => {
   });
 
   const liveChoice = async () => { use("Cybrex2"); await settle(); };
+  const finalPass = async () => { flip(entryNamed("OpenAI").querySelector<HTMLInputElement>(".final-pass input") as HTMLInputElement); await settle(); };
+  it.each([
+    ["a Live choice", liveChoice, "live recognizer"],
+    ["an Extra switch", async () => { flip(tickOf("Meta")); await settle(); }, "row Meta"],
+    ["a Final pass switch", finalPass, "row OpenAI"],
+    ["a saved edit", async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, "row Cybrex2"],
+  ] as const)("keeps the Applied. of %s through status changes until the next change", async (_case, act, expected) => {
+    const stub = await openSeveral();
+    const capturing: Status = { state: "capturing", target: null, committed: "", partial: null, notice: null };
+    stub.emit(capturing);
+    await act();
+    expect(where(APPLIED_LATER_TEXT)).toBe(expected);
+    for (const status of [{ state: "working", target: null, route: "paste", cancellable: false }, { state: "listening" }, capturing] as const) stub.emit(status);
+    await settle();
+    expect(where(APPLIED_TEXT)).toBe(expected);
+    flip(tickOf("On this computer"));
+    await settle();
+    expect(Array.from(recognition().querySelectorAll(".applied")).filter((node) => node.textContent !== "").map((node) => where(node.textContent))).toEqual(["row On this computer"]);
+  });
+
   it.each([
     ["a Live choice", "an Extra switch", liveChoice, async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
     ["a Live choice", "a removal", liveChoice, async () => { edit("Meta"); within(editorEl(), "Remove").click(); await settle(); }, () => listOf("extra").parentElement],
     ["a Live choice", "a saved edit", liveChoice, async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, () => entryNamed("Cybrex2")],
+    ["an Extra switch", "a Final pass switch", async () => { flip(tickOf("Meta")); await settle(); }, finalPass, () => entryNamed("OpenAI")],
     ["an Extra switch", "another Extra switch", async () => { flip(tickOf("On this computer")); await settle(); }, async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
   ] as const)("after %s, shows only the Applied. of %s", async (_first, _then, before, act, owner) => {
     await openSeveral();
