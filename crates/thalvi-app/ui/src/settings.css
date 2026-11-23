@@ -80,7 +80,7 @@ input[type="checkbox"]:checked::after { transform: translateX(var(--check-travel
 .table > .editor { padding: 0 var(--editor-pad-x) var(--editor-pad-bottom); border: var(--hairline) solid var(--line); border-radius: var(--radius-editor); background: var(--editor-bg); }
 .editor .about { margin: var(--editor-about-margin-top) 0 var(--editor-about-margin-bottom); font-size: var(--fs-12); }
 .fields { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--fields-gap-y) var(--fields-gap-x); }
-.fields > .row { grid-column: span 6; flex-direction: column; align-items: stretch; gap: var(--field-gap); padding: 0; border: 0; min-height: 0; }
+.fields > .row { grid-column: span 6; flex-direction: column; align-items: stretch; gap: var(--field-gap); padding: 0; border: 0; }
 .fields > .row.half { grid-column: span 3; }
 .fields > .row.third { grid-column: span 2; }
 .fields > .row > .what { max-width: none; font-size: var(--fs-12); }
