@@ -1239,8 +1239,8 @@ mod tests {
                     tokio::spawn(async move {
                         let mut head = [0; 1024];
                         let _ = socket.read(&mut head).await;
+                        requested.notify_one();
                         if first {
-                            requested.notify_one();
                             release.notified().await;
                         }
                         let _ = socket.write_all(&response(BODY)).await;
