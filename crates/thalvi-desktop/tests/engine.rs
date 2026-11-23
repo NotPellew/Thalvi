@@ -31,6 +31,7 @@ use thalvi_desktop::models::CatalogSpeech;
 use thalvi_desktop::recognizer::{
     FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, SpeechSource,
 };
+use thalvi_desktop::secondary::Language;
 use thalvi_desktop::spotter::KeywordSpotter;
 use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
@@ -2526,6 +2527,10 @@ async fn a_submit_sends_the_merged_text_and_a_task_acts_on_the_live_text_without
                 rig.feed_until(3499, Kind::Quiet).await;
                 rig.at(3500).await;
 
+                // A settled Submit shows its whole text and waits for that before it is sent.
+                if route == CaptureRoute::Submit {
+                    rig.final_preview(delivered, ms(2500)).await.shown();
+                }
                 assert_eq!(
                     finished(task).await,
                     accepted(route, delivered),
@@ -6471,6 +6476,92 @@ async fn a_final_pass_text_is_formatted_before_cleanup_and_the_submit_confirms_i
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_merged_submit_waits_for_the_merge_then_confirms_the_formatted_and_cleaned_text() {
+    LocalSet::new()
+        .run_until(async {
+            let (extra, mut uploads) = serve(Reply::Json(
+                r#"{"text": "send the fifteen reports submit"}"#,
+            ))
+            .await;
+            let (chat_url, mut asked, _feed) =
+                chat(Chat::Stream(says!("Send the fifteen reports."))).await;
+            let mut config: serde_json::Value =
+                serde_json::from_str(&with_extras(&chat_url, &[("Extra", &extra, true)])).unwrap();
+            config["writing"] = json!({"url": chat_url, "model": "chat", "clean_dictation": true});
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("send the fifteen reports submit").await;
+            rig.state_is(EngineState::Capturing {
+                committed: "send the fifteen reports".to_owned(),
+                partial: None,
+                notice: None,
+            })
+            .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+
+            // The merge sees the raw live words, and cleanup the formatted merged text.
+            let merge = request(&mut asked).await;
+            assert_eq!(merge.body["messages"][0]["content"], MERGE_PROMPT);
+            assert_eq!(
+                merge.body["messages"][1]["content"],
+                r#"["send the fifteen reports","send the fifteen reports"]"#
+            );
+            let cleanup = request(&mut asked).await;
+            assert_eq!(cleanup.body["messages"][0]["content"], CLEANUP_PROMPT);
+            assert_eq!(
+                cleanup.body["messages"][1]["content"],
+                "Send the 15 reports."
+            );
+            // The settled text is shown whole, and sent exactly as shown.
+            rig.final_preview("Send the fifteen reports.", ms(2500))
+                .await
+                .shown();
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Submit, "Send the fifteen reports.")
+            );
+            assert!(uploads.recv().await.is_some());
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ordinary_submit_never_reformats_its_cleanup_reply_after_the_confirmation() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut asked, _feed) =
+                chat(Chat::Stream(says!("I have fifteen open issues."))).await;
+            let (mut rig, engine, frames) = Rig::new(&cleaning(&url));
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("I have three open issues submit").await;
+            let cleanup = request(&mut asked).await;
+            assert_eq!(
+                cleanup.body["messages"][1]["content"],
+                "I have 3 open issues"
+            );
+            rig.state_is(EngineState::PendingEnding {
+                route: CaptureRoute::Submit,
+                text: "I have fifteen open issues.".to_owned(),
+                waiting_for_quiet: false,
+            })
+            .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Submit, "I have fifteen open issues."),
+                "the reply shown before the pause is the text that is sent"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_entries_language_hint_formats_a_german_dictation() {
     LocalSet::new()
         .run_until(async {
@@ -6487,6 +6578,128 @@ async fn the_entries_language_hint_formats_a_german_dictation() {
                 .await;
             rig.feed_until(3499, Kind::Quiet).await;
             rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_detected_language_formats_the_dictation_when_the_entry_has_no_hint() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.server.heard_language(Language::detected("German"));
+            rig.finals("Ich habe fünfzehn offene Tickets paste that")
+                .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_detected_language_another_than_english_leaves_its_words_alone() {
+    LocalSet::new()
+        .run_until(async {
+            // Plain ASCII is formatted as English only when no language was detected.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.server.heard_language(Language::detected("french"));
+            rig.finals("I have two cats paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "I have two cats")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_pass_language_formats_the_text_it_replaced() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut requests) = serve(Reply::Json(
+                r#"{"text":"Ich habe fünfzehn offene Tickets paste that","language":"german"}"#,
+            ))
+            .await;
+            let (mut rig, engine, frames) = Rig::new(&with_final_pass(&url, &[]).to_string());
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            requests.recv().await.unwrap();
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_configured_final_pass_language_hint_formats_its_reply() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut requests) = serve_logged(
+                [Reply::Json(
+                    r#"{"choices":[{"message":{"content":"Ich habe fünfzehn offene Tickets paste that"}}]}"#,
+                )],
+                |_| (),
+            )
+            .await;
+            let mut config = with_final_pass(&url, &[]);
+            config["stt"]["entries"][1] = json!({
+                "kind": "open_ai", "id": "final", "name": "Final", "active": false,
+                "model": "asr", "address": url, "request": "chat", "language": "de",
+                "final_pass": true
+            });
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            requests.recv().await.unwrap();
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_final_pass_keeps_the_live_language() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut requests) = serve(Reply::Status(500)).await;
+            let (mut rig, engine, frames) = Rig::new(&with_final_pass(&url, &[]).to_string());
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.server.heard_language(Language::detected("de"));
+            rig.finals("Ich habe fünfzehn offene Tickets paste that")
+                .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            requests.recv().await.unwrap();
             assert_eq!(
                 finished(task).await,
                 accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")

@@ -110,18 +110,27 @@ pub fn format(text: &str, language: Option<Language>, words: &[String]) -> Forma
 fn protected_words(words: &[String]) -> BTreeSet<String> {
     words
         .iter()
-        .flat_map(|entry| entry.split(|c: char| !c.is_alphanumeric()))
+        .flat_map(|entry| {
+            std::iter::once(entry.as_str()).chain(entry.split(|c: char| !c.is_alphanumeric()))
+        })
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
         .collect()
 }
 
-/// Every run of letters in `text`, with its span.
+/// Every run of letters in `text`, with its span. A hyphen between two letters stays in the word,
+/// so "twenty-two" is one compound and "twenty-second" never has its first half rewritten.
 fn tokenize(text: &str) -> Vec<Word> {
     let mut tokens = Vec::new();
     let mut start = None;
-    for (offset, character) in text.char_indices() {
-        if character.is_alphabetic() {
+    let mut characters = text.char_indices().peekable();
+    while let Some((offset, character)) = characters.next() {
+        let inside_hyphen = character == '-'
+            && start.is_some()
+            && characters
+                .peek()
+                .is_some_and(|(_, next)| next.is_alphabetic());
+        if character.is_alphabetic() || inside_hyphen {
             start.get_or_insert(offset);
         } else if let Some(begin) = start.take() {
             tokens.push(Word {
@@ -154,16 +163,15 @@ fn replacement(
     if !stands_alone(text, first) || protected.contains(&first.lower) {
         return None;
     }
-    let previous = at.checked_sub(1).map(|index| tokens[index].lower.as_str());
-    let before = at.checked_sub(2).map(|index| tokens[index].lower.as_str());
-    let next = tokens.get(at + 1).map(|word| word.lower.as_str());
-    if kept_in_context(tongue, previous, before, next) {
+    // A word that cannot begin a number ends the attempt here, so plain text is not scanned.
+    if kept_in_context(tongue, tokens, at) || !starts_number(tongue, &first.lower) {
         return None;
     }
     let mut end = at + 1;
     while let Some(next) = tokens.get(end)
         && whitespace_between(text, &tokens[end - 1], next)
         && !protected.contains(&next.lower)
+        && continues_number(tongue, &next.lower)
     {
         end += 1;
     }
@@ -177,12 +185,20 @@ fn replacement(
         Tongue::Other => return None,
     };
     let last = at + used.checked_sub(1)?;
-    if used == 0 || !stands_alone(text, &tokens[last]) {
+    if !stands_alone(text, &tokens[last]) {
         return None;
     }
     if tokens[at..=last]
         .iter()
         .any(|word| protected.contains(&word.lower))
+    {
+        return None;
+    }
+    // "twenty second" is an ordinal, so its first word stays; "twenty seconds" is a unit.
+    if matches!(tongue, Tongue::English)
+        && tokens.get(last + 1).is_some_and(|word| {
+            english_ordinal(&word.lower) && whitespace_between(text, &tokens[last], word)
+        })
     {
         return None;
     }
@@ -204,25 +220,114 @@ fn whitespace_between(text: &str, before: &Word, after: &Word) -> bool {
         .all(char::is_whitespace)
 }
 
-/// Whether the number word after `previous` belongs to an idiom where it stays a word:
-/// "half past three", "quarter to three", "halb drei", "Viertel nach drei", "gegen fünf Uhr".
-fn kept_in_context(
-    tongue: Tongue,
-    previous: Option<&str>,
-    before: Option<&str>,
-    next: Option<&str>,
-) -> bool {
+/// Whether the number word at `at` belongs to a phrase where it stays a word: "half past three",
+/// "quarter to three", "the other one", "no one", "halb drei", "fünf vor drei", "gegen fünf Uhr".
+fn kept_in_context(tongue: Tongue, tokens: &[Word], at: usize) -> bool {
+    let word = |index: Option<usize>| {
+        index
+            .and_then(|index| tokens.get(index))
+            .map(|word| word.lower.as_str())
+    };
+    let previous = word(at.checked_sub(1));
+    let before = word(at.checked_sub(2));
+    let next = word(Some(at + 1));
+    let after = word(Some(at + 2));
+    let current = tokens.get(at).map(|word| word.lower.as_str());
     match tongue {
         Tongue::English => {
-            matches!(previous, Some("past" | "to")) && matches!(before, Some("half" | "quarter"))
+            // "one" as a pronoun or determiner stays; as a count before a noun it becomes 1.
+            (current == Some("one") && next.is_none_or(|next| matches!(next, "of" | "day")))
+                || matches!(previous, Some("other" | "no"))
+                || (matches!(previous, Some("past" | "to"))
+                    && matches!(before, Some("half" | "quarter")))
         }
         Tongue::German => {
             matches!(previous, Some("halb"))
+                // The minute of a relative clock phrase: "fünf vor drei", "zehn nach acht".
+                || (matches!(next, Some("vor" | "nach")) && after.is_some_and(german_clock_word))
                 || (matches!(previous, Some("nach" | "vor" | "gegen"))
                     && next.is_none_or(|next| next == "uhr"))
         }
         Tongue::Other => false,
     }
+}
+
+/// A clock hour, or `halb`, that a relative German clock phrase counts towards.
+fn german_clock_word(word: &str) -> bool {
+    word == "halb" || german_value(word).is_some_and(|value| (1..=12).contains(&value))
+}
+
+/// Whether `word` can begin a number phrase, so a token that cannot is not scanned at all.
+fn starts_number(tongue: Tongue, word: &str) -> bool {
+    match tongue {
+        Tongue::English => english_starts_number(word),
+        Tongue::German => german_value(word).is_some(),
+        Tongue::Other => false,
+    }
+}
+
+fn english_starts_number(word: &str) -> bool {
+    if let Some((ten, unit)) = word.split_once('-') {
+        return english_ten(ten).is_some() && english_unit(unit).is_some();
+    }
+    word == "a"
+        || english_unit(word).is_some()
+        || english_teen(word).is_some()
+        || english_ten(word).is_some()
+}
+
+/// Whether a number phrase may go on with `word`: the number words themselves and the words that
+/// make a decimal, a percentage or a spoken digit run.
+fn continues_number(tongue: Tongue, word: &str) -> bool {
+    match tongue {
+        Tongue::English => {
+            matches!(word, "oh" | "percent" | "point")
+                || english_number_word(Some(word))
+                || english_starts_number(word)
+        }
+        Tongue::German => {
+            german_word(word).is_some() || matches!(word, "uhr" | "komma" | "prozent")
+        }
+        Tongue::Other => false,
+    }
+}
+
+/// The English ordinal words: a cardinal before one of these is part of an ordinal phrase.
+fn english_ordinal(word: &str) -> bool {
+    matches!(
+        word,
+        "first"
+            | "second"
+            | "third"
+            | "fourth"
+            | "fifth"
+            | "sixth"
+            | "seventh"
+            | "eighth"
+            | "ninth"
+            | "tenth"
+            | "eleventh"
+            | "twelfth"
+            | "thirteenth"
+            | "fourteenth"
+            | "fifteenth"
+            | "sixteenth"
+            | "seventeenth"
+            | "eighteenth"
+            | "nineteenth"
+            | "twentieth"
+            | "thirtieth"
+            | "fortieth"
+            | "fiftieth"
+            | "sixtieth"
+            | "seventieth"
+            | "eightieth"
+            | "ninetieth"
+            | "hundredth"
+            | "thousandth"
+            | "millionth"
+            | "billionth"
+    )
 }
 
 fn english_unit(word: &str) -> Option<u64> {
@@ -255,6 +360,11 @@ fn english_scale(word: &str) -> Option<u64> {
 /// The value of the number words at the start of `words`, and how many words it used.
 fn english_under_100(words: &[&str]) -> Option<(u64, usize)> {
     let first = *words.first()?;
+    if let Some((ten, unit)) = first.split_once('-') {
+        let ten = english_ten(ten)?;
+        let unit = english_unit(unit).filter(|unit| (1..=9).contains(unit))?;
+        return Some((ten + unit, 1));
+    }
     if let Some(value) = english_teen(first) {
         return Some((value, 1));
     }
@@ -318,10 +428,14 @@ fn english_value(words: &[&str]) -> Option<u64> {
     (at > 0).then_some(total)
 }
 
+/// The longest number phrase the grammar reads. A longer run of single digits is still one number;
+/// reading only this many words keeps a long digit run linear.
+const GRAMMAR_WORDS: usize = 16;
+
 /// The longest number phrase at the start of `words`.
 fn english_prefix(words: &[&str]) -> Option<(u64, usize)> {
     let mut best = None;
-    for end in 1..=words.len() {
+    for end in 1..=words.len().min(GRAMMAR_WORDS) {
         if let Some(value) = english_value(&words[..end]) {
             best = Some((value, end));
         }
@@ -369,9 +483,6 @@ fn english_time(words: &[&str]) -> Option<(usize, String)> {
 
 fn english_replacement(words: &[&str]) -> Option<(usize, String)> {
     let first = *words.first()?;
-    if first == "one" && !english_one_is_a_count(words.get(1).copied()) {
-        return None;
-    }
     if let Some(time) = english_time(words) {
         return Some(time);
     }
@@ -402,12 +513,7 @@ fn english_replacement(words: &[&str]) -> Option<(usize, String)> {
     None
 }
 
-/// Whether a lone "one" counts something ("one drive") rather than standing for a pronoun or a
-/// determiner ("the other one", "no one", "one of them", "one day").
-fn english_one_is_a_count(next: Option<&str>) -> bool {
-    next.is_some_and(|next| !matches!(next, "of" | "day"))
-}
-
+/// Whether a word continues an English number phrase.
 fn english_number_word(word: Option<&str>) -> bool {
     word.is_some_and(|word| {
         english_unit(word).is_some()
@@ -647,8 +753,16 @@ mod tests {
             ("the fifteenth", "the fifteenth"),
             ("half past three", "half past three"),
             ("quarter to three", "quarter to three"),
-            // Narrow: a hyphenated number word is left alone rather than half rewritten.
-            ("twenty-two", "twenty-two"),
+            // A hyphenated cardinal is one number; a hyphenated or multiword ordinal stays words.
+            ("twenty-two drives", "22 drives"),
+            ("twenty-three", "23"),
+            ("twenty second", "twenty second"),
+            ("twenty-second", "twenty-second"),
+            ("the twenty second of May", "the twenty second of May"),
+            ("twenty seconds", "20 seconds"),
+            // A pronoun or determiner "one" stays a word, whatever follows it.
+            ("the other one is enough", "the other one is enough"),
+            ("no one knows", "no one knows"),
         ]
     }
 
@@ -679,6 +793,10 @@ mod tests {
             ("halb drei", "halb drei"),
             ("Viertel nach drei", "Viertel nach drei"),
             ("gegen fünf Uhr", "gegen fünf Uhr"),
+            ("fünf vor drei", "fünf vor drei"),
+            ("zehn nach acht", "zehn nach acht"),
+            ("fünf vor halb drei", "fünf vor halb drei"),
+            ("fünf Minuten vor drei", "5 Minuten vor drei"),
             ("vor fünfzehn Minuten", "vor 15 Minuten"),
             ("nach fünf Stunden", "nach 5 Stunden"),
         ]
@@ -742,5 +860,20 @@ mod tests {
             assert_eq!(again.text, formatted, "{formatted}");
             assert_eq!(again.rewritten, 0, "{formatted}");
         }
+    }
+
+    #[test]
+    fn a_long_digit_run_become_one_number_and_a_plain_paragraph_is_left_alone() {
+        let digits = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        ];
+        let said: Vec<&str> = (0..40).map(|index| digits[index % 10]).collect();
+        let expected: String = (0..40)
+            .map(|index| char::from_digit(index % 10, 10).unwrap())
+            .collect();
+        assert_eq!(english(&said.join(" ")), expected);
+
+        let paragraph = "the quick brown fox jumps over a lazy dog ".repeat(400);
+        assert_eq!(english(&paragraph), paragraph);
     }
 }

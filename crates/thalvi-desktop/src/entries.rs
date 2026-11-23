@@ -149,7 +149,7 @@ pub struct LiveEntry {
 
 impl LiveEntry {
     /// The language the entry was told the speaker uses, when it names one; the number rules
-    /// read it, and a recognizer's own detection is not reported yet.
+    /// read it until the recognizer reports the language it detected.
     #[must_use]
     pub fn language(&self) -> Option<Language> {
         match &self.kind {

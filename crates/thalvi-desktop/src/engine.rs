@@ -507,6 +507,12 @@ pub struct Engine<R, W, C> {
     writing: Option<Writing>,
     /// How a delivered paste, submit or write writes its number words.
     number_rules: NumberRules,
+    /// The language of the capture's words: the entry hint until the recognizer or final pass
+    /// reports the language it detected.
+    language: Option<Language>,
+    /// Whether a Submit is settled after the merge or final pass, so its own confirmation comes
+    /// once that text exists.
+    submit_settled: bool,
     chat: Option<crate::chat::Chat>,
     speech: SpeechSource,
     http: reqwest::Client,
@@ -1161,6 +1167,8 @@ where
                 words: config.stt.phrases.phrases().to_vec(),
                 language: config.stt.entries.active_live().language(),
             },
+            language: config.stt.entries.active_live().language(),
+            submit_settled: false,
             chat: parts.chat,
             speech: config.speech_source(),
             http: parts.http,
@@ -1676,7 +1684,7 @@ where
 
     fn publish(&self, live: &Live<R::Session>) {
         self.set_state(match live.text.pending() {
-            Some(pending) if self.final_pass.is_some() && pending.route == CaptureRoute::Submit => {
+            Some(pending) if self.submit_settled && pending.route == CaptureRoute::Submit => {
                 EngineState::Capturing {
                     committed: pending.text.clone(),
                     partial: live.partial.clone(),
@@ -1871,6 +1879,8 @@ where
         let Some(session) = session else {
             return Err((Done::Failed(self.not_ready()), decided));
         };
+        self.language = self.number_rules.language;
+        self.submit_settled = false;
         let buffers_audio = session.buffers_audio();
         let live = Live {
             session,
@@ -2033,6 +2043,9 @@ where
                 None
             }
             Ok(RecognizerEvent::Final(text)) => {
+                if let Some(language) = live.session.language() {
+                    self.language = Some(language);
+                }
                 if has_words(&text) {
                     live.last_words = Instant::now();
                     self.lag(Event::FinalLag, live.heard.last.take());
@@ -2182,7 +2195,7 @@ where
         self.publish(live);
     }
 
-    fn on_final(&self, live: &mut Live<R::Session>, text: &str) -> Option<Done> {
+    fn on_final(&mut self, live: &mut Live<R::Session>, text: &str) -> Option<Done> {
         self.recorder
             .text(&live.dictation, format!("heard: {text}"));
         live.partial = None;
@@ -2208,9 +2221,17 @@ where
                 }
             }
             Ok(FinalStep::Armed(mut pending)) => {
-                // A submit's confirmation shows the text that will be sent. A final pass replaces
-                // the text, so its result is formatted when it settles instead.
-                if pending.route == CaptureRoute::Submit && self.final_pass.is_none() {
+                // A Submit whose text only exists after the merge or final pass is formatted and
+                // cleaned when it settles, and confirmed then. An ordinary submit's confirmation
+                // shows its formatted text, which is sent as shown.
+                let settled = pending.route == CaptureRoute::Submit
+                    && (self.final_pass.is_some()
+                        || (self.merging.is_some()
+                            && self.number_rules.as_digits
+                            && has_words(&pending.text)));
+                self.submit_settled = settled;
+                if pending.route == CaptureRoute::Submit && !settled && self.number_rules.as_digits
+                {
                     pending.text = self.text_with_numbers(pending.route, &pending.text);
                     if let Some(stored) = live.text.pending_mut() {
                         stored.text.clone_from(&pending.text);
@@ -2597,14 +2618,16 @@ where
         decided: Instant,
     ) -> CaptureOutcome {
         let outcome = match outcome {
-            CaptureOutcome::Accepted(request) => {
+            CaptureOutcome::Accepted(request)
+                if self.number_rules.as_digits && self.formats_on_delivery(request.route) =>
+            {
                 CaptureOutcome::Accepted(self.delivered_with_numbers(&request))
             }
             other => other,
         };
         match outcome {
             CaptureOutcome::Accepted(request)
-                if self.final_pass.is_some() && request.route == CaptureRoute::Submit =>
+                if request.route == CaptureRoute::Submit && self.submit_settled =>
             {
                 self.confirm_final_submit(request).await
             }
@@ -2942,6 +2965,7 @@ where
                 let asked = Instant::now();
                 let heard = secondary::transcribe(&http, &entry.settings, &sent)
                     .await
+                    .map(|transcript| transcript.text)
                     .map_err(Unheard::from);
                 Answer {
                     index,
@@ -3014,6 +3038,7 @@ where
     /// the text that will be sent. Paste is cleaned after its pause, in [`Self::conclude`].
     fn cleans_before_confirm(&self, pending: &PendingEnding) -> bool {
         pending.route == CaptureRoute::Submit
+            && !self.submit_settled
             && self.final_pass.is_none()
             && self
                 .writing
@@ -3127,11 +3152,18 @@ where
         }
     }
 
+    /// Whether delivery formats this route's text: a task never is, and an ordinary submit was
+    /// formatted before its confirmation, so only the settled ones still wait for formatting.
+    fn formats_on_delivery(&self, route: CaptureRoute) -> bool {
+        matches!(route, CaptureRoute::Paste | CaptureRoute::Write)
+            || (route == CaptureRoute::Submit && self.submit_settled)
+    }
+
     fn text_with_numbers(&self, route: CaptureRoute, text: &str) -> String {
         if !self.number_rules.as_digits || route == CaptureRoute::Task {
             return text.to_owned();
         }
-        let formatted = numbers::format(text, self.number_rules.language, &self.number_rules.words);
+        let formatted = numbers::format(text, self.language, &self.number_rules.words);
         if formatted.rewritten > 0 {
             self.recorder.metric(
                 Event::Numbers,

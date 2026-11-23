@@ -143,11 +143,18 @@ the overlay reports a full frame. A refusal, timeout, or lost frame keeps the te
 An accepted result still crosses `FinishEmpty`.
 The model checks delivery admission. It does not check correctness of recognition or a reply's time.
 
-The numbers-as-digits formatter (#588) rewrites a delivered text synchronously in
-`Engine::finish_transcript` and in a submit's pending text before the existing `Prepare`,
-cleanup, preview and confirmation steps; with a final pass it formats the settled replacement
-text. It adds no await, control read, queue step or write to cancellation state, and a task is
-never formatted, so the model actions and bounds are unchanged.
+The numbers-as-digits formatter (#588) rewrites text synchronously and adds no
+await, control read, queue step or write to cancellation state; a task is never
+formatted. An ordinary submit's pending text is formatted before the existing
+`Prepare`, cleanup and ending pause, and delivery sends it as shown. A merged
+submit whose setting is on is not formatted or cleaned before the merge: after
+`SecondaryReturns` its merged text (or the live fallback) is formatted, cleaned
+if enabled, then shown whole and confirmed through the existing preview and
+review awaits, which the model's `settled` variable selects. A final pass
+formats its settled replacement before cleanup and confirmation, as before.
+Delivery formats a paste, a write and a settled submit; it never formats an
+ordinary submit again. The model checks delivery admission, not whether the
+formatted text is right.
 
 The five checked invariants have these exact meanings:
 
@@ -214,11 +221,11 @@ Temurin JRE `21.0.9+10` in the same user cache, verifying archive SHA-256
 Other platforms need a user-installed Java on PATH. No system package install
 is performed. Downloads require network access only on the first run.
 
-A faithful run here explores 98,912 distinct states (293,297 generated) with no
+A faithful run here explores 242,147 distinct states (751,104 generated) with no
 error; a warm full check takes about 2 s, and the self-test about 10 s. The extra
-states are the dictation-cleanup stage, which a submit takes before its confirmation.
-Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
-receipts for this model, not acceptance criteria for a changed model.
+states are the dictation-cleanup stage and the settled merged submit's cleanup,
+preview and confirmation. Each TLC invocation has a 120 s limit and 512 MB heap limit.
+State counts are receipts for this model, not acceptance criteria for a changed model.
 
 A passing run deletes its `/var/tmp/thalvi-formal-...` folder. A counterexample, a
 run blocked once the folder exists (not source drift), and `--self-test` keep it and print `EVIDENCE=/var/tmp/thalvi-formal-...`

@@ -379,6 +379,64 @@ async fn openai_plain_json_still_works() {
 }
 
 #[tokio::test]
+async fn openai_transcriptions_report_the_detected_language_by_code_or_name() {
+    let cases = [
+        (
+            r#"{"text":"plain answer","language":"de"}"#,
+            false,
+            Some("de"),
+        ),
+        (
+            r#"{"text":"plain answer","language":"German"}"#,
+            false,
+            Some("de"),
+        ),
+        (r#"{"text":"plain answer"}"#, false, None),
+        (
+            "data: {\"type\":\"transcript.text.done\",\"text\":\"hello\",\"language\":\"fr\"}\n\n",
+            true,
+            Some("fr"),
+        ),
+        (
+            "data: {\"type\":\"transcript.text.done\",\"text\":\"hello\",\"language\":\"spanish\"}\n\n",
+            true,
+            Some("es"),
+        ),
+    ];
+    for (reply, sse, expected) in cases {
+        let (url, _rx) = if sse {
+            serve_sse(reply).await
+        } else {
+            serve(200, reply).await
+        };
+        let recognizer = OpenAiRecognizer::new(
+            "local",
+            live(&url, ""),
+            reqwest::Client::new(),
+            Recorder::disabled().metrics(),
+        );
+        let mut session = recognizer.connect().await.expect("connected");
+        session.send_frame(&ramp(0)).await.expect("buffered frame");
+        session.finish_audio().await.expect("capture ended");
+        loop {
+            if let RecognizerEvent::Final(_) =
+                tokio::time::timeout(Duration::from_secs(10), session.next_event())
+                    .await
+                    .expect("transcription completes")
+                    .expect("final transcription")
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            session.language().map(Language::code),
+            expected,
+            "{reply:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn chosen_live_openai_entry_buffers_and_forwards_the_whole_capture() {
     let (url, mut rx) = serve_sse(
         "data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"transcript.text.done\",\"text\":\"hello\"}\n\n",
@@ -632,13 +690,19 @@ async fn each_api_gets_its_request_and_a_24_khz_wav_of_the_whole_capture() {
     ];
     for (api, path, reply, first_header, first_body, audio_field) in cases {
         let (url, mut rx) = serve(200, reply).await;
-        let text = transcribe(
+        let transcript = transcribe(
             &reqwest::Client::new(),
             &settings(&url, api, ""),
             &[ramp(0), ramp(1)],
         )
         .await;
-        assert_eq!(text.as_deref(), Ok("polished words"), "{api:?}");
+        assert_eq!(
+            transcript
+                .as_ref()
+                .map(|transcript| transcript.text.as_str()),
+            Ok("polished words"),
+            "{api:?}"
+        );
 
         let captured = received(&mut rx).await.expect("a request");
         assert_eq!(captured.path, path);

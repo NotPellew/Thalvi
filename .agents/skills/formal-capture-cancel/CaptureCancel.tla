@@ -5,11 +5,13 @@ CONSTANTS MaxControls, Scenario, DropCompletionGuard, ForgetEarlierStop, LeakExt
 Commands == {"cancel", "pause", "resume", "toggle", "apply", "restart", "quit"}
 VARIABLES phase, queue, sent, off, quit, preEnds, ended, intentOff,
           stopRequested, cancelPending, cueDone, cueAccepted, closeDone,
-          secondary, writing, cleaning, result, delivered, extras, extra, merged, starting, finalMode
+          secondary, writing, cleaning, result, delivered, extras, extra, merged, starting, finalMode,
+          settled
 vars == <<phase, queue, sent, off, quit, preEnds, ended, intentOff,
           stopRequested, cancelPending, cueDone, cueAccepted, closeDone,
-          secondary, writing, cleaning, result, delivered, extras, extra, merged, starting, finalMode>>
-extraVars == <<extras, extra, merged, starting, finalMode>>
+          secondary, writing, cleaning, result, delivered, extras, extra, merged, starting, finalMode,
+          settled>>
+extraVars == <<extras, extra, merged, starting, finalMode, settled>>
 
 NextOff(c, old) == CASE c = "pause" -> TRUE
                        [] c = "resume" -> FALSE
@@ -26,8 +28,9 @@ Init == /\ phase = "pre"
         /\ preEnds = FALSE /\ ended = FALSE /\ intentOff = FALSE
         /\ stopRequested = FALSE /\ cancelPending = FALSE
         /\ cueDone = FALSE /\ cueAccepted = FALSE /\ closeDone = FALSE
-        \* `cleaning` is opt-in dictation cleanup of a submit, before its confirmation is shown.
-        \* A paste is cleaned after the ending instead, which this one stage also stands for.
+        \* `cleaning` is opt-in dictation cleanup. An ordinary submit is cleaned before its
+        \* confirmation is shown; a submit settled by the merge is cleaned after it. A paste is
+        \* cleaned after the ending instead, which this one stage also stands for.
         \* It runs only when an explicit write does not.
         /\ secondary \in BOOLEAN /\ writing \in BOOLEAN /\ cleaning \in BOOLEAN /\ (~writing \/ ~cleaning)
         /\ result = "none" /\ delivered = FALSE
@@ -40,6 +43,11 @@ Init == /\ phase = "pre"
         /\ finalMode \in {"off", "paste", "submit"}
         /\ (finalMode # "off" => ~secondary /\ ~extras)
         /\ (finalMode = "submit" => ~writing)
+        \* `settled`: numbers formatting is on and this is a Submit, so its text only exists
+        \* after the merge. It is formatted, cleaned and shown before delivery; an ordinary
+        \* submit is formatted before its ending pause instead.
+        /\ settled \in BOOLEAN
+        /\ (settled => (secondary /\ finalMode = "off"))
 
 \* A producer can enqueue between any two receives, including drain iterations.
 \* Theme-only Apply retunes after capture. Apply is outside the ending controls in Send.
@@ -74,7 +82,8 @@ PreEmpty == /\ phase = "pre" /\ queue = <<>>
             /\ extra' = IF ~preEnds /\ extras THEN "open" ELSE extra
             /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                            stopRequested, cancelPending, cueDone, cueAccepted,
-                           closeDone, secondary, writing, cleaning, result, delivered, extras, merged, starting, finalMode>>
+                           closeDone, secondary, writing, cleaning, result, delivered, extras, merged, starting,
+                           finalMode, settled>>
 
 \* The engine is Pending here: capture, a submit's cleanup, recognizer release, second pass or writing.
 Receive == /\ phase \in {"active", "cleaning", "ending", "finalPass", "finalCleanup", "preview", "confirm", "secondary", "writing"}
@@ -99,13 +108,15 @@ Receive == /\ phase \in {"active", "cleaning", "ending", "finalPass", "finalClea
 Loaded == /\ phase = "active" /\ starting /\ ~cancelPending /\ starting' = FALSE
           /\ UNCHANGED <<phase, queue, sent, off, quit, preEnds, ended, intentOff,
                          stopRequested, cancelPending, cueDone, cueAccepted,
-                         closeDone, secondary, writing, cleaning, result, delivered, extras, extra, merged, finalMode>>
+                         closeDone, secondary, writing, cleaning, result, delivered, extras, extra, merged, finalMode,
+                         settled>>
 LoadFailed == /\ phase = "active" /\ starting /\ ~cancelPending
               /\ phase' = "finish" /\ result' = "failed" /\ starting' = FALSE
               /\ extra' = Released(extra)
               /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                              stopRequested, cancelPending, cueDone, cueAccepted,
-                             closeDone, secondary, writing, cleaning, delivered, extras, merged, finalMode>>
+                             closeDone, secondary, writing, cleaning, delivered, extras, merged, finalMode,
+                             settled>>
 
 \* A submit with cleanup on is cleaned before its confirmation is shown. The confirmation is the
 \* ending pause, so this await is before Accept. A cancel here yields a cancelled result and
@@ -124,7 +135,8 @@ CleanupReturns == /\ phase = "cleaning"
                   /\ extra' = IF cancelPending THEN Released(extra) ELSE extra
                   /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                  stopRequested, cancelPending, cueDone, cueAccepted,
-                                 closeDone, secondary, writing, delivered, extras, merged, starting, finalMode>>
+                                 closeDone, secondary, writing, delivered, extras, merged, starting, finalMode,
+                                 settled>>
 
 \* Abstract the pre-accept capture awaits: observed cancellation cannot accept. Engine::conclude
 \* sends Finish to the extras when the merge will run, and cancels them when it will not.
@@ -132,14 +144,16 @@ Accept == /\ phase = "active" /\ ~starting /\ ~cancelPending /\ (~cleaning \/ se
           /\ extra' = IF extras /\ ~secondary THEN Released(extra) ELSE extra
           /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                          stopRequested, cancelPending, cueDone, cueAccepted,
-                         closeDone, secondary, writing, cleaning, result, delivered, extras, merged, starting, finalMode>>
+                         closeDone, secondary, writing, cleaning, result, delivered, extras, merged, starting, finalMode,
+                         settled>>
 \* Every end without an accept (cancel, failure, "never mind") cancels the extras in conclude.
 ActiveCancelled == /\ phase = "active" /\ cancelPending
                    /\ phase' = "finish" /\ result' = "cancelled"
                    /\ extra' = Released(extra)
                    /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                   stopRequested, cancelPending, cueDone, cueAccepted,
-                                  closeDone, secondary, writing, cleaning, delivered, extras, merged, starting, finalMode>>
+                                  closeDone, secondary, writing, cleaning, delivered, extras, merged, starting, finalMode,
+                                  settled>>
 
 AfterEnding == IF finalMode # "off" THEN "finalPass"
                ELSE IF secondary THEN "secondary" ELSE IF writing THEN "writing" ELSE "finish"
@@ -150,7 +164,7 @@ CueReturns == /\ (phase = "ending" \/ closeDone) /\ ~cueDone
               /\ cueDone' = TRUE /\ cueAccepted' = ~cancelPending
               /\ UNCHANGED <<phase, queue, sent, off, quit, preEnds, ended, intentOff,
                              stopRequested, cancelPending, closeDone, secondary, writing, cleaning,
-                             result, delivered, extras, extra, merged, starting, finalMode>>
+                             result, delivered, extras, extra, merged, starting, finalMode, settled>>
 
 \* Accepted end_with awaits only recognizer release, polling cancellation first.
 \* The runner's completion drain still guards admission when release returns Accepted.
@@ -162,22 +176,27 @@ CloseReturns == /\ phase = "ending" /\ ~closeDone
                 /\ extra' = IF cancelPending THEN Released(extra) ELSE extra
                 /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                stopRequested, cancelPending, cueDone, cueAccepted,
-                               secondary, writing, cleaning, delivered, extras, merged, starting, finalMode>>
+                               secondary, writing, cleaning, delivered, extras, merged, starting, finalMode,
+                               settled>>
 
 \* Second-pass completion and writing completion are distinct cancellation-first awaits. A cancel
 \* here cancels the extras still running (Streams::cancel); a merge that ran leaves the ones it did
-\* not wait for to finish on their own; they feed no capture outcome. Cleanup is not modeled.
+\* not wait for to finish on their own; they feed no capture outcome. A settled submit formats the
+\* merged text and then cleans it, shows it whole and confirms it; no other merge is confirmed.
 SecondaryReturns == /\ phase = "secondary"
                     /\ phase' = IF cancelPending THEN "finish"
+                                 ELSE IF settled /\ cleaning THEN "finalCleanup"
+                                 ELSE IF settled THEN "preview"
                                  ELSE IF writing THEN "writing" ELSE "finish"
                     /\ result' = IF cancelPending THEN "cancelled"
-                                  ELSE IF writing THEN "none" ELSE "accepted"
+                                  ELSE IF settled \/ writing THEN "none" ELSE "accepted"
                     /\ extra' = IF cancelPending THEN Released(extra)
                                  ELSE IF extra = "open" THEN "late" ELSE extra
                     /\ merged' = (~cancelPending /\ extras)
                     /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                    stopRequested, cancelPending, cueDone, cueAccepted,
-                                   closeDone, secondary, writing, cleaning, delivered, extras, starting, finalMode>>
+                                   closeDone, secondary, writing, cleaning, delivered, extras, starting, finalMode,
+                                   settled>>
 
 \* The final-pass task may run during close; an early, late or failed reply cannot deliver.
 \* The engine waits under cancellation before passing one immutable text to cleanup or confirmation.
@@ -194,9 +213,10 @@ FinalReturns == /\ phase = "finalPass"
                                closeDone, secondary, writing, cleaning, delivered, extraVars>>
 
 FinalCleanupReturns == /\ phase = "finalCleanup"
-                       /\ phase' = IF cancelPending \/ finalMode # "submit" THEN "finish" ELSE "preview"
-                       /\ result' = IF cancelPending THEN "cancelled"
-                                     ELSE IF finalMode = "submit" THEN "none" ELSE "accepted"
+                       /\ LET confirm == finalMode = "submit" \/ settled IN
+                          /\ phase' = IF cancelPending \/ ~confirm THEN "finish" ELSE "preview"
+                          /\ result' = IF cancelPending THEN "cancelled"
+                                        ELSE IF confirm THEN "none" ELSE "accepted"
                        /\ UNCHANGED <<queue, sent, off, quit, preEnds, ended, intentOff,
                                       stopRequested, cancelPending, cueDone, cueAccepted,
                                       closeDone, secondary, writing, cleaning, delivered, extraVars>>
@@ -245,7 +265,7 @@ TypeOK == /\ phase \in {"pre", "active", "cleaning", "ending", "finalPass", "fin
           /\ queue \in Seq(Commands) /\ Len(queue) <= MaxControls /\ sent \in 0..MaxControls
           /\ \A b \in {off, quit, preEnds, ended, intentOff, stopRequested, cancelPending, cueDone,
                        cueAccepted, closeDone, secondary, writing, cleaning, delivered, extras,
-                       merged, starting} : b \in BOOLEAN
+                       merged, starting, settled} : b \in BOOLEAN
           /\ finalMode \in {"off", "paste", "submit"}
           /\ result \in {"none", "failed", "cancelled", "accepted"}
           /\ extra \in {"none", "open", "released", "late"}
