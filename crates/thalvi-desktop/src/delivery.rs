@@ -499,6 +499,11 @@ mod tests {
             let (finished, seen) = finish(FakeHost::default(), accepted(route, text)).await;
             let finished = finished.unwrap();
             assert!(finished.delivered, "{route:?} {text}");
+            assert_eq!(
+                finished.text_delivery,
+                Some(Delivered::InWindow),
+                "{route:?}"
+            );
             assert_eq!(finished.notice, "Delivered.", "{route:?} {text}");
             assert_eq!(
                 seen,
@@ -571,6 +576,11 @@ mod tests {
             .await;
             let finished = finished.unwrap();
             assert!(finished.delivered, "{route:?}");
+            assert_eq!(
+                finished.text_delivery,
+                Some(Delivered::OnClipboard),
+                "{route:?}"
+            );
             assert_eq!(finished.notice, notice, "{route:?}");
             assert_eq!(
                 seen,
