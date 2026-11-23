@@ -544,7 +544,6 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
         return Ok(());
     }
     // GTK's backend is fixed when it starts, which the builder below does.
-    #[cfg(target_os = "linux")]
     Desktop::prepare_toolkit().map_err(|error| error.to_string())?;
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
