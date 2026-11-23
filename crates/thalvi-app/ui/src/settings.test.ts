@@ -759,6 +759,10 @@ describe("the wake word picker", () => {
     expect(problem("Wake model (dictation)")).toBe("The download broke off.");
     expect(badge("Wake model (dictation)")).toBe("Not downloaded");
     expect(within(rowOf("Wake model (dictation)"), "Download").hidden).toBe(false);
+    within(rowOf("Wake model (dictation)"), "Download").click();
+    await settle();
+    expect(badge("Wake model (dictation)")).toBe("Ready");
+    expect(problem("Wake model (dictation)")).toBe("");
   });
 
   it("does not download a dictation head the user picks that is already cached", async () => {
