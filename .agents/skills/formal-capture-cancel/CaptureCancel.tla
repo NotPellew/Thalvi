@@ -35,7 +35,7 @@ Init == /\ phase = "pre"
         /\ secondary \in BOOLEAN /\ writing \in BOOLEAN /\ cleaning \in BOOLEAN /\ (~writing \/ ~cleaning)
         /\ result = "none" /\ delivered = FALSE
         \* `extras`: streaming extras are on. Without `secondary` they exist but the merge does not run
-        \* (a scratched capture, or one with no words of its own).
+        \* (a scratched capture, one with no words of its own, or the merge switched off).
         /\ extras \in BOOLEAN /\ extra = "none" /\ merged = FALSE
         \* `starting`: the recognizer loads a model on this computer, so Engine::start waits for the
         \* load with no time limit (a remote recognizer is abandoned after READY_TIMEOUT: a failure).

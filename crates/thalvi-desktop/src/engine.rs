@@ -497,8 +497,8 @@ pub struct Engine<R, W, C> {
     pauses: EndingPauses,
     scripts: Vec<Script>,
     limits: CaptureLimits,
-    /// The extras that are switched on and the chat endpoint that merges their texts; none when no extra is.
-    merging: Option<Merging>,
+    /// The extras that are switched on, and the chat endpoint that merges their texts when merge is on.
+    extras: Option<Extras>,
     final_pass: Option<Arc<FinalPass<R>>>,
     final_tasks: JoinSet<()>,
     final_record: Option<FinalPassRecord>,
@@ -506,7 +506,7 @@ pub struct Engine<R, W, C> {
     streaming: Vec<StreamingExtra<R>>,
     /// The streaming extras of the capture in progress.
     streams: Streams,
-    /// Extra requests the merge did not wait for, one set per capture. Each runs as its own
+    /// Extra requests the delivery did not wait for, one set per capture. Each runs as its own
     /// task, so its latency is its own, and is recorded when a loop of the engine collects it.
     /// Dropping the engine aborts them.
     recorded_only: Vec<JoinSet<Answer>>,
@@ -817,18 +817,20 @@ impl Extra {
     }
 }
 
-/// The extras that are switched on, and the chat endpoint that merges their texts with the live text.
+/// The extras that are switched on, and the chat endpoint that merges their texts when merge is on.
 #[derive(Clone)]
-struct Merging {
-    writing: Writing,
+struct Extras {
     /// The extras that transcribe the finished capture.
     uploads: Vec<ExtraEntry>,
     /// Every extra, the uploads first and then the streaming ones, in the order of their slots.
-    extras: Vec<Extra>,
+    all: Vec<Extra>,
+    /// The endpoint the merge asks; `None` while merge is off, which records the extras instead.
+    merge: Option<Writing>,
 }
 
-impl Merging {
-    /// `None` unless an extra is on; the config guarantees a chat endpoint then.
+impl Extras {
+    /// `None` unless an extra is on. A merge with no endpoint cannot be built: the config refuses
+    /// merge on with an extra on and no endpoint, and an endpoint-less writing setting is dropped.
     fn of<'a>(
         config: &DesktopConfig,
         streaming: impl Iterator<Item = &'a LiveEntry>,
@@ -839,11 +841,14 @@ impl Merging {
             .map(Extra::upload)
             .chain(streaming.map(Extra::streaming))
             .collect();
-        let writing = config.writing.clone().filter(Writing::has_endpoint)?;
+        let merge = config
+            .writing
+            .clone()
+            .filter(|writing| config.stt.merge && Writing::has_endpoint(writing));
         (!extras.is_empty()).then_some(Self {
-            writing,
             uploads,
-            extras,
+            all: extras,
+            merge,
         })
     }
 }
@@ -1138,8 +1143,8 @@ where
             state: state_rx,
             level: level_rx,
         };
-        let merging = if config.stt.entries.final_pass().is_none() {
-            Merging::of(config, parts.extras.iter().map(|extra| &extra.entry))
+        let extras = if config.stt.entries.final_pass().is_none() {
+            Extras::of(config, parts.extras.iter().map(|extra| &extra.entry))
         } else {
             None
         };
@@ -1156,7 +1161,7 @@ where
             pauses: config.ending_pause,
             scripts: config.scripts.clone(),
             limits: config.capture_limits,
-            merging,
+            extras,
             final_pass,
             final_tasks: JoinSet::new(),
             final_record: None,
@@ -1616,10 +1621,10 @@ where
         self.final_dictation = self.final_pass.as_ref().map(|_| woke.dictation.clone());
         self.final_record = None;
         self.streams = self
-            .merging
+            .extras
             .as_ref()
-            .map_or_else(Streams::default, |merging| {
-                Streams::start(&self.streaming, merging.uploads.len(), &woke.dictation)
+            .map_or_else(Streams::default, |extras| {
+                Streams::start(&self.streaming, extras.uploads.len(), &woke.dictation)
             });
         let outcome = match self.start(frames, &woke, held.as_ref()).await {
             Ok((mut live, backlog, released)) => {
@@ -1922,9 +1927,9 @@ where
     fn keeps_sent(&self, buffers_audio: bool) -> bool {
         self.final_pass.is_some()
             || self
-                .merging
+                .extras
                 .as_ref()
-                .is_some_and(|merging| !merging.uploads.is_empty())
+                .is_some_and(|extras| !extras.uploads.is_empty())
             || self.recorder.kinds().audio
             || buffers_audio
     }
@@ -2235,7 +2240,7 @@ where
                 // shows its formatted text, which is sent as shown.
                 let settled = pending.route == CaptureRoute::Submit
                     && (self.final_pass.is_some()
-                        || (self.merging.is_some()
+                        || (self.merge_on()
                             && self.number_rules.as_digits
                             && has_words(&pending.text)));
                 self.submit_confirmation = if settled {
@@ -2577,10 +2582,10 @@ where
             Done::Accepted(request) => {
                 self.gate.set_enabled(false);
                 // A task acts on the text the user heard before it ran; a merge could pick another action.
-                let merging = self.merging.clone().filter(|_| {
+                let extras = self.extras.clone().filter(|_| {
                     !scratched && has_words(&request.text) && request.route != CaptureRoute::Task
                 });
-                if merging.is_some() {
+                if extras.is_some() {
                     self.streams.finish(request.route, has_endings);
                 } else {
                     self.drop_streams();
@@ -2588,9 +2593,9 @@ where
                 let final_work =
                     self.start_final_pass(&request, &mut sent, dictation, ended, scratched);
                 if self.end_with(Cue::Accepted, decided, session, true).await {
-                    let resolved = match merging {
-                        Some(merging) => {
-                            self.merge(&merging, request, &sent, has_endings, dictation)
+                    let resolved = match extras {
+                        Some(extras) => {
+                            self.deliver_with_extras(extras, request, &sent, has_endings, dictation)
                                 .await
                         }
                         None => match final_work {
@@ -2742,7 +2747,8 @@ where
     /// when that cannot be done faithfully. The route is the live transcript's and stays it.
     async fn merge(
         &mut self,
-        merging: &Merging,
+        writing: &Writing,
+        extras: &Extras,
         request: CaptureRequest,
         sent: &[Frame],
         has_endings: bool,
@@ -2752,15 +2758,15 @@ where
             route: request.route,
         });
         let started = Instant::now();
-        let mut running = self.ask_all(&merging.uploads, &request, sent, has_endings, dictation);
+        let mut running = self.ask_all(&extras.uploads, &request, sent, has_endings, dictation);
         let mut streams = std::mem::take(&mut self.streams);
-        let mut slots: Vec<Option<Judged>> = merging.extras.iter().map(|_| None).collect();
+        let mut slots: Vec<Option<Judged>> = extras.all.iter().map(|_| None).collect();
         while slots.iter().any(Option::is_none) {
             tokio::select! {
                 biased;
                 _ = self.cancel.changed() => {
                     self.recorded_only.push(streams.cancel());
-                    return self.merge_cancelled(merging, &slots, started, request.text);
+                    return self.merge_cancelled(writing, extras, &slots, started, request.text);
                 }
                 () = tokio::time::sleep_until(started + merge::EXTRAS_WAIT) => break,
                 answer = next_recorded(&mut self.recorded_only) => self.record_late(answer),
@@ -2770,7 +2776,7 @@ where
         }
         let mut inputs = vec![request.text.clone()];
         let mut left_out = Vec::new();
-        for (extra, slot) in merging.extras.iter().zip(&slots) {
+        for (extra, slot) in extras.all.iter().zip(&slots) {
             match slot.as_ref().and_then(|judged| judged.agreed.as_ref()) {
                 Some(text) => inputs.push(text.clone()),
                 None => left_out.push(match slot {
@@ -2789,12 +2795,12 @@ where
                 chat: None,
             }
         } else {
-            self.ask_merge(&merging.writing, &inputs, started + merge::LIMIT)
+            self.ask_merge(writing, &inputs, started + merge::LIMIT)
                 .await
         };
         if matches!(asked, Asked::Cancelled) {
             self.recorded_only.push(streams.cancel());
-            return self.merge_cancelled(merging, &slots, started, request.text);
+            return self.merge_cancelled(writing, extras, &slots, started, request.text);
         }
         let merged = matches!(asked, Asked::Merged { .. });
         for judged in slots.iter().flatten() {
@@ -2804,7 +2810,7 @@ where
         self.recorded_only.push(streams.tasks);
         match asked {
             Asked::Merged { text, chat } => {
-                self.merge_metric("merged", started, merging, inputs.len(), Some(chat));
+                self.merge_metric("merged", started, writing, inputs.len(), Some(chat));
                 self.recorder.text(dictation, format!("merged: {text}"));
                 if !left_out.is_empty() {
                     self.tell_merge(format!("Merged without some texts: {left_out}."));
@@ -2815,7 +2821,7 @@ where
                 })
             }
             Asked::Skipped { why, chat } => {
-                self.merge_metric(why.outcome(), started, merging, inputs.len(), chat);
+                self.merge_metric(why.outcome(), started, writing, inputs.len(), chat);
                 self.tell_merge(format!(
                     "Merge skipped: {}. Used the live text.",
                     why.reason()
@@ -2824,6 +2830,48 @@ where
             }
             Asked::Cancelled => CaptureOutcome::cancelled_with(request.text),
         }
+    }
+
+    /// Delivers an accepted capture: merged with the extras' texts when merge is on, or at once
+    /// with the extras only recorded.
+    async fn deliver_with_extras(
+        &mut self,
+        extras: Extras,
+        request: CaptureRequest,
+        sent: &[Frame],
+        has_endings: bool,
+        dictation: &Dictation,
+    ) -> CaptureOutcome {
+        if let Some(writing) = &extras.merge {
+            self.merge(writing, &extras, request, sent, has_endings, dictation)
+                .await
+        } else {
+            self.record_only(&extras, &request, sent, has_endings, dictation);
+            CaptureOutcome::Accepted(request)
+        }
+    }
+
+    /// Sends the capture to every extra and records what each answers, without waiting: the live
+    /// text is delivered at once.
+    fn record_only(
+        &mut self,
+        extras: &Extras,
+        request: &CaptureRequest,
+        sent: &[Frame],
+        has_endings: bool,
+        dictation: &Dictation,
+    ) {
+        let running = self.ask_all(&extras.uploads, request, sent, has_endings, dictation);
+        let streams = std::mem::take(&mut self.streams);
+        self.recorded_only.push(running);
+        self.recorded_only.push(streams.tasks);
+    }
+
+    /// Whether the chat model merges the extras' texts before delivery.
+    fn merge_on(&self) -> bool {
+        self.extras
+            .as_ref()
+            .is_some_and(|extras| extras.merge.is_some())
     }
 
     fn tell_merge(&mut self, note: String) {
@@ -2835,16 +2883,17 @@ where
     /// nothing is delivered.
     fn merge_cancelled(
         &self,
-        merging: &Merging,
+        writing: &Writing,
+        extras: &Extras,
         slots: &[Option<Judged>],
         started: Instant,
         text: String,
     ) -> CaptureOutcome {
-        for (index, (extra, slot)) in merging.extras.iter().zip(slots).enumerate() {
+        for (index, (extra, slot)) in extras.all.iter().zip(slots).enumerate() {
             match slot {
                 Some(judged) => self.record_answer(judged, false),
                 // A streaming extra's cancelled answer is recorded when its task ends.
-                None if index >= merging.uploads.len() => {}
+                None if index >= extras.uploads.len() => {}
                 None => self.record_extra(extra, "cancelled", started.elapsed(), false),
             }
         }
@@ -2853,7 +2902,7 @@ where
             .flatten()
             .filter(|judged| judged.agreed.is_some())
             .count();
-        self.merge_metric("cancelled", started, merging, heard + 1, None);
+        self.merge_metric("cancelled", started, writing, heard + 1, None);
         CaptureOutcome::cancelled_with(text)
     }
 
@@ -2940,7 +2989,7 @@ where
         &self,
         outcome: &str,
         started: Instant,
-        merging: &Merging,
+        writing: &Writing,
         inputs: usize,
         chat: Option<Duration>,
     ) {
@@ -2949,7 +2998,7 @@ where
             outcome,
             Some(started.elapsed()),
             json!({
-                "model": merging.writing.model(),
+                "model": writing.model(),
                 "inputs": inputs,
                 "chat_ms": chat.map(millis),
             }),
@@ -3042,7 +3091,7 @@ where
         self.record_extra(&answer.extra, judged.outcome, answer.took, used);
     }
 
-    /// Records an extra that finished after the merge did not wait for it.
+    /// Records an extra that finished after the delivery did not wait for it.
     fn record_late(&self, answer: Answer) {
         let judged = self.judge(answer);
         self.record_answer(&judged, false);

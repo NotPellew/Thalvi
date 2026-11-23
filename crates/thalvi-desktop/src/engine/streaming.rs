@@ -1,4 +1,4 @@
-//! Runs the streaming recognizers switched on as extras beside the live one: each hears the capture's frames in a task of its own and gives its final text to the merge.
+//! Runs the streaming recognizers switched on as extras beside the live one: each hears the capture's frames in a task of its own and gives its final text to the merge or the recording.
 
 use std::collections::VecDeque;
 use std::pin::pin;
@@ -92,7 +92,7 @@ impl Streams {
         }
     }
 
-    /// Tells every extra the live capture was accepted; they flush while the merge waits.
+    /// Tells every extra the live capture was accepted; they flush while the delivery goes on.
     pub(super) fn finish(&self, route: CaptureRoute, has_endings: bool) {
         let at = Instant::now();
         for line in &self.lines {

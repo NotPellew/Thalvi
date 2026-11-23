@@ -99,9 +99,14 @@ function device(model?: string, active = true): OnDeviceEntry {
   return { kind: "on_device", id: "on-device", name: "On this computer", active, ...(model ? { model } : {}) };
 }
 
+/** The speech settings with the merge switch on unless a case says otherwise. */
+function stt(entries: SpeechEntry[], merge = true): Settings["stt"] {
+  return { merge, entries };
+}
+
 /** Settings whose live entry in use is the on-device model, beside a realtime speech server entry not in use. */
 function local(model?: string): Settings {
-  return { ...SETTINGS, stt: { entries: [device(model), { ...SERVER, active: false }] } };
+  return { ...SETTINGS, stt: stt([device(model), { ...SERVER, active: false }]) };
 }
 
 function deviceOf(settings: Settings): OnDeviceEntry {
@@ -189,7 +194,7 @@ describe("pages", () => {
         id: "recognition",
         title: "Recognition",
         groups: {
-          "Live recognizer": ["live recognizer"],
+          "Live recognizer": ["live recognizer", "merge with the chat model"],
           "Streaming servers": ["streaming servers · speech servers"],
           "After-you-stop servers": ["after-you-stop servers · speech servers"],
           "On this computer": ["on this computer"],
@@ -921,7 +926,7 @@ describe("the word list", () => {
   const cant = (name: string): string => `${name} can't use the word list`;
 
   async function openWordList(phrases?: string[]) {
-    const stub = await open({ ...SETTINGS, stt: { entries: [device()], ...(phrases ? { phrases } : {}) } });
+    const stub = await open({ ...SETTINGS, stt: { ...stt([device()]), ...(phrases ? { phrases } : {}) } });
     goTo("recognition");
     return stub;
   }
@@ -975,7 +980,7 @@ describe("the word list", () => {
   });
 
   it("offers the list to direct recognizers that announce phrase boosting", async () => {
-    const stub = stubBackend({ ...SETTINGS, stt: { entries: [{ ...SERVER, active: true }] } });
+    const stub = stubBackend({ ...SETTINGS, stt: stt([{ ...SERVER, active: true }]) });
     stub.backend.wordListSupport.mockResolvedValue(false);
     mountSettings(root, stub.backend);
     await settle();
@@ -992,7 +997,7 @@ describe("the word list", () => {
     ["no model", undefined, FAVOURED],
     ["a model folder", "/models/mine", FAVOURED],
   ] as const)("with %s active, the word list hint says whether that recognizer uses it", async (_name, model, expected) => {
-    const stub = stubBackend({ ...SETTINGS, stt: { entries: [device(model)] } });
+    const stub = stubBackend({ ...SETTINGS, stt: stt([device(model)]) });
     stub.backend.listSpeechModels.mockResolvedValue(listedModels());
     mountSettings(root, stub.backend);
     await settle();
@@ -1005,9 +1010,7 @@ describe("the word list", () => {
   it("updates the hint when Use switches between a recognizer that ignores the list and one that favours it", async () => {
     const stub = stubBackend({
       ...SETTINGS,
-      stt: {
-        entries: [device("whisper_turbo_cpu"), { ...device("nemotron_160ms", false), id: "nemotron", name: "Nemotron Streaming" }],
-      },
+      stt: stt([device("whisper_turbo_cpu"), { ...device("nemotron_160ms", false), id: "nemotron", name: "Nemotron Streaming" }]),
     });
     stub.backend.listSpeechModels.mockResolvedValue(listedModels());
     mountSettings(root, stub.backend);
@@ -1067,7 +1070,7 @@ const WRITING = { url: "http://127.0.0.1:8000/v1", model: "glimmer" };
 
 /** A realtime recognizer in use, another recognizer, the on-device model, and two extra recognizers, with a writing endpoint set. */
 function several(): Settings {
-  return { ...SETTINGS, writing: WRITING, stt: { entries: [{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...OPENAI }, { ...META }] } };
+  return { ...SETTINGS, writing: WRITING, stt: stt([{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...OPENAI }, { ...META }]) };
 }
 
 function entryNamed(name: string): HTMLElement {
@@ -1121,7 +1124,7 @@ describe("the Recognition page", () => {
       ["Word list", "Names and terms, added one at a time.", null, null],
     ]);
     const live = recognition().querySelector(".grp") as HTMLElement;
-    expect(Array.from(live.children).filter((node) => !(node as HTMLElement).hidden).map((node) => node.className)).toEqual(["row", "next-dictation", "next-dictation extras"]);
+    expect(Array.from(live.children).filter((node) => !(node as HTMLElement).hidden).map((node) => node.className)).toEqual(["row", "next-dictation", "row", "next-dictation extras"]);
     expect(summaryText()).toBe("Next dictation: Realtime speech server · text arrives as you speak · Ready");
     expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
     for (const box of recognition().querySelectorAll<HTMLElement>(".grp .what small")) expect(box.textContent.length).toBeLessThanOrEqual(HINT_BUDGET);
@@ -1135,7 +1138,7 @@ describe("the Recognition page", () => {
     [" on this computer ", " on this computer "],
     ["Laptop model", "Laptop model (on this computer)"],
   ])("lists every live-kind entry in the Live recognizer drop-down by name and group, unless the name says the group (%j), with the one in use chosen", async (name, label) => {
-    await open({ ...several(), stt: { entries: [{ ...SERVER }, { ...GATEWAY }, { ...OPENAI }, { ...device(undefined, false), name }] } });
+    await open({ ...several(), stt: stt([{ ...SERVER }, { ...GATEWAY }, { ...OPENAI }, { ...device(undefined, false), name }]) });
     goTo("recognition");
     expect(Array.from(liveSelect().options).map((option) => [option.value, option.textContent])).toEqual([
       ["direct", "Realtime speech server (streaming)"],
@@ -1153,7 +1156,7 @@ describe("the Recognition page", () => {
     ["OpenAI", "api.openai.com · key saved", "Extra on"],
     ["Meta", "meta.example", "Extra off"],
   ])("shows %s as one flat row: name, where it runs, its role and Edit", async (name, where, role) => {
-    await open({ ...several(), stt: { entries: [...several().stt.entries, { ...GATEWAY }] } });
+    await open({ ...several(), stt: stt([...several().stt.entries, { ...GATEWAY }]) });
     goTo("recognition");
     const row = entryNamed(name);
     expect(row.querySelector(".unit")?.textContent).toBe(where);
@@ -1183,7 +1186,7 @@ describe("the Recognition page", () => {
   });
 
   it("switches the Live recognizer from the drop-down, applying only that, and keeps focus on it", async () => {
-    const stub = await open({ ...several(), stt: { entries: several().stt.entries.map((entry) => (entry.id === "cybrex2" ? { ...entry, extra: true } : entry)) } });
+    const stub = await open({ ...several(), stt: stt(several().stt.entries.map((entry) => (entry.id === "cybrex2" ? { ...entry, extra: true } : entry))) });
     goTo("recognition");
     liveSelect().focus();
     use("Cybrex2");
@@ -1281,7 +1284,7 @@ describe("the Recognition page", () => {
   });
 
   it("numbers a default name that is taken", async () => {
-    await open({ ...several(), stt: { entries: [{ ...SERVER, name: "Realtime transcription (WebSocket)" }, { ...META, name: "Extra recognizer" }] } });
+    await open({ ...several(), stt: stt([{ ...SERVER, name: "Realtime transcription (WebSocket)" }, { ...META, name: "Extra recognizer" }]) });
     goTo("recognition");
     await addServer("realtime");
     expect(control("Name", "input").value).toBe("Realtime transcription (WebSocket) 2");
@@ -1399,7 +1402,7 @@ describe("the Recognition page", () => {
     ["the next row's Edit", "Cybrex2", [{ ...SERVER }, { ...CYBREX, has_key: false }, { ...CYBREX, id: "third", name: "Third", has_key: false }], "Edit Third"],
     ["the group's + when it is now empty", "Meta", [{ ...SERVER }, { ...META }], "Add an extra-only server"],
   ] as const)("moves focus after Remove to %s", async (_case, name, entries, expected) => {
-    await open({ ...several(), stt: { entries: [...entries] } });
+    await open({ ...several(), stt: stt([...entries]) });
     goTo("recognition");
     edit(name);
     await settle();
@@ -1416,10 +1419,10 @@ describe("Extra switches", () => {
     goTo("recognition");
     return stub;
   }
-  const withExtras = (writing: Settings["writing"], extras: readonly string[] = []): Settings => ({
+  const withExtras = (writing: Settings["writing"], extras: readonly string[] = [], merge = true): Settings => ({
     ...several(),
     writing,
-    stt: { entries: several().stt.entries.map((entry) => (extras.includes(entry.name) ? { ...entry, extra: true } : entry)) },
+    stt: stt(several().stt.entries.map((entry) => (extras.includes(entry.name) ? { ...entry, extra: true } : entry)), merge),
   });
   const savedEntry = (stub: Awaited<ReturnType<typeof open>>, name: string): SpeechEntry | undefined =>
     stub.applied().at(-1)?.stt.entries.find((entry) => entry.name === name);
@@ -1469,9 +1472,9 @@ describe("Extra switches", () => {
   });
 
   it("can select a final pass without a chat model", async () => {
-    const stub = await open({ ...several(), writing: null, stt: {
-      entries: several().stt.entries.map((entry) => entry.kind === "extra" ? { ...entry, active: false } : entry),
-    } });
+    const stub = await open({ ...several(), writing: null, stt: stt(
+      several().stt.entries.map((entry) => entry.kind === "extra" ? { ...entry, active: false } : entry),
+    ) });
     goTo("recognition");
     const toggle = entryNamed("OpenAI").querySelector<HTMLInputElement>(".final-pass input");
     if (!toggle) throw new Error("Missing final-pass switch");
@@ -1496,7 +1499,7 @@ describe("Extra switches", () => {
     ["several on", WRITING, [], [true, true], "Extra: OpenAI, Meta. The chat model merges their texts with the live text."],
     ["an on-device one on", WRITING, ["On this computer"], [false, false], "Extra: On this computer. The chat model merges its text with the live text. Each on-device extra loads its own model, which adds memory and processing."],
   ] as const)("sums up the extras with %s", async (_case, writing, live, [openai, meta], text) => {
-    await openSeveral({ ...withExtras(writing, live), stt: { entries: withExtras(writing, live).stt.entries.map((entry) => (entry.id === "openai" ? { ...entry, active: openai } : entry.id === "meta" ? { ...entry, active: meta } : entry)) } });
+    await openSeveral({ ...withExtras(writing, live), stt: stt(withExtras(writing, live).stt.entries.map((entry) => (entry.id === "openai" ? { ...entry, active: openai } : entry.id === "meta" ? { ...entry, active: meta } : entry))) });
     expect(extrasText()).toBe(text);
   });
 
@@ -1561,6 +1564,84 @@ describe("Extra switches", () => {
   });
 });
 
+describe("Merge with the chat model", () => {
+  const mergeTick = (): HTMLInputElement =>
+    recognition().querySelector<HTMLInputElement>('input[aria-label="Merge with the chat model"]') as HTMLInputElement;
+  const mergeState = (): HTMLElement => recognition().querySelector(".merge-state") as HTMLElement;
+  async function openRecognition(settings: Settings = several()) {
+    const stub = await open(settings);
+    goTo("recognition");
+    return stub;
+  }
+
+  it("turns the merge on and off, saying what happens while it is off", async () => {
+    const stub = await openRecognition();
+    expect(mergeTick().checked).toBe(true);
+    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
+    flip(mergeTick());
+    await settle();
+    expect(stub.applied().at(-1)?.stt.merge).toBe(false);
+    expect(mergeTick().checked).toBe(false);
+    expect(extrasText()).toBe("Merge off: dictation pastes the live text at once; extras are only recorded.");
+    flip(mergeTick());
+    await settle();
+    expect(stub.applied().at(-1)?.stt.merge).toBe(true);
+    expect(mergeTick().checked).toBe(true);
+    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
+  });
+
+  it("leaves every Extra switch usable without an endpoint while it is off", async () => {
+    await openRecognition({ ...several(), writing: null, stt: stt(several().stt.entries, false) });
+    expect(mergeTick().checked).toBe(false);
+    expect(extrasText()).toBe("Merge off: dictation pastes the live text at once; extras are only recorded.");
+    for (const name of ["Cybrex2", "Meta", "OpenAI", "On this computer"]) {
+      expect([name, tickOf(name).disabled]).toEqual([name, false]);
+    }
+    expect(needsChat().hidden).toBe(true);
+  });
+
+  it("refuses turning it on without a chat endpoint and leads to the endpoint setting", async () => {
+    await openRecognition({ ...several(), writing: null, stt: stt(several().stt.entries, false) });
+    flip(mergeTick());
+    await settle();
+    expect(mergeTick().checked).toBe(false);
+    expect(needsChat().hidden).toBe(false);
+    expect(needsChat().textContent).toBe("Extra switches need a chat model. Go to the endpoint setting");
+    button("Go to the endpoint setting").click();
+    expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("chat");
+    expect(document.activeElement).toBe(control("Writing endpoint address", "input"));
+  });
+
+  it("locks the extra switches again while it is on without an endpoint", async () => {
+    await openRecognition({ ...several(), writing: null });
+    expect(mergeTick().checked).toBe(true);
+    expect(needsChat().hidden).toBe(false);
+    expect(tickOf("Meta").disabled).toBe(true);
+    expect(tickOf("OpenAI").disabled).toBe(false);
+  });
+
+  it("shows off and disabled while a final pass is set and keeps the stored value", async () => {
+    const stub = await openRecognition();
+    const finalOf = (name: string): HTMLInputElement | null =>
+      entryNamed(name).querySelector<HTMLInputElement>(".final-pass input");
+    const pick = async (name: string): Promise<void> => {
+      const toggle = finalOf(name);
+      if (!toggle) throw new Error(`Missing final-pass switch for ${name}`);
+      flip(toggle);
+      await settle();
+    };
+    await pick("Meta");
+    expect(mergeTick().checked).toBe(false);
+    expect(mergeTick().disabled).toBe(true);
+    expect(mergeState().textContent).toBe("A final pass is set");
+    expect(stub.applied().at(-1)?.stt.merge).toBe(true);
+    await pick("Meta");
+    expect(mergeTick().checked).toBe(true);
+    expect(mergeTick().disabled).toBe(false);
+    expect(mergeState().textContent).toBe("");
+  });
+});
+
 /** High risk: #558. An extra switched on by mistake sends the user's audio to another server unnoticed. */
 describe("roles on the Recognition page against the fake backend", () => {
   type Step =
@@ -1576,7 +1657,7 @@ describe("roles on the Recognition page against the fake backend", () => {
   );
   const flags = (entry: SpeechEntry): [boolean, boolean] => [entry.active, entry.kind !== "extra" && entry.extra === true];
   const byId = (settings: Settings): Map<string, SpeechEntry> => new Map(settings.stt.entries.map((entry) => [entry.id, entry]));
-  const START: Settings = { ...SETTINGS, writing: WRITING, stt: { entries: [{ ...SERVER }, { ...CYBREX, has_key: false }, device(undefined, false), { ...META }] } };
+  const START: Settings = { ...SETTINGS, writing: WRITING, stt: stt([{ ...SERVER }, { ...CYBREX, has_key: false }, device(undefined, false), { ...META }]) };
 
   async function act(backend: ReturnType<typeof fakeBackend>, next: Step): Promise<string | null> {
     const rows = Array.from(recognition().querySelectorAll<HTMLElement>(".trow.server"));
@@ -1677,7 +1758,7 @@ describe("the fake backend's rule for extra recognizers", () => {
   const put = async (backend: ReturnType<typeof fakeBackend>, next: Settings): Promise<void> => {
     await backend.saveSettings(settingsPatch(await backend.getSettings(), next));
   };
-  const settings = (endpoint: Settings["writing"], on: boolean): Settings => ({ ...SETTINGS, writing: endpoint, stt: { entries: [{ ...SERVER }, { ...OPENAI, active: on }] } });
+  const settings = (endpoint: Settings["writing"], on: boolean): Settings => ({ ...SETTINGS, writing: endpoint, stt: stt([{ ...SERVER }, { ...OPENAI, active: on }]) });
 
   it.each([
     ["no writing model was set", null, "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."],
@@ -1694,8 +1775,15 @@ describe("the fake backend's rule for extra recognizers", () => {
     ["the entry in use cannot be an extra", writing, { ...SERVER, extra: true }, { ...CYBREX }, 'Speech server "Realtime speech server" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first.'],
   ] as const)("refuses a live entry's extra: %s", async (_case, endpoint, first, second, message) => {
     const backend = fakeBackend(new URLSearchParams());
-    await expect(put(backend, { ...SETTINGS, writing: endpoint, stt: { entries: [first, second] } })).rejects.toThrow(message);
-    await expect(put(backend, { ...SETTINGS, writing, stt: { entries: [{ ...SERVER }, { ...CYBREX, extra: true }] } })).resolves.toBeUndefined();
+    await expect(put(backend, { ...SETTINGS, writing: endpoint, stt: stt([first, second]) })).rejects.toThrow(message);
+    await expect(put(backend, { ...SETTINGS, writing, stt: stt([{ ...SERVER }, { ...CYBREX, extra: true }]) })).resolves.toBeUndefined();
+  });
+
+  it("allows a switched-on extra without a writing model while the merge is off", async () => {
+    const backend = fakeBackend(new URLSearchParams());
+    const unmerged = { ...settings(null, false), stt: stt([{ ...SERVER }, { ...OPENAI, active: true }], false) };
+    await expect(put(backend, unmerged)).resolves.toBeUndefined();
+    await expect(put(backend, { ...settings(null, true), stt: stt([{ ...SERVER }, { ...OPENAI, active: true }]) })).rejects.toThrow("Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off.");
   });
 
   it("treats numbers as digits alone as no writing endpoint", async () => {

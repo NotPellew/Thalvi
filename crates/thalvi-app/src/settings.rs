@@ -164,8 +164,9 @@ fn check_keys(
         .map_err(|error| format!("{error} The keys that were set before still work."))
 }
 
-/// Refuses removing the writing endpoint while an extra recognizer is on: the loader would refuse
-/// it too, but only as "needs a writing model", which does not say what to do first.
+/// Refuses removing the writing endpoint while an extra recognizer is on and the chat model merges
+/// its text: the loader would refuse it too, but only as "needs a writing model", which does not
+/// say what to do first. With the merge off the extras are only recorded, so it may go.
 fn check_endpoint_kept(settings: &mut Value, current: &DesktopConfig) -> Result<(), String> {
     let removed = current.writing.as_ref().is_some_and(Writing::has_endpoint)
         && settings
@@ -180,7 +181,12 @@ fn check_endpoint_kept(settings: &mut Value, current: &DesktopConfig) -> Result<
         };
         entry.get(flag) == Some(&Value::Bool(true))
     });
-    if removed && extra_on {
+    // A form without the switch loads as an upgrade does: merge on exactly when an extra is on.
+    let merge = settings
+        .pointer("/stt/merge")
+        .and_then(Value::as_bool)
+        .unwrap_or(extra_on);
+    if removed && extra_on && merge {
         return Err(
             "Switch off the extra recognizers before removing the writing model.".to_owned(),
         );
@@ -1099,6 +1105,45 @@ mod tests {
             // Switching them off and removing the model together is allowed.
             Store::check(with(&base, upload, false, None), &on).unwrap();
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_off_lets_extras_run_without_a_writing_model_and_merge_on_needs_it() {
+        let (store, dir) = store("merge-extras");
+        let endpoint = json!({"url": "http://127.0.0.1:8000/v1", "model": "m"});
+        let with = |merge: bool, on: bool, writing: Option<&Value>| {
+            let mut settings = settings_json(&store_defaults()).unwrap();
+            settings["stt"] = json!({"merge": merge, "entries": [
+                {"kind": "on_device", "id": "d", "name": "D", "active": true},
+                {"kind": "extra", "id": "x", "name": "X", "active": on,
+                    "address": "http://127.0.0.1:9/v1", "model": "m"},
+            ]});
+            match writing {
+                Some(writing) => settings["writing"] = writing.clone(),
+                None => {
+                    settings.as_object_mut().unwrap().remove("writing");
+                }
+            }
+            settings
+        };
+
+        Store::check(with(false, true, None), &store_defaults())
+            .expect("merge off needs no writing model");
+        assert_eq!(
+            Store::check(with(true, true, None), &store_defaults()).unwrap_err(),
+            "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."
+        );
+
+        let merged = store
+            .save(with(true, true, Some(&endpoint)), &store_defaults())
+            .unwrap();
+        Store::check(with(false, true, None), &merged)
+            .expect("merge off lets the writing model go");
+        assert_eq!(
+            Store::check(with(true, true, None), &merged).unwrap_err(),
+            "Switch off the extra recognizers before removing the writing model."
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -756,6 +756,8 @@ pub fn check(entry: &Value) -> Result<(), String> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawStt {
     #[serde(default)]
+    pub(crate) merge: Option<bool>,
+    #[serde(default)]
     entries: Option<Vec<RawEntry>>,
     #[serde(default)]
     secondary: Option<SecondaryStt>,

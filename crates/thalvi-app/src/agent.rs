@@ -1600,6 +1600,32 @@ mod tests {
     }
 
     #[test]
+    fn the_merge_switch_round_trips_through_settings_get_and_set() {
+        let config = r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}, "stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "extra", "id": "x", "name": "X", "active": true, "address": "http://127.0.0.1:9/v1", "model": "m"}]}}"#;
+        let rig = Rig::new("merge", config);
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["stt"]["merge"],
+            true,
+            "a config from before the switch keeps merging"
+        );
+        let set = rig.set(json!({"stt": {"merge": false}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        assert!(!rig.fake.config().stt.merge);
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["stt"]["merge"],
+            false
+        );
+        let set = rig.set(json!({"stt": {"merge": true}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        assert!(rig.fake.config().stt.merge);
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["stt"]["merge"],
+            true
+        );
+        assert_eq!(rig.fake.saves.store.load().unwrap(), rig.fake.config());
+    }
+
+    #[test]
     fn writing_apps_are_checked_and_set_like_settings() {
         let rig = Rig::new(
             "writing-apps",
