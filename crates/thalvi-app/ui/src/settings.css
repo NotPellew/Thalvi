@@ -25,6 +25,7 @@ button.quiet { color: var(--button-quiet); }
 
 main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .pages { flex: 1; overflow-y: auto; padding: var(--pages-pad-y) var(--pages-pad-x); }
+section[data-page]:focus { outline: none; }
 h3 { margin: 0 0 var(--h3-margin-bottom); padding-bottom: var(--h3-pad-bottom); font: var(--weight-label) var(--fs-13) var(--mono); letter-spacing: var(--track-page); color: var(--h3-color); text-shadow: var(--h3-shadow); background: var(--h3-rule); }
 h4 { margin: var(--h4-margin-top) 0 var(--h4-margin-bottom); font: var(--h4-weight) var(--h4-size) var(--h4-family); color: var(--h4-color); letter-spacing: var(--track-section); }
 
@@ -80,7 +81,7 @@ input[type="checkbox"]:checked::after { transform: translateX(var(--check-travel
 .table > .editor { padding: 0 var(--editor-pad-x) var(--editor-pad-bottom); border: var(--hairline) solid var(--line); border-radius: var(--radius-editor); background: var(--editor-bg); }
 .editor .about { margin: var(--editor-about-margin-top) 0 var(--editor-about-margin-bottom); font-size: var(--fs-12); }
 .fields { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--fields-gap-y) var(--fields-gap-x); }
-.fields > .row { grid-column: span 6; flex-direction: column; align-items: stretch; gap: var(--field-gap); padding: 0; border: 0; min-height: 0; }
+.fields > .row { grid-column: span 6; flex-direction: column; align-items: stretch; gap: var(--field-gap); padding: 0; border: 0; }
 .fields > .row.half { grid-column: span 3; }
 .fields > .row.third { grid-column: span 2; }
 .fields > .row > .what { max-width: none; font-size: var(--fs-12); }

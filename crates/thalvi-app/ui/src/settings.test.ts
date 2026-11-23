@@ -252,6 +252,29 @@ describe("pages", () => {
     const labels = Array.from(root.querySelectorAll<HTMLElement>(".row")).map((row) => row.dataset["label"]);
     expect(labels.filter((label, at) => labels.indexOf(label) !== at)).toEqual([]);
   });
+
+  it("moves focus off a hidden page's picker to the newly opened page, leaving the picker unchanged and unsaved", async () => {
+    const stub = await open();
+    goTo("app");
+    const channel = control("Update channel", "select");
+    const before = channel.value;
+    channel.focus();
+    expect(document.activeElement).toBe(channel);
+    stub.openPage("overlay");
+    const section = root.querySelector<HTMLElement>('section[data-page="overlay"]');
+    expect(document.activeElement).toBe(section);
+    expect(section?.hidden).toBe(false);
+    expect(channel.value).toBe(before);
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("leaves focus on the sidebar button when a page opens", async () => {
+    const stub = await open();
+    const button = root.querySelector<HTMLElement>('nav [data-page="app"]');
+    button?.focus();
+    stub.openPage("overlay");
+    expect(document.activeElement).toBe(button);
+  });
 });
 
 describe("applying a change", () => {
@@ -763,6 +786,40 @@ describe("the wake word picker", () => {
     await settle();
     expect(badge("Wake model (dictation)")).toBe("Ready");
     expect(problem("Wake model (dictation)")).toBe("");
+  });
+
+  it.each([
+    ["presses Download", "stays", "Download"],
+    ["picks the model", "stays", "Download"],
+    ["presses Download", "moves to Details", "Details"],
+  ] as const)("when the user %s, focus %s and the download fails, focus is on %s", async (start, move, expected) => {
+    const uncached = { ...SETTINGS, wake: { ...SETTINGS.wake, capture: { model: "hey_mycroft", threshold: 0.5 } } };
+    const stub = await openCapture(start === "presses Download" ? uncached : SETTINGS);
+    let fail = (): void => { throw new Error("download has not started"); };
+    stub.backend.downloadWakeModel.mockImplementationOnce(() => new Promise<void>((_, reject) => { fail = () => { reject(new Error("offline")); }; }));
+    const picker = control("Wake model (dictation)", "select");
+    const download = within(rowOf("Wake model (dictation)"), "Download");
+    const folder = rowOf("Threshold (dictation)").closest("details")?.querySelector("summary");
+    if (start === "presses Download") {
+      download.focus();
+      download.click();
+    } else {
+      picker.focus();
+      choose(picker, "hey_mycroft");
+    }
+    await settle();
+    expect(download.hidden).toBe(true);
+    expect(document.activeElement).toBe(picker);
+    if (move === "moves to Details") folder?.focus();
+    fail();
+    await settle();
+
+    expect(problem("Wake model (dictation)")).toBe("offline");
+    expect(download.hidden).toBe(false);
+    expect(document.activeElement).toBe(expected === "Details" ? folder : download);
+    (document.activeElement as HTMLElement).click();
+    await settle();
+    expect(stub.backend.downloadWakeModel).toHaveBeenCalledTimes(expected === "Details" ? 1 : 2);
   });
 
   it("does not download a dictation head the user picks that is already cached", async () => {

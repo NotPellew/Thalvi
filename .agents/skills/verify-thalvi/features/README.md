@@ -51,8 +51,12 @@ It needs `npm ci` in `crates/thalvi-app/ui` and the headless shell
 (`npm exec --prefix crates/thalvi-app/ui -- playwright-core install --only-shell chromium`).
 Each element is scrolled into view vertically only; it must be visible,
 unoccluded and wholly inside the window, and no two listed elements may
-overlap. Exit 1 names each failure. Then check the same page in the real
-window at 400×680 by screenshot (desktop.md, Drive: Window size).
+overlap. Exit 1 names each failure. `PAGE>BUTTON` clicks that button after
+opening the page (a form: `Recognition>Add a streaming server`), and
+`LOOK=holo` or `LOOK=neon` picks the look. Then check the same page in the real
+window at 400×680 by screenshot (desktop.md, Drive: Window size). Chromium
+loads each size fresh, but the real window can keep a layout from its previous
+width: also open the page or form wide and shrink the window to the narrow size.
 400×680 is the narrowest size the guides use; 780×680 is the window's opening
 size; nothing sets a minimum.
 
