@@ -95,10 +95,10 @@ impl WhisperBackend {
     pub fn description(self) -> &'static str {
         match self {
             Self::Cpu => {
-                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts. Text appears only after you stop speaking, and the word list is ignored. On the CPU it is slow: the text can take as long as you spoke, or longer. The language is detected automatically; only English and German have been tried."
+                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts. Text appears only after you stop speaking. On the CPU it is slow: the text can take as long as you spoke, or longer. The language is detected automatically; only English and German have been tried."
             }
             Self::Vulkan => {
-                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts on your graphics card through Vulkan. Text appears while you speak, because the capture so far is read again on the GPU about every second, which is extra GPU work; the final text replaces it after you stop. The word list is ignored. Its speed on your GPU is untested. If no GPU is found, it says so; pick the CPU entry then. The language is detected automatically; only English and German have been tried."
+                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts on your graphics card through Vulkan. Text appears while you speak, because the capture so far is read again on the GPU about every second, which is extra GPU work; the final text replaces it after you stop. Its speed on your GPU is untested. If no GPU is found, it says so; pick the CPU entry then. The language is detected automatically; only English and German have been tried."
             }
         }
     }
@@ -557,7 +557,7 @@ struct Shared<L: Launcher> {
     metrics: Metrics,
     name: String,
     /// The word list as the helper's prompt, `, `-joined; `None` when it is empty.
-    prompt: Option<String>,
+    prompt: Option<Arc<str>>,
     steps: watch::Sender<Step>,
     /// The model and voice detector, once their checksums have been verified, which a restart need not repeat.
     files: OnceCell<(PathBuf, PathBuf)>,
@@ -613,7 +613,8 @@ impl<L: Launcher> WhisperRecognizer<L> {
                 store,
                 metrics,
                 name: backend.name().to_owned(),
-                prompt: (!phrases.is_empty()).then(|| phrases.phrases().join(", ")),
+                prompt: (!phrases.is_empty())
+                    .then(|| Arc::from(phrases.phrases().join(", "))),
                 steps: watch::channel(Step::Reading).0,
                 files: OnceCell::new(),
                 slot: Mutex::new(Slot::Idle),
@@ -963,6 +964,7 @@ impl<L: Launcher> WhisperSession<L> {
         let (sender, reply) = oneshot::channel();
         let running = Arc::clone(&self.running);
         let shared = Arc::clone(&self.shared);
+        let prompt = self.shared.prompt.clone();
         let at = Instant::now();
         let task = tokio::spawn(async move {
             let seconds = audio_seconds(frames.len());
@@ -970,7 +972,12 @@ impl<L: Launcher> WhisperSession<L> {
                 Ok(String::new())
             } else {
                 let audio = wav(frames.as_flattened());
-                let fields = [("response_format", "json"), ("language", "auto")];
+                let mut fields = vec![("response_format", "json"), ("language", "auto")];
+                if let Some(prompt) = &prompt {
+                    // VAD keeps the prompt out of a capture with no speech, which whisper would echo.
+                    fields.push(("vad", "true"));
+                    fields.push(("prompt", prompt));
+                }
                 let timeout = reading.timeout(frames.len());
                 infer(&running.client, running.port, &fields, &audio, timeout).await
             };

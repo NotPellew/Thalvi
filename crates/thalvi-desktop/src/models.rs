@@ -984,7 +984,7 @@ impl ModelStore {
                 license: "MIT",
                 languages: &["English", "German"],
                 cached,
-                word_list: false,
+                word_list: true,
             })
             .to_vec()
     }
