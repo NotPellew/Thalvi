@@ -2,7 +2,7 @@
 
 import { vi } from "vitest";
 import { applyPatch, type SettingsPatch } from "./patch.ts";
-import type { AudioStatus, Backend, ChatBuild, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, LiveEntry, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, ChatBuild, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, LiveEntry, LookStyles, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 export const CHAT_MODEL: ChatModelInfo = {
   title: "Qwen3 4B · Q4_K_M", size: 2533261953, license: "Apache-2.0",
@@ -47,6 +47,16 @@ export const WAKE_MODELS_INFO: WakeModelInfo[] = [
   { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false, threshold: 0.5 },
   { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false, threshold: 0.5 },
 ];
+
+/** The custom properties a test needs to see applied; the real set comes from the look model. */
+export const LOOK_STYLES: LookStyles = {
+  properties: [],
+  looks: {
+    gunmetal: { "--neon": "#6bf8ff", "--bg": "#0f1012", "--editor-bg": "#101418" },
+    holo: { "--neon": "#6bf8ff", "--bg": "#0c1820", "--editor-bg": "#101418" },
+    neon: { "--neon": "light-dark(#007a43, #2bff88)", "--bg": "light-dark(#e8eff7, #020617)", "--editor-bg": "#ffffff" },
+  },
+};
 
 const UNIFIED_LANGUAGES = [
   "Bulgarian",
@@ -113,7 +123,7 @@ export const WHISPER: SpeechModelInfo = {
 };
 
 /** A backend whose calls are spies and whose events the test emits. */
-export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }) {
+export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }, lookStyles: LookStyles = LOOK_STYLES) {
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
@@ -143,6 +153,8 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     onAudio: vi.fn((listener: (audio: AudioStatus) => void) => audioListeners.push(listener)),
     onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
+    getLookStyles: vi.fn<(styles?: LookStyles) => Promise<LookStyles>>(() => Promise.resolve(structuredClone(lookStyles))),
+    settingsReady: vi.fn(() => Promise.resolve()),
     saveSettings: vi.fn<(patch: SettingsPatch) => Promise<void>>((patch) => {
       held = Object.assign({ writing: null, microphone: null }, applyPatch(held, patch));
       applied.push(structuredClone(held));
