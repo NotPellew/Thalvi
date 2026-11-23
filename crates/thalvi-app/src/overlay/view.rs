@@ -266,30 +266,6 @@ impl View {
             },
         };
         view.set_status(status, 1.0);
-        view.tone = match state {
-            Sample::Live => Tone::Live,
-            Sample::Quiet => Tone::Quiet,
-            Sample::Working => Tone::Working,
-            Sample::Pending => Tone::Pending,
-            Sample::Done => Tone::Done,
-            Sample::Failed => Tone::Failed,
-        };
-        view.line = match state {
-            Sample::Live => Line::Words {
-                committed: "Hello from Thalvi".to_owned(),
-                partial: String::new(),
-                caret: true,
-            },
-            Sample::Quiet => Line::Notice("Waiting for quiet.".to_owned()),
-            Sample::Working => Line::Notice("Working on it.".to_owned()),
-            Sample::Pending => Line::Words {
-                committed: "Hold on".to_owned(),
-                partial: String::new(),
-                caret: false,
-            },
-            Sample::Done => Line::Notice("✓ Pasted into kitty. Pasted.".to_owned()),
-            Sample::Failed => Line::Notice("Couldn't send it".to_owned()),
-        };
         view.level = 0.5;
         if let Some(wave) = &mut view.wave {
             wave.smoothed = 0.5;
