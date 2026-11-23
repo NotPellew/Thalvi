@@ -177,7 +177,128 @@ fn recognizer(live: OpenAiLive) -> OpenAiRecognizer {
         live,
         reqwest::Client::new(),
         Recorder::disabled().metrics(),
+        &WordList::default(),
     )
+}
+
+fn active(live: OpenAiLive) -> LiveEntry {
+    LiveEntry {
+        id: "live".to_owned(),
+        name: "Local speech".to_owned(),
+        kind: LiveKind::OpenAi(live),
+        extra: false,
+    }
+}
+
+fn chosen(live: OpenAiLive, words: &WordList) -> Chosen {
+    Chosen::new(
+        &active(live),
+        ModelStore::in_dir("unused"),
+        reqwest::Client::new(),
+        Recorder::disabled().metrics(),
+        words,
+        Adapters::default(),
+        std::path::Path::new("unused"),
+    )
+}
+
+/// One buffered capture through the entry's chosen recognizer, and what it delivered.
+async fn dictate_chosen(chosen: &Chosen) -> Result<String, RecognizerError> {
+    let mut session = chosen.connect().await.expect("connected");
+    session.send_frame(&ramp(0)).await.expect("buffered frame");
+    session.finish_audio().await.expect("capture ended");
+    loop {
+        if let RecognizerEvent::Final(text) = session.next_event().await? {
+            return Ok(text);
+        }
+    }
+}
+
+/// The content of the multipart part `name`, if the request has one.
+fn sent_part(captured: &Captured, name: &str) -> Option<String> {
+    parts(captured)
+        .into_iter()
+        .find(|(headers, _)| headers.contains(&format!("name=\"{name}\"")))
+        .map(|(_, value)| String::from_utf8(value).expect("part text"))
+}
+
+#[tokio::test]
+async fn an_active_after_you_stop_entry_sends_the_word_list_as_prompt() {
+    let two = WordList::new(vec!["Cybrex2".to_owned(), "Thalvi".to_owned()]).expect("list");
+    let empty = WordList::default();
+    // (case, SSE, the list, the prompt the request should carry)
+    let cases = [
+        ("a plain reply", false, &two, Some("Cybrex2, Thalvi")),
+        ("a streamed reply", true, &two, Some("Cybrex2, Thalvi")),
+        ("a plain reply", false, &empty, None),
+        ("a streamed reply", true, &empty, None),
+    ];
+    for (case, sse, words, expected) in cases {
+        let (url, mut rx) = if sse {
+            serve_sse("data: {\"type\":\"transcript.text.done\",\"text\":\"ok\"}\n\n").await
+        } else {
+            serve(200, r#"{"text":"ok"}"#).await
+        };
+        assert_eq!(
+            dictate_chosen(&chosen(live(&url, ""), words))
+                .await
+                .expect("transcription"),
+            "ok",
+            "{case}"
+        );
+        let captured = received(&mut rx).await.expect("one upload");
+        assert_eq!(
+            sent_part(&captured, "prompt").as_deref(),
+            expected,
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_active_after_you_stop_chat_entry_sends_the_word_list_as_a_system_message() {
+    let (url, mut rx) = serve(
+        200,
+        r#"{"choices":[{"message":{"role":"assistant","content":"hallo welt"}}]}"#,
+    )
+    .await;
+    let words = WordList::new(vec!["Cybrex2".to_owned(), "Thalvi".to_owned()]).expect("list");
+    assert_eq!(
+        dictate_chosen(&chosen(chat(&url, "", ""), &words))
+            .await
+            .expect("transcription"),
+        "hallo welt"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&received(&mut rx).await.expect("one request").body)
+            .expect("JSON request");
+    assert_eq!(
+        body["messages"][0],
+        serde_json::json!({"role": "system", "content": "Cybrex2, Thalvi"})
+    );
+    assert_eq!(body["messages"].as_array().expect("messages").len(), 2);
+}
+
+#[tokio::test]
+async fn a_rebuilt_after_you_stop_recognizer_sends_the_new_word_list() {
+    let lists = [
+        (
+            WordList::new(vec!["Cybrex2".to_owned(), "Thalvi".to_owned()]).expect("list"),
+            "Cybrex2, Thalvi",
+        ),
+        (
+            WordList::new(vec!["Qwen".to_owned()]).expect("list"),
+            "Qwen",
+        ),
+    ];
+    for (words, expected) in lists {
+        let (url, mut rx) = serve(200, r#"{"text":"ok"}"#).await;
+        dictate_chosen(&chosen(live(&url, ""), &words))
+            .await
+            .expect("transcription");
+        let captured = received(&mut rx).await.expect("one upload");
+        assert_eq!(sent_part(&captured, "prompt").as_deref(), Some(expected));
+    }
 }
 
 #[tokio::test]
@@ -191,6 +312,7 @@ async fn speaches_streams_transcribed_segments_as_cumulative_text() {
         live(&url, ""),
         reqwest::Client::new(),
         Recorder::disabled().metrics(),
+        &WordList::default(),
     );
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(0)).await.expect("buffered frame");
@@ -262,6 +384,7 @@ async fn openai_streaming_emits_cumulative_text() {
         live(&url, "stream-key"),
         client,
         recorder.metrics(),
+        &WordList::default(),
     );
     let mut session = recognizer
         .connect()
@@ -340,6 +463,7 @@ async fn openai_streaming_accepts_a_clean_empty_stream() {
         live(&url, ""),
         reqwest::Client::new(),
         Recorder::disabled().metrics(),
+        &WordList::default(),
     );
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(0)).await.expect("buffered frame");
@@ -361,6 +485,7 @@ async fn openai_plain_json_still_works() {
         live(&url, ""),
         reqwest::Client::new(),
         Recorder::disabled().metrics(),
+        &WordList::default(),
     );
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(0)).await.expect("buffered frame");
@@ -414,6 +539,7 @@ async fn openai_transcriptions_report_the_detected_language_by_code_or_name() {
             live(&url, ""),
             reqwest::Client::new(),
             Recorder::disabled().metrics(),
+            &WordList::default(),
         );
         let mut session = recognizer.connect().await.expect("connected");
         session.send_frame(&ramp(0)).await.expect("buffered frame");
@@ -530,6 +656,7 @@ async fn a_failed_capture_reports_plainly_and_the_next_capture_can_succeed() {
         live(&url, ""),
         reqwest::Client::new(),
         Recorder::disabled().metrics(),
+        &WordList::default(),
     );
     let mut first = recognizer.connect().await.expect("first session");
     first.send_frame(&ramp(0)).await.expect("buffer");
@@ -574,6 +701,7 @@ async fn an_unreachable_live_endpoint_says_what_failed() {
         live(&url, ""),
         reqwest::Client::new(),
         Recorder::disabled().metrics(),
+        &WordList::default(),
     );
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(0)).await.expect("buffered frame");
@@ -601,6 +729,7 @@ async fn a_slow_live_endpoint_says_what_failed() {
         live(&url, ""),
         reqwest::Client::new(),
         Recorder::disabled().metrics(),
+        &WordList::default(),
     );
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(1)).await.expect("buffered frame");
@@ -621,6 +750,7 @@ async fn a_malformed_live_reply_has_the_bad_reply_headline_and_full_message() {
         live(&url, ""),
         reqwest::Client::new(),
         Recorder::disabled().metrics(),
+        &WordList::default(),
     );
     let mut session = recognizer.connect().await.expect("connected");
     session.send_frame(&ramp(0)).await.expect("buffered frame");
@@ -694,6 +824,7 @@ async fn each_api_gets_its_request_and_a_24_khz_wav_of_the_whole_capture() {
             &reqwest::Client::new(),
             &settings(&url, api, ""),
             &[ramp(0), ramp(1)],
+            &WordList::default(),
         )
         .await;
         assert_eq!(
@@ -768,6 +899,7 @@ async fn the_bearer_header_is_sent_only_with_a_key() {
                 &reqwest::Client::new(),
                 &settings(&url, api, key),
                 &[ramp(0)],
+                &WordList::default(),
             )
             .await
             .expect("transcribed");
@@ -814,6 +946,7 @@ async fn failures_are_typed() {
             &reqwest::Client::new(),
             &settings(&url, api, ""),
             &[ramp(0)],
+            &WordList::default(),
         )
         .await;
         assert_eq!(result, Err(expected), "{api:?} {status} {reply}");
@@ -827,7 +960,8 @@ async fn failures_are_typed() {
         transcribe(
             &reqwest::Client::new(),
             &settings(&url, SecondaryApi::OpenAi, ""),
-            &[ramp(0)]
+            &[ramp(0)],
+            &WordList::default(),
         )
         .await,
         Err(SecondaryError::Unreachable)
@@ -851,6 +985,7 @@ async fn a_silent_endpoint_times_out_after_ten_seconds() {
             &reqwest::Client::new(),
             &settings(&url, SecondaryApi::OpenAi, ""),
             &[ramp(0)],
+            &WordList::default(),
         ),
     )
     .await
@@ -1167,8 +1302,13 @@ async fn the_live_metric_names_the_request_kind() {
             ..RecordKinds::default()
         };
         let recorder = Recorder::in_dir(kinds, &dir).expect("metrics recorder");
-        let recognizer =
-            OpenAiRecognizer::new("local", entry, reqwest::Client::new(), recorder.metrics());
+        let recognizer = OpenAiRecognizer::new(
+            "local",
+            entry,
+            reqwest::Client::new(),
+            recorder.metrics(),
+            &WordList::default(),
+        );
         dictate(&recognizer).await.expect("transcription");
         recorder.finish().await;
         let lines = std::fs::read_to_string(dir.join("metrics.jsonl")).expect("metrics");
