@@ -22,8 +22,9 @@ use thalvi_desktop::host::{
     Desktop, HoldSource, HoldWatch, Host, HostError, RequestServer, refusal,
 };
 use thalvi_desktop::metrics::{Event, Recorder};
-use thalvi_desktop::models::SpeechDownloads;
+use thalvi_desktop::models::{CatalogHead, SpeechDownloads};
 use thalvi_desktop::speech_device::SpeechDevices;
+use thalvi_desktop::wake::HeadModel;
 use tokio::sync::watch;
 
 use crate::agent::{self, Catalog, ModelRow, Running, Switch};
@@ -117,6 +118,16 @@ impl SyncedConfig {
         self.store.save_switches(&config)?;
         self.set(&config);
         Ok(())
+    }
+
+    /// Runs `act` on the config saved now, under the save lock, when it selects catalog `head`
+    /// for the dictation wake word; a download of a head it does not select acts on nothing.
+    pub(crate) fn wake_head_downloaded(&self, head: CatalogHead, act: impl FnOnce(&DesktopConfig)) {
+        let _save = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let config = self.config();
+        if config.wake.capture().model == HeadModel::Catalog(head) {
+            act(&config);
+        }
     }
 }
 
@@ -257,6 +268,15 @@ impl AppState {
         self.saves.save_form(form, |current, config, write| {
             self.take_effect(current, config, write)
         })
+    }
+
+    /// Re-applies the config saved now to the engine after `head` was downloaded, when it selects
+    /// that head, so a wake load that failed before the file was cached is retried and clears its
+    /// failure. A download of a head the saved config does not select sends nothing.
+    pub(crate) fn wake_head_downloaded(&self, head: CatalogHead) {
+        self.saves.wake_head_downloaded(head, |config| {
+            self.link.send(Control::Apply(Box::new(config.clone())));
+        });
     }
 
     /// Writes `config` and takes it into effect. Changed hold keys are watched before the file is
@@ -1377,15 +1397,15 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let saved = DesktopConfig::from_json_str(json).unwrap();
-            let saves = SyncedConfig::new(
+            let synced = SyncedConfig::new(
                 Store::new(Some(dir.join("desktop.json"))).unwrap(),
                 saved.clone(),
             );
             let applied = Mutex::new(Vec::new());
 
-            saves.wake_head_downloaded(downloaded, |config| {
+            synced.wake_head_downloaded(downloaded, |config| {
                 assert!(
-                    saves.lock.try_lock().is_err(),
+                    synced.lock.try_lock().is_err(),
                     "{case}: the config is read and sent under the save lock"
                 );
                 applied

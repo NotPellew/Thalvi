@@ -4329,7 +4329,7 @@ mod tests {
                     r#"{"wake":{"capture":{"model":"hey_thalvi"},"conversation":{"model":"hey_thalvi"}},"history":{"enabled":false}}"#,
                 )
                 .unwrap();
-                let saved = DesktopConfig::from_json_str(
+                let selected = DesktopConfig::from_json_str(
                     r#"{"wake":{"capture":{"model":"hey_mycroft"},"conversation":{"model":"hey_thalvi"}},"history":{"enabled":false}}"#,
                 )
                 .unwrap();
@@ -4344,7 +4344,7 @@ mod tests {
                 let mut status = link.status_updates();
                 let saves = crate::app::SyncedConfig::new(
                     crate::settings::Store::new(Some(dir.join("desktop.json"))).unwrap(),
-                    saved.clone(),
+                    selected.clone(),
                 );
                 let engine = tokio::task::spawn_local(ends.run(
                     running,
@@ -4359,7 +4359,7 @@ mod tests {
                 })
                 .await;
 
-                link.send(Control::Apply(Box::new(saved)));
+                link.send(Control::Apply(Box::new(selected)));
                 status_until(&mut status, "the wake load fails", |shown| {
                     matches!(
                         shown,
