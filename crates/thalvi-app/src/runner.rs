@@ -4142,7 +4142,7 @@ mod tests {
     }
 
     impl FedRun {
-        fn start(missing: bool) -> Self {
+        fn start(missing: bool, paused: bool) -> Self {
             use thalvi_desktop::cues::Cue;
             use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeWake};
             use thalvi_desktop::recognizer::FakeRecognizer;
@@ -4172,13 +4172,13 @@ mod tests {
             let texts = Arc::new(Mutex::new(Vec::new()));
             let host = TestHost(Arc::new(Mutex::new(Vec::new())), Arc::clone(&texts));
             let config = feed_config();
-            let (link, ends, _) = EngineLink::wire(&config, false);
+            let (link, ends, _) = EngineLink::wire(&config, paused);
             let status = link.status_updates();
             let audio = link.audio_updates();
             let feeding = link.feeding_updates();
             let running = tokio::task::spawn_local(ends.run(
                 config,
-                false,
+                paused,
                 lab,
                 Arc::new(Delivery::new(host)),
                 Arc::new(History::at("unused-scripted-feed")),
@@ -4388,7 +4388,7 @@ mod tests {
             };
             LocalSet::new()
                 .run_until(async {
-                    let mut script = FedRun::start(true);
+                    let mut script = FedRun::start(true, false);
                     yield_until("the missing microphone was not reported", || {
                         script.missing_mic()
                     })
@@ -4486,7 +4486,7 @@ mod tests {
             LocalSet::new()
                 .run_until(async {
                     let missing = !matches!(case, KeptFeed::Connected);
-                    let mut script = FedRun::start(missing);
+                    let mut script = FedRun::start(missing, false);
                     if missing {
                         yield_until(
                             &format!("{label}: the missing microphone was not reported"),
@@ -4572,10 +4572,49 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn startup_keeps_the_saved_pause_and_leaves_the_microphone_closed() {
+        LocalSet::new()
+            .run_until(async {
+                let mut script = FedRun::start(false, true);
+                {
+                    let settled = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        script.status.wait_for(|status| {
+                            matches!(status, Status::Paused | Status::Listening)
+                        }),
+                    )
+                    .await
+                    .expect("the runner did not finish starting")
+                    .expect("the runner stopped");
+                    assert!(matches!(&*settled, Status::Paused));
+                }
+                assert_eq!(script.opens.get(), 0);
+                assert!(script.audio.borrow().paused);
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_honors_a_queued_quit_before_opening_the_microphone() {
+        LocalSet::new()
+            .run_until(async {
+                let script = FedRun::start(false, false);
+                script.link.send(Control::Quit);
+                tokio::time::timeout(Duration::from_secs(3), script.running)
+                    .await
+                    .expect("the runner ignored the queued quit")
+                    .unwrap();
+                assert_eq!(script.opens.get(), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_microphone_that_stops_while_listening_is_closed_and_reported_not_taken_for_a_clip() {
         LocalSet::new()
             .run_until(async {
-                let script = FedRun::start(false);
+                let script = FedRun::start(false, false);
                 yield_until("listening never started", || {
                     matches!(&*script.status.borrow(), Status::Listening)
                 })
