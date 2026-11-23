@@ -4619,12 +4619,13 @@ mod tests {
                     matches!(&*script.status.borrow(), Status::Listening)
                 })
                 .await;
-                script.link.send(Control::Overlay(Some(Failure {
+                let overlay_failure = || Failure {
                     kind: FailureKind::Other,
                     headline: "Status overlay unavailable",
                     notice: "The overlay surface closed.".to_owned(),
                     causes: Vec::new(),
-                })));
+                };
+                script.link.send(Control::Overlay(Some(overlay_failure())));
                 yield_until("the overlay failure was not reported", || {
                     matches!(
                         &*script.status.borrow(),
@@ -4634,6 +4635,22 @@ mod tests {
                 .await;
                 script.link.send(Control::Overlay(None));
                 yield_until("the overlay failure stayed after recovery", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                script
+                    .link
+                    .send(Control::HoldKeyFailed("Hold key refused.".to_owned()));
+                yield_until("the hold-key failure was not reported", || {
+                    matches!(
+                        &*script.status.borrow(),
+                        Status::Failed { notice, .. } if notice == "Hold key refused."
+                    )
+                })
+                .await;
+                script.link.send(Control::Overlay(Some(overlay_failure())));
+                script.link.send(Control::HoldKeyWorks);
+                yield_until("the overlay failure replaced the hold-key failure", || {
                     matches!(&*script.status.borrow(), Status::Listening)
                 })
                 .await;
