@@ -96,6 +96,9 @@ pub struct Windows<A = Real> {
     own_integrity: u32,
 }
 
+/// The host for the desktop Thalvi runs on.
+pub type Desktop = Windows;
+
 impl Windows {
     /// # Errors
     /// Why Thalvi cannot drive this desktop.
@@ -171,6 +174,18 @@ impl Windows {
     )]
     pub fn overlay_plan(&self) -> Result<OverlayPlan, HostError> {
         Ok(OverlayPlan)
+    }
+
+    /// Chooses the windowing backend the windows run on. Windows has no toolkit backend to choose.
+    ///
+    /// # Errors
+    /// Never on Windows; the signature matches the Linux desktops'.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "every host implements prepare_toolkit; only GNOME's can fail"
+    )]
+    pub fn prepare_toolkit() -> Result<(), HostError> {
+        Ok(())
     }
 }
 
