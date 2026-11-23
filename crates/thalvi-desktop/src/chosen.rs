@@ -122,7 +122,9 @@ impl Chosen {
                 phrases,
             )),
             LiveKind::OnDevice(SpeechChoice::Whisper(backend)) => Self::Whisper {
-                recognizer: Arc::new(WhisperRecognizer::new(*backend, helpers, store, metrics)),
+                recognizer: Arc::new(WhisperRecognizer::new(
+                    *backend, helpers, store, metrics, phrases,
+                )),
                 speech: entry.source(),
             },
             LiveKind::OnDevice(choice) => Self::Local {
