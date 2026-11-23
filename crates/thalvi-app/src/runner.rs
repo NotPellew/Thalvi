@@ -3732,6 +3732,15 @@ mod tests {
             causes: Vec::new(),
         });
         publisher.mode(other.clone());
+        runner
+            .handle(Control::HoldKeyFailed("Hyprland refused F9.".to_owned()))
+            .await;
+        runner.show_hold_problem();
+        assert_eq!(
+            publisher.view.borrow().mode,
+            other,
+            "a pending hold warning must wait while another failure is visible"
+        );
         runner.handle(Control::HoldKeyWorks).await;
         assert_eq!(
             publisher.view.borrow().mode,
@@ -3999,6 +4008,67 @@ mod tests {
             }
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_native_input_reports_the_open_microphone_and_closes_it_on_pause() {
+        use std::io::Write;
+
+        const TEST: &str =
+            "runner::tests::the_native_input_reports_the_open_microphone_and_closes_it_on_pause";
+        const CHECKED: &str = "Checked the native input";
+        if std::env::var_os("THALVI_PRIVATE_ALSA_TEST").is_some() {
+            let microphone =
+                Microphone::new(InputGate::default(), None, Recorder::disabled().metrics());
+            assert_eq!(Input::active_name(&microphone), None);
+            let (mut microphone, frames) = Input::open(microphone).await.unwrap();
+            let _frames = frames.unwrap();
+            assert_eq!(
+                Input::active_name(&microphone),
+                Some("Default Audio Device")
+            );
+            Input::pause(&mut microphone);
+            assert_eq!(Input::active_name(&microphone), None);
+            assert!(!microphone.is_open());
+
+            Input::select(
+                &mut microphone,
+                Some("Thalvi test missing input".to_owned()),
+            );
+            let (_, frames) = Input::open(microphone).await.unwrap();
+            assert!(
+                frames.is_err(),
+                "the unavailable input must not open the default"
+            );
+            println!("{CHECKED}");
+            return;
+        }
+
+        // ALSA reads its configuration process-wide, so only the child gets a software input.
+        let config = std::env::temp_dir().join(format!("thalvi-alsa-{}.conf", std::process::id()));
+        std::fs::File::create_new(&config)
+            .unwrap()
+            .write_all(b"pcm.!default { type null }\n")
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("ALSA_CONFIG_PATH", &config)
+                .env("THALVI_PRIVATE_ALSA_TEST", "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        std::fs::remove_file(config).unwrap();
+        let result = result.expect("the native input test finished").unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            result.status.success() && stdout.contains(CHECKED),
+            "{stdout}\n{stderr}"
+        );
     }
 
     /// A microphone the test can leave missing, and the fakes the runner listens through.
