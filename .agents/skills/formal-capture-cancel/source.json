@@ -1,5 +1,5 @@
 {
-  "sync_commit": "82fb8a6ca404224bab9d053043c1992c014ddb04",
+  "sync_commit": "ed2fb824d380b1db1245514bd54970081df42335",
   "files": {
     "crates/thalvi-app/src/runner.rs": {
       "sha256": "b785f3e4d93c165405d0563f2b0c45b5b78b80d0336ec31ca59f6aeccab924b9",
@@ -12,7 +12,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "55bed9192b8c6e0317294d84798ea8e101b931c8db962bf5fce6f18484ef83d8",
+      "sha256": "860e3ded27cada2d5d47605d7a90cf637c7ea4d52902a581834c059eecbd1437",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",
@@ -56,7 +56,7 @@
       ]
     },
     "crates/thalvi-desktop/src/openai_live.rs": {
-      "sha256": "efdcaa8d1dd39850822d74c5f64edc05b7af5135cea1f0ecdf8ad500edff4708",
+      "sha256": "b6a2eb085672d27577ea78c2e9d0cde809747f7d29d19c78b27921720bca3903",
       "functions": [
         "OpenAiSession::cancel",
         "OpenAiSession::close",
@@ -84,7 +84,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine/final_pass.rs": {
-      "sha256": "8482fcb885c557460d1363e7a9a0c4303486fedfdc03989c42dc6a1dfd8b9e6c",
+      "sha256": "f9191329eb06273da2952399b9051c0fe611b51b69dab4fd18fb518164093a44",
       "functions": [
         "Engine::start_final_pass",
         "Engine::wait_final_pass",

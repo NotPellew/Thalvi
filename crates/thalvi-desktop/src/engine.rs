@@ -37,6 +37,7 @@ use crate::hold::{Cutoff, HoldKind, KeyState, Press, Presses, Refusal};
 use crate::merge;
 use crate::metrics::{Dictation, Event, Metrics, RecordKinds, Recorder};
 use crate::numbers;
+use crate::phrases::WordList;
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
@@ -826,6 +827,8 @@ struct Extras {
     all: Vec<Extra>,
     /// The endpoint the merge asks; `None` while merge is off, which records the extras instead.
     merge: Option<Writing>,
+    /// The word list every request into this set carries.
+    words: WordList,
 }
 
 impl Extras {
@@ -849,6 +852,7 @@ impl Extras {
             uploads,
             all: extras,
             merge,
+            words: config.stt.phrases.clone(),
         })
     }
 }
@@ -2758,7 +2762,14 @@ where
             route: request.route,
         });
         let started = Instant::now();
-        let mut running = self.ask_all(&extras.uploads, &request, sent, has_endings, dictation);
+        let mut running = self.ask_all(
+            &extras.uploads,
+            &extras.words,
+            &request,
+            sent,
+            has_endings,
+            dictation,
+        );
         let mut streams = std::mem::take(&mut self.streams);
         let mut slots: Vec<Option<Judged>> = extras.all.iter().map(|_| None).collect();
         while slots.iter().any(Option::is_none) {
@@ -2795,7 +2806,7 @@ where
                 chat: None,
             }
         } else {
-            self.ask_merge(writing, &inputs, started + merge::LIMIT)
+            self.ask_merge(writing, &inputs, &extras.words, started + merge::LIMIT)
                 .await
         };
         if matches!(asked, Asked::Cancelled) {
@@ -2861,7 +2872,14 @@ where
         has_endings: bool,
         dictation: &Dictation,
     ) {
-        let running = self.ask_all(&extras.uploads, request, sent, has_endings, dictation);
+        let running = self.ask_all(
+            &extras.uploads,
+            &extras.words,
+            request,
+            sent,
+            has_endings,
+            dictation,
+        );
         let streams = std::mem::take(&mut self.streams);
         self.recorded_only.push(running);
         self.recorded_only.push(streams.tasks);
@@ -2912,6 +2930,7 @@ where
         &mut self,
         writing: &Writing,
         inputs: &[String],
+        words: &WordList,
         deadline: Instant,
     ) -> Asked {
         let loading = Instant::now();
@@ -2946,7 +2965,7 @@ where
         let mut reply = match bounded(
             &mut self.cancel,
             deadline,
-            endpoint.start_merge(&self.http, inputs),
+            endpoint.start_merge(&self.http, inputs, words),
         )
         .await
         .finish()
@@ -3009,6 +3028,7 @@ where
     fn ask_all(
         &self,
         uploads: &[ExtraEntry],
+        words: &WordList,
         request: &CaptureRequest,
         sent: &[Frame],
         has_endings: bool,
@@ -3023,10 +3043,11 @@ where
                 Arc::clone(&sent),
                 dictation.clone(),
             );
+            let words = words.clone();
             let route = request.route;
             running.spawn(async move {
                 let asked = Instant::now();
-                let heard = secondary::transcribe(&http, &entry.settings, &sent)
+                let heard = secondary::transcribe(&http, &entry.settings, &sent, &words)
                     .await
                     .map(|transcript| transcript.text)
                     .map_err(Unheard::from);

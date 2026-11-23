@@ -1076,6 +1076,32 @@ describe("the word list", () => {
     expect(wordHint()).toBe(cant("Realtime speech server"));
   });
 
+  const ACTIVE_USES_WORDS: [string, SpeechEntry, string][] = [
+    ["An after-you-stop entry", { ...GATEWAY, active: true }, `${GATEWAY.name} uses this word list.`],
+    ["A long-named after-you-stop entry", { ...GATEWAY, name: "An after-you-stop recognizer whose name is long", active: true }, "This recognizer uses this word list."],
+  ];
+
+  it.each(ACTIVE_USES_WORDS)("%s uses the word list when active", async (_case, entry, expected) => {
+    const stub = stubBackend({ ...SETTINGS, stt: stt([entry]) });
+    mountSettings(root, stub.backend);
+    await settle();
+    expect(wordHint()).toBe(expected);
+    expect(stub.backend.wordListSupport).not.toHaveBeenCalled();
+    expect((rowOf("Word list").querySelector('input[aria-label="New word"]') as HTMLInputElement).disabled).toBe(false);
+  });
+
+  const FINAL_PASSES: [string, SpeechEntry][] = [
+    ["An OpenAI extra", { ...OPENAI, final_pass: true }],
+    ["A Meta extra", { ...META, final_pass: true }],
+    ["An after-you-stop entry", { ...GATEWAY, final_pass: true }],
+  ];
+
+  it.each(FINAL_PASSES)("%s as the final pass uses the word list", async (_case, finalPass) => {
+    await open({ ...several(), stt: stt([{ ...SERVER }, finalPass]) });
+    goTo("recognition");
+    expect(wordHint()).toBe("The final pass uses this word list.");
+  });
+
   it.each([
     ["Whisper Turbo on the CPU", "whisper_turbo_cpu", cant("On this computer")],
     ["Whisper Turbo on the Vulkan GPU", "whisper_turbo_vulkan", cant("On this computer")],

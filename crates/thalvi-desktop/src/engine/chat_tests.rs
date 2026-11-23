@@ -94,7 +94,7 @@ async fn writing_and_merging_use_the_owned_runtime_and_a_second_crash_stays_fail
     );
     let writing = config.writing.as_ref().unwrap();
     assert!(
-        matches!(engine.ask_merge(writing, &["hello".to_owned(), "Hello.".to_owned()], Instant::now() + writing::LIMIT).await, Asked::Merged { text, .. } if text == "Hello.")
+        matches!(engine.ask_merge(writing, &["hello".to_owned(), "Hello.".to_owned()], &WordList::default(), Instant::now() + writing::LIMIT).await, Asked::Merged { text, .. } if text == "Hello.")
     );
     {
         let asked = asked.lock().unwrap();
