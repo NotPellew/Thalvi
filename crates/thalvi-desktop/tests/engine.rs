@@ -2312,6 +2312,37 @@ fn with_extras(chat_url: &str, extras: &[(&str, &str, bool)]) -> String {
     extras_config(chat_url, None, extras)
 }
 
+/// [`extras_config`] with a word list set.
+fn extras_with_words(
+    chat_url: &str,
+    merge: Option<bool>,
+    extras: &[(&str, &str, bool)],
+    words: &[&str],
+) -> serde_json::Value {
+    let mut config: serde_json::Value =
+        serde_json::from_str(&extras_config(chat_url, merge, extras)).expect("config JSON");
+    config["stt"]["phrases"] = json!(words);
+    config
+}
+
+/// The text of the multipart part `name` in an upload body, if the request has one.
+fn part_text(body: &[u8], name: &str) -> Option<String> {
+    let body = String::from_utf8_lossy(body);
+    let marker = format!("name=\"{name}\"\r\n\r\n");
+    let start = body.find(&marker)? + marker.len();
+    let end = start + body[start..].find("\r\n--").expect("part end");
+    Some(body[start..end].to_owned())
+}
+
+/// The JSON of the multipart part `name` in an upload body.
+fn part_json(body: &[u8], name: &str) -> serde_json::Value {
+    let body = String::from_utf8_lossy(body);
+    let marker = format!("name=\"{name}\"\r\nContent-Type: application/json\r\n\r\n");
+    let start = body.find(&marker).expect("JSON part") + marker.len();
+    let end = start + body[start..].find("\r\n--").expect("part end");
+    serde_json::from_str(&body[start..end]).expect("part JSON")
+}
+
 /// A capture that says "live words paste that" at 1000 and is delivered at 3500.
 async fn live_words(rig: &mut Rig) {
     rig.open().await;
@@ -2532,6 +2563,164 @@ async fn the_texts_of_the_live_recognizer_and_the_extras_are_merged_into_the_tex
                  merged: Live B words.\n\
                  accepted (paste): Live B words.\n"
             );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_openai_extra_sends_the_word_list_as_prompt() {
+    LocalSet::new()
+        .run_until(async {
+            // (the list, the prompt the extra's request should carry)
+            let cases = [
+                (&["Cybrex2", "Thalvi"][..], Some("Cybrex2, Thalvi")),
+                (&[][..], None),
+            ];
+            for (words, expected) in cases {
+                let (url, mut uploads) = serve_logged([Reply::Json(A)], <[u8]>::to_vec).await;
+                let config =
+                    extras_with_words("http://127.0.0.1:1", None, &[("A", &url, true)], words);
+                let (mut rig, engine, frames) = Rig::new(&config.to_string());
+                let task = capture_and_listen(&rig, engine, frames, 0);
+                live_words(&mut rig).await;
+                finished(task).await;
+                let body = uploads.recv().await.expect("one upload");
+                assert_eq!(part_text(&body, "prompt").as_deref(), expected, "{words:?}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_meta_extra_sends_the_word_list_as_keywords() {
+    LocalSet::new()
+        .run_until(async {
+            let cases = [
+                (
+                    &["Cybrex2", "Thalvi"][..],
+                    Some(json!(["Cybrex2", "Thalvi"])),
+                ),
+                (&[][..], None),
+            ];
+            for (words, expected) in cases {
+                let (url, mut uploads) = serve_logged(
+                    [Reply::Json(r#"{"transcript":"A words paste that"}"#)],
+                    <[u8]>::to_vec,
+                )
+                .await;
+                let mut config =
+                    extras_with_words("http://127.0.0.1:1", None, &[("Meta", &url, true)], words);
+                config["stt"]["entries"][1]["api"] = json!("meta");
+                let (mut rig, engine, frames) = Rig::new(&config.to_string());
+                let task = capture_and_listen(&rig, engine, frames, 0);
+                live_words(&mut rig).await;
+                finished(task).await;
+                let body = uploads.recv().await.expect("one upload");
+                let request = part_json(&body, "request");
+                assert_eq!(request.get("keywords"), expected.as_ref(), "{words:?}");
+                assert_eq!(request["mode"], "PUSH_TO_TALK", "{words:?}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_meta_final_pass_sends_the_word_list_as_keywords() {
+    LocalSet::new()
+        .run_until(async {
+            let cases = [
+                (
+                    &["Cybrex2", "Thalvi"][..],
+                    Some(json!(["Cybrex2", "Thalvi"])),
+                ),
+                (&[][..], None),
+            ];
+            for (words, expected) in cases {
+                let (url, mut uploads) = serve_logged(
+                    [Reply::Json(r#"{"transcript":"Thalvi paste that"}"#)],
+                    <[u8]>::to_vec,
+                )
+                .await;
+                let mut config = with_final_pass(&url, words);
+                config["stt"]["entries"][1]["api"] = json!("meta");
+                let (mut rig, engine, frames) = Rig::new(&config.to_string());
+                let (worker, mut captures) =
+                    final_captures(&rig, engine, frames, &[WakeTrigger::Hold]);
+                rig.hold().await;
+                rig.say(800, Say::Final("live text")).await;
+                rig.release(1000).await;
+                rig.finals(" ").await;
+                let body = uploads.recv().await.expect("one upload");
+                let request = part_json(&body, "request");
+                assert_eq!(request.get("keywords"), expected.as_ref(), "{words:?}");
+                assert_eq!(
+                    captures.recv().await.expect("one capture").outcome,
+                    accepted(CaptureRoute::Paste, "Thalvi paste that"),
+                    "{words:?}"
+                );
+                finished(worker).await;
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_merge_request_names_the_word_list_as_terms_to_spell() {
+    LocalSet::new()
+        .run_until(async {
+            let (a, _a) = serve(Reply::After(100, A)).await;
+            let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("Live A words."))).await;
+            let config = extras_with_words(
+                &chat_url,
+                Some(true),
+                &[("A", &a, true)],
+                &["Cybrex2", "Thalvi"],
+            );
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let task = capture_and_listen(&rig, engine, frames, 0);
+            live_words(&mut rig).await;
+            assert_eq!(
+                finished(task).await.outcome,
+                accepted(CaptureRoute::Paste, "Live A words.")
+            );
+            let asked = request(&mut asked).await;
+            let system = asked.body["messages"][0]["content"]
+                .as_str()
+                .expect("system message");
+            assert!(system.starts_with(MERGE_PROMPT), "{system}");
+            assert!(system.contains(r#"["Cybrex2","Thalvi"]"#), "{system}");
+            assert_eq!(
+                asked.body["messages"][1]["content"],
+                r#"["live words","A words"]"#
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merge_that_adds_a_word_list_term_no_transcript_has_keeps_the_live_text() {
+    LocalSet::new()
+        .run_until(async {
+            let (a, _a) = serve(Reply::After(100, A)).await;
+            let (chat_url, _asked, _feed) = chat(Chat::Stream(says!("Live Cybrex2"))).await;
+            let config = extras_with_words(
+                &chat_url,
+                Some(true),
+                &[("A", &a, true)],
+                &["Cybrex2", "Thalvi"],
+            );
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let task = capture_and_listen(&rig, engine, frames, 0);
+            live_words(&mut rig).await;
+            let pasted = finished(task).await;
+            assert_eq!(
+                pasted.outcome,
+                accepted(CaptureRoute::Paste, "live words")
+            );
+            let notice =
+                "Merge skipped: the chat model used a word none of the recognizers heard. Used the live text.";
+            assert_eq!(pasted.notices, [notice]);
+            assert_eq!(pasted.note.as_deref(), Some(notice));
         })
         .await;
 }

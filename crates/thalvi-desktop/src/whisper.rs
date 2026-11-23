@@ -21,6 +21,7 @@ use crate::device::{self, Device, Download, Export, Fallback, Gpu, Step};
 use crate::frame::Frame;
 use crate::metrics::{Event, Metrics};
 use crate::models::{ModelStore, WHISPER_TURBO, WhisperAssets};
+use crate::phrases::WordList;
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, TranscriptionFailure,
 };
@@ -94,10 +95,10 @@ impl WhisperBackend {
     pub fn description(self) -> &'static str {
         match self {
             Self::Cpu => {
-                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts. Text appears only after you stop speaking, and the word list is ignored. On the CPU it is slow: the text can take as long as you spoke, or longer. The language is detected automatically; only English and German have been tried."
+                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts. Text appears only after you stop speaking. On the CPU it is slow: the text can take as long as you spoke, or longer. The language is detected automatically; only English and German have been tried."
             }
             Self::Vulkan => {
-                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts on your graphics card through Vulkan. Text appears while you speak, because the capture so far is read again on the GPU about every second, which is extra GPU work; the final text replaces it after you stop. The word list is ignored. Its speed on your GPU is untested. If no GPU is found, it says so; pick the CPU entry then. The language is detected automatically; only English and German have been tried."
+                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts on your graphics card through Vulkan. Text appears while you speak, because the capture so far is read again on the GPU about every second, which is extra GPU work; the final text replaces it after you stop. Its speed on your GPU is untested. If no GPU is found, it says so; pick the CPU entry then. The language is detected automatically; only English and German have been tried."
             }
         }
     }
@@ -555,6 +556,8 @@ struct Shared<L: Launcher> {
     store: ModelStore,
     metrics: Metrics,
     name: String,
+    /// The word list as the helper's prompt, `, `-joined; `None` when it is empty.
+    prompt: Option<Arc<str>>,
     steps: watch::Sender<Step>,
     /// The model and voice detector, once their checksums have been verified, which a restart need not repeat.
     files: OnceCell<(PathBuf, PathBuf)>,
@@ -578,6 +581,7 @@ impl WhisperRecognizer {
         helpers: &Path,
         store: ModelStore,
         metrics: Metrics,
+        phrases: &WordList,
     ) -> Self {
         Self::with_launcher(
             ProcessLauncher,
@@ -586,6 +590,7 @@ impl WhisperRecognizer {
             helpers,
             store,
             metrics,
+            phrases,
         )
     }
 }
@@ -598,6 +603,7 @@ impl<L: Launcher> WhisperRecognizer<L> {
         helpers: &Path,
         store: ModelStore,
         metrics: Metrics,
+        phrases: &WordList,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
@@ -607,6 +613,7 @@ impl<L: Launcher> WhisperRecognizer<L> {
                 store,
                 metrics,
                 name: backend.name().to_owned(),
+                prompt: (!phrases.is_empty()).then(|| Arc::from(phrases.hint())),
                 steps: watch::channel(Step::Reading).0,
                 files: OnceCell::new(),
                 slot: Mutex::new(Slot::Idle),
@@ -956,6 +963,7 @@ impl<L: Launcher> WhisperSession<L> {
         let (sender, reply) = oneshot::channel();
         let running = Arc::clone(&self.running);
         let shared = Arc::clone(&self.shared);
+        let prompt = self.shared.prompt.clone();
         let at = Instant::now();
         let task = tokio::spawn(async move {
             let seconds = audio_seconds(frames.len());
@@ -963,7 +971,12 @@ impl<L: Launcher> WhisperSession<L> {
                 Ok(String::new())
             } else {
                 let audio = wav(frames.as_flattened());
-                let fields = [("response_format", "json"), ("language", "auto")];
+                let mut fields = vec![("response_format", "json"), ("language", "auto")];
+                if let Some(prompt) = &prompt {
+                    // VAD keeps the prompt out of a capture with no speech, which whisper would echo.
+                    fields.push(("vad", "true"));
+                    fields.push(("prompt", prompt));
+                }
                 let timeout = reading.timeout(frames.len());
                 infer(&running.client, running.port, &fields, &audio, timeout).await
             };
@@ -1688,7 +1701,17 @@ mod tests {
             scratch,
             FAKE_FILES,
             Recorder::disabled().metrics(),
+            &no_words(),
         )
+    }
+
+    fn no_words() -> WordList {
+        WordList::new(Vec::new()).unwrap()
+    }
+
+    /// A word list of `words`, in the order given.
+    fn list(words: &[&str]) -> WordList {
+        WordList::new(words.iter().map(|word| (*word).to_owned()).collect()).unwrap()
     }
 
     fn recognizer_with(
@@ -1697,6 +1720,7 @@ mod tests {
         scratch: &Scratch,
         assets: WhisperAssets<'static>,
         metrics: Metrics,
+        phrases: &WordList,
     ) -> WhisperRecognizer<Fake> {
         WhisperRecognizer::with_launcher(
             fake.clone(),
@@ -1705,6 +1729,7 @@ mod tests {
             &scratch.helpers(),
             scratch.store(),
             metrics,
+            phrases,
         )
     }
 
@@ -2158,6 +2183,7 @@ mod tests {
             &scratch.helpers(),
             scratch.store(),
             Recorder::disabled().metrics(),
+            &no_words(),
         );
         let error = within(recognizer.load()).await.unwrap_err();
         let expected = scratch
@@ -2215,6 +2241,7 @@ mod tests {
             &scratch,
             assets,
             Recorder::disabled().metrics(),
+            &no_words(),
         );
         let mut steps = recognizer.steps();
         let loading_steps = recognizer.loading().expect("captures can follow the load");
@@ -2345,6 +2372,58 @@ mod tests {
             capture.wav.len() - 44,
             "audio data length"
         );
+    }
+
+    #[tokio::test]
+    async fn the_word_list_is_the_finals_and_a_previews_prompt_and_an_empty_list_sends_none() {
+        for (case, words, prompt) in [
+            ("an empty list", Vec::new(), None),
+            ("a list", vec!["Cybrex2", "Thalvi"], Some("Cybrex2, Thalvi")),
+        ] {
+            let scratch = Scratch::with_files("prompt");
+            let fake = Fake::new([vulkan(vec![Reply::Text("a"), Reply::Text("the final")])]);
+            let recognizer = recognizer_with(
+                &fake,
+                WhisperBackend::Vulkan,
+                &scratch,
+                FAKE_FILES,
+                Recorder::disabled().metrics(),
+                &list(&words),
+            );
+            let mut session = within(recognizer.connect()).await.unwrap();
+            send_all(&mut session, &numbered(13)).await;
+            assert_eq!(
+                within(session.next_event()).await.unwrap(),
+                partial("a"),
+                "{case}"
+            );
+            session.finish_audio().await.unwrap();
+            assert_eq!(
+                within(session.next_event()).await.unwrap(),
+                the_final("the final"),
+                "{case}"
+            );
+
+            let seen = fake.helper(0).seen();
+            assert_eq!(
+                seen.len(),
+                3,
+                "{case}: the warm-up, the preview and the final"
+            );
+            assert_eq!(seen[0].field("vad"), Some("false"), "{case}");
+            assert_eq!(seen[0].field("prompt"), None, "{case}: the warm-up");
+            let mut expected = vec![
+                ("response_format".to_owned(), "json".to_owned()),
+                ("language".to_owned(), "auto".to_owned()),
+            ];
+            if let Some(prompt) = prompt {
+                expected.push(("vad".to_owned(), "true".to_owned()));
+                expected.push(("prompt".to_owned(), prompt.to_owned()));
+            }
+            for capture in &seen[1..] {
+                assert_eq!(capture.fields, expected, "{case}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -2609,6 +2688,7 @@ mod tests {
             &scratch,
             FAKE_FILES,
             recorder.metrics(),
+            &no_words(),
         );
         dictate(&recognizer, &vec![frame(1); 25]).await.unwrap();
         recorder.finish().await;
@@ -2965,6 +3045,7 @@ mod tests {
             &scratch,
             FAKE_FILES,
             recorder.metrics(),
+            &no_words(),
         );
         let frames = numbered(23);
         let mut session = within(recognizer.connect()).await.unwrap();
@@ -3120,6 +3201,7 @@ mod tests {
                 &files.helpers,
                 files.store(&scratch),
                 Recorder::disabled().metrics(),
+                &no_words(),
             );
             let Ok(RecognizerEvent::Final(spoken)) =
                 dictate(&recognizer, &files.frames("en-names.wav")).await
@@ -3141,6 +3223,80 @@ mod tests {
             );
         }
 
+        /// The owner's clip says "Qwen. Qwen 3.8.": the list spells its name right, and neither five
+        /// seconds of digital silence nor of room noise may come back as list words.
+        #[tokio::test]
+        async fn the_real_helper_spells_a_listed_name_and_neither_silence_nor_room_noise_becomes_list_words()
+         {
+            let name = "the_real_helper_spells_a_listed_name_and_neither_silence_nor_room_noise_becomes_list_words";
+            let Some(files) = Files::from_env(name) else {
+                return;
+            };
+            let backend = if std::env::var_os("THALVI_WHISPER_VULKAN").is_some() {
+                WhisperBackend::Vulkan
+            } else {
+                WhisperBackend::Cpu
+            };
+            let words = list(&[
+                "Qwen",
+                "Cybrex2",
+                "Thalvi",
+                "Kubernetes",
+                "Grafana",
+                "Postgres",
+                "Ansible",
+                "Nexus",
+                "Pellegrino",
+                "Serde",
+            ]);
+            let listed = Scratch::new("real-word-list");
+            let with_list = WhisperRecognizer::new(
+                backend,
+                &files.helpers,
+                files.store(&listed),
+                Recorder::disabled().metrics(),
+                &words,
+            );
+            let heard = |case: &str, event: Result<RecognizerEvent, RecognizerError>| match event {
+                Ok(RecognizerEvent::Final(text)) => text,
+                other => panic!("{case}: {other:?}"),
+            };
+            let spoken = heard(
+                "the name with the list",
+                dictate(&with_list, &files.frames("qwen.wav")).await,
+            );
+            assert!(spoken.contains("Qwen"), "{spoken}");
+
+            let unlisted = Scratch::new("real-word-list-plain");
+            let plain = WhisperRecognizer::new(
+                backend,
+                &files.helpers,
+                files.store(&unlisted),
+                Recorder::disabled().metrics(),
+                &no_words(),
+            );
+            let without = heard(
+                "the name without the list",
+                dictate(&plain, &files.frames("qwen.wav")).await,
+            );
+            drop(plain);
+            eprintln!("Qwen 3.8: with the list: {spoken} | without the list: {without}");
+
+            for (case, fixture) in [
+                ("five seconds of digital silence", "silence-5s.wav"),
+                ("five seconds of room noise", "room-noise-5s.wav"),
+            ] {
+                let noise = heard(case, dictate(&with_list, &files.frames(fixture)).await);
+                eprintln!("{case}: {noise:?}");
+                for word in words.phrases() {
+                    assert!(
+                        !noise.to_lowercase().contains(&word.to_lowercase()),
+                        "{case} came back as the list word {word:?}: {noise:?}"
+                    );
+                }
+            }
+        }
+
         /// A 54 s capture fed at ten times real time: the GPU's previews grow with it and the final follows.
         #[tokio::test]
         async fn the_real_vulkan_helper_previews_a_capture_that_is_still_being_spoken() {
@@ -3158,6 +3314,7 @@ mod tests {
                 &files.helpers,
                 files.store(&scratch),
                 Recorder::disabled().metrics(),
+                &no_words(),
             );
             let mut session = within(recognizer.connect()).await.unwrap();
             let mut frames = files.frames("say-long.wav").into_iter();
@@ -3211,6 +3368,7 @@ mod tests {
                 &files.helpers,
                 files.store(&scratch),
                 Recorder::disabled().metrics(),
+                &no_words(),
             );
             within(recognizer.load()).await.unwrap();
             let helper = pid(&recognizer);
@@ -3234,6 +3392,7 @@ mod tests {
                 &files.helpers,
                 files.store(&scratch),
                 Recorder::disabled().metrics(),
+                &no_words(),
             );
             if std::env::var_os(CHILD).is_some() {
                 within(recognizer.load()).await.unwrap();

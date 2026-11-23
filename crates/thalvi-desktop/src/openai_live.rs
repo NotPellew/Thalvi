@@ -9,6 +9,7 @@ use tokio::sync::{Notify, mpsc};
 use crate::{
     frame::Frame,
     metrics::{Event, Metrics},
+    phrases::WordList,
     recognizer::{
         Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
         TranscriptionFailure,
@@ -19,17 +20,25 @@ use crate::{
 pub struct OpenAiRecognizer {
     speech: SpeechSource,
     live: OpenAiLive,
+    prompt: String,
     client: reqwest::Client,
     metrics: Metrics,
 }
 
 impl OpenAiRecognizer {
     #[must_use]
-    pub fn new(name: &str, live: OpenAiLive, client: reqwest::Client, metrics: Metrics) -> Self {
+    pub fn new(
+        name: &str,
+        live: OpenAiLive,
+        client: reqwest::Client,
+        metrics: Metrics,
+        words: &WordList,
+    ) -> Self {
         let speech = SpeechSource::direct(name, live.settings.address().to_owned());
         Self {
             speech,
             live,
+            prompt: words.hint(),
             client,
             metrics,
         }
@@ -76,6 +85,7 @@ fn failure(speech: &SpeechSource, error: &SecondaryError) -> RecognizerError {
 pub struct OpenAiSession {
     speech: SpeechSource,
     live: OpenAiLive,
+    prompt: String,
     frames: Vec<Frame>,
     finished: bool,
     client: reqwest::Client,
@@ -101,6 +111,7 @@ impl Recognizer for OpenAiRecognizer {
         Ok(OpenAiSession {
             speech: self.speech.clone(),
             live: self.live.clone(),
+            prompt: self.prompt.clone(),
             frames: Vec::new(),
             finished: false,
             client: self.client.clone(),
@@ -154,6 +165,7 @@ impl RecognizerSession for OpenAiSession {
             let client = self.client.clone();
             let speech = self.speech.clone();
             let live = self.live.clone();
+            let prompt = self.prompt.clone();
             let frames = self.frames.clone();
             let metrics = self.metrics.clone();
             let released_at = self.released_at.unwrap_or_else(Instant::now);
@@ -167,7 +179,7 @@ impl RecognizerSession for OpenAiSession {
                 let started = Instant::now();
                 let mut first_text = true;
                 let mut deltas = 0_u32;
-                let result = transcribe_events(&client, &live, &frames, |event| {
+                let result = transcribe_events(&client, &live, &frames, &prompt, |event| {
                     if matches!(event, RecognizerEvent::Partial(_)) {
                         deltas = deltas.saturating_add(1);
                         metrics.metric(Event::LiveSttDelta, "ok", None, serde_json::json!({}));

@@ -12,6 +12,7 @@ use crate::{
     entries::{FinalEntry, LiveKind},
     frame::Frame,
     metrics::{Dictation, Event, Recorder},
+    phrases::WordList,
     recognizer::Recognizer,
     secondary::{
         self, Language, OpenAiLive, SecondaryApi, SecondaryError, SecondaryStt, Transcript,
@@ -29,7 +30,7 @@ enum Source<R> {
 pub(super) struct FinalPass<R> {
     label: Extra,
     source: Source<R>,
-    prompt: String,
+    words: WordList,
     /// The language the final pass entry was told to expect, when it names one.
     language: Option<Language>,
 }
@@ -75,7 +76,7 @@ impl<R> FinalPass<R> {
         Some(Self {
             label,
             source,
-            prompt: config.stt.phrases.phrases().join(", "),
+            words: config.stt.phrases.clone(),
             language,
         })
     }
@@ -276,11 +277,11 @@ where
         let abort = self.final_tasks.spawn(async move {
             let text = match &pass.source {
                 Source::OpenAi(entry) => {
-                    secondary::transcribe_finished(&client, entry, &frames, &pass.prompt)
+                    secondary::transcribe_finished(&client, entry, &frames, &pass.words.hint())
                         .await
                         .map_err(Outcome::from)
                 }
-                Source::Meta(entry) => secondary::transcribe(&client, entry, &frames)
+                Source::Meta(entry) => secondary::transcribe(&client, entry, &frames, &pass.words)
                     .await
                     .map_err(Outcome::from),
                 Source::Stream(recognizer) => streaming::finished(&**recognizer, &frames)

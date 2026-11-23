@@ -1039,7 +1039,7 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
         );
         assert!(
             model.description.contains("Experimental")
-                && model.description.contains("word list is ignored"),
+                && !model.description.contains("word list is ignored"),
             "{}",
             model.description
         );
@@ -1059,7 +1059,7 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
             .iter()
             .map(|model| model.word_list)
             .collect::<Vec<_>>(),
-        [false, false]
+        [true, true]
     );
 
     for asset in [WHISPER_TURBO.model, WHISPER_TURBO.vad] {
