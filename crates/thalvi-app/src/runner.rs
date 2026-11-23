@@ -4611,6 +4611,60 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn the_runner_reports_an_overlay_failure_and_clears_it_on_recovery() {
+        LocalSet::new()
+            .run_until(async {
+                let script = FedRun::start(false, false);
+                yield_until("listening did not start", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                script.link.send(Control::Overlay(Some(Failure {
+                    kind: FailureKind::Other,
+                    headline: "Status overlay unavailable",
+                    notice: "The overlay surface closed.".to_owned(),
+                    causes: Vec::new(),
+                })));
+                yield_until("the overlay failure was not reported", || {
+                    matches!(
+                        &*script.status.borrow(),
+                        Status::Failed { notice, .. } if notice == "The overlay surface closed."
+                    )
+                })
+                .await;
+                script.link.send(Control::Overlay(None));
+                yield_until("the overlay failure stayed after recovery", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn changed_settings_publish_the_selected_microphone() {
+        LocalSet::new()
+            .run_until(async {
+                let script = FedRun::start(false, false);
+                yield_until("listening did not start", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                script.link.send(Control::Apply(Box::new(DesktopConfig {
+                    microphone: Some("USB Mic".to_owned()),
+                    ..feed_config()
+                })));
+                yield_until("the microphone selection was not applied", || {
+                    script.audio.borrow().selected.as_deref() == Some("USB Mic")
+                })
+                .await;
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_microphone_that_stops_while_listening_is_closed_and_reported_not_taken_for_a_clip() {
         LocalSet::new()
             .run_until(async {
