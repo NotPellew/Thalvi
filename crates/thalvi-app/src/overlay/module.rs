@@ -221,7 +221,7 @@ fn background(finish: Finish, theme: &Theme, scale: f32) -> Option<Canvas> {
         Finish::Gunmetal => art::FRAME_EDGE,
         Finish::Holo => theme.measures.border,
     };
-    let panel = panel(width);
+    let panel = panel(width)?;
     match finish {
         Finish::Gunmetal => {
             shade(&mut canvas, outer, shoulder, radius, &theme.metal);
@@ -357,7 +357,9 @@ fn shine(canvas: &mut Canvas, theme: &Theme, clock: f64) {
     }
     #[expect(clippy::cast_possible_truncation, reason = "a share of one cycle")]
     let travel = ((at - art::SHINE_FROM) / (art::SHINE_CYCLE - art::SHINE_FROM)) as f32;
-    let panel = panel(theme.measures.border);
+    let Some(panel) = panel(theme.measures.border) else {
+        return;
+    };
     let (offscreen, distance, width) = art::SHINE_RANGE;
     let x = panel[0] - offscreen + distance * travel;
     let stops = [
@@ -381,13 +383,15 @@ fn shine(canvas: &mut Canvas, theme: &Theme, clock: f64) {
     canvas.clip(None);
 }
 
-fn panel(border: f32) -> [f32; 4] {
-    [
+fn panel(border: f32) -> Option<[f32; 4]> {
+    let height = MODULE_H - border;
+    // The mesh and scanline loops walk the panel, so it must be a height the module holds.
+    (0.0..=MODULE_H).contains(&height).then_some([
         MODULE_X + border,
         0.0,
         MODULE_W - 2.0 * border,
-        MODULE_H - border,
-    ]
+        height,
+    ])
 }
 
 /// The corners of a trapezoid `[x, y, width, height]` whose bottom edge is `inset` in from each side.
@@ -782,6 +786,13 @@ mod tests {
         Theme::resolve(&defaults_of(look))
     }
 
+    /// The holo look with `width`'s border, as Settings' border control sets it.
+    fn holo_with_border(width: u8) -> Theme {
+        let mut style = defaults_of(Look::Holo);
+        style.dark.border_width = width;
+        Theme::resolve(&style)
+    }
+
     fn ticker(canvas: &mut Canvas, text: &mut Text, line: &Line, blink_on: bool) {
         super::ticker(
             canvas,
@@ -1011,7 +1022,11 @@ mod tests {
     }
 
     fn drawn(finish: Finish, view: &View) -> Vec<[u8; 4]> {
-        let mut module = Module::new(finish, built_in(finish), 1.0).unwrap();
+        drawn_with(finish, built_in(finish), view)
+    }
+
+    fn drawn_with(finish: Finish, theme: Theme, view: &View) -> Vec<[u8; 4]> {
+        let mut module = Module::new(finish, theme, 1.0).expect("a module to draw");
         painted(|canvas, text| {
             module.draw(canvas, text, view, view.clock);
         })
@@ -1049,6 +1064,20 @@ mod tests {
             view.clock = 5.5;
             assert_eq!(drawn(finish, &view) != still, shines, "{finish:?}");
         }
+    }
+
+    #[test]
+    fn a_holo_module_with_no_border_keeps_its_panel_to_the_module_edges() {
+        let view = shown(capturing(), false, 0.0, 0.0);
+        let bare = drawn_with(Finish::Holo, holo_with_border(0), &view);
+        let rimmed = drawn_with(Finish::Holo, holo_with_border(1), &view);
+        let (_, rows) = changed(&bare, &rimmed);
+        assert_eq!(rows, (0, 83), "no border reaches the module's last row");
+        let (bare, rimmed) = (bare[45], rimmed[45]);
+        assert!(
+            bare[3] > 200 && bare != rimmed,
+            "the panel sits where the rim was: {bare:?} against {rimmed:?}"
+        );
     }
 
     #[test]

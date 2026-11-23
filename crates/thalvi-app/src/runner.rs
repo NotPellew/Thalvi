@@ -1180,7 +1180,6 @@ impl<S: Rig> Runner<S> {
         }
         if self.feed_only() && !*self.feeding.borrow() {
             self.end_unopened_feed();
-            return Flow::Continue;
         }
         let listening = !self.paused
             && self
