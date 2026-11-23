@@ -42,7 +42,7 @@ export const APPLIED_TEXT = "Applied.";
 export const APPLIED_LATER_TEXT = "Applied. From the next dictation.";
 
 /** While one of these runs, a change is held until the capture is over. */
-export const DURING_CAPTURE: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "transcribing", "merging", "cleaningUp"];
+export const DURING_CAPTURE: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "transcribing", "finalPass", "merging", "cleaningUp"];
 
 /** The settings as the desktop holds them: pages read them and change them only through `apply`. */
 type DeepReadonly<T> = T extends (infer U)[] ? readonly DeepReadonly<U>[] : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
@@ -976,7 +976,7 @@ const KINDS: Record<SpeechEntry["kind"], Kind> = {
   },
   extra: {
     title: "Extra-only servers",
-    hint: "Only check the live text; need a chat model.",
+    hint: "Upload for a final pass or as an extra.",
     terms: "extra-only servers · extra recognizers · speech servers",
     add: "Add an extra-only server",
     about: "Transcribes each capture again for the chat model to merge with the live text; it never shows your words itself.",
@@ -1268,6 +1268,8 @@ function speech(context: PageContext): SpeechRows {
         return "Ready";
       case "transcribing":
         return "Transcribing…";
+      case "finalPass":
+        return "Final pass…";
       case "merging":
         return "Merging…";
       case "cleaningUp":
@@ -1367,7 +1369,10 @@ function speech(context: PageContext): SpeechRows {
       for (const entry of list) {
         if (!isLive(entry)) continue;
         entry.active = entry.id === id;
-        if (entry.active) delete entry.extra;
+        if (entry.active) {
+          delete entry.extra;
+          delete entry.final_pass;
+        }
       }
     }, liveApplied, () => {
       render();
@@ -1450,24 +1455,42 @@ function speech(context: PageContext): SpeechRows {
     return el("span", { class: "extra" }, el("label", { for: input.id }, "Extra"), ticked.node);
   }
 
+  function finalPassSwitch(entry: SpeechEntry): HTMLElement {
+    const switched = controls.toggle(entry.final_pass === true, (on) => apply((next) => {
+      for (const candidate of next.stt.entries) {
+        if (on && candidate.id === entry.id) candidate.final_pass = true;
+        else delete candidate.final_pass;
+      }
+    }).then(() => {
+      syncExtras();
+      checkWordList();
+    }));
+    const input = switched.field as HTMLInputElement;
+    input.setAttribute("aria-label", `Final pass: ${entry.name}`);
+    return el("span", { class: "extra final-pass" }, el("label", { for: input.id }, "Final pass"), switched.node);
+  }
+
   function entryRow(entry: SpeechEntry): HTMLElement {
     const edit = button("Edit", () => {
       openEditor(edit, entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
     edit.setAttribute("aria-expanded", "false");
-    const role = isLive(entry) && entry.active ? el("span", { class: "badge", "data-on": "true" }, "Live") : extraSwitch(entry);
+    const role = isLive(entry) && entry.active
+      ? [el("span", { class: "badge", "data-on": "true" }, "Live")]
+      : [extraSwitch(entry), finalPassSwitch(entry)];
     return el(
       "div",
       { class: "trow server", "data-id": entry.id },
       el("span", { class: "phrase" }, entry.name),
       whereLine(entry),
-      el("span", { class: "tail" }, role, edit),
+      el("span", { class: "tail" }, ...role, edit),
       ...deviceLine(entry),
       ...(rowNote?.id === entry.id ? [el("small", { class: "applied", role: "status" }, rowNote.text)] : []),
     );
   }
 
+  const finalPassState = el("p", { class: "next-dictation", role: "status", hidden: true }, "");
   const extraState = el("p", { class: "next-dictation extras", role: "status" }, "");
   const needsEndpoint = el(
     "p",
@@ -1491,13 +1514,22 @@ function speech(context: PageContext): SpeechRows {
 
   /** What the page says follows the settings: the endpoint, and which extras are on. */
   function syncExtras(): void {
+    const finalPass = entries().find((entry) => entry.final_pass === true);
     for (const { list } of groups) {
-      for (const input of list.querySelectorAll<HTMLInputElement>(".trow.server input[type=checkbox]")) lockTick(input);
+      for (const input of list.querySelectorAll<HTMLInputElement>(".extra:not(.final-pass) input[type=checkbox]")) lockTick(input);
+      for (const row of list.querySelectorAll<HTMLElement>(".trow.server")) {
+        const input = row.querySelector<HTMLInputElement>(".final-pass input[type=checkbox]");
+        if (input) input.checked = finalPass?.id === row.dataset["id"];
+      }
     }
     const on = entries().filter(isExtraOn);
     const merged = `The chat model merges ${on.length === 1 ? "its text" : "their texts"} with the live text.`;
     const loads = on.some((entry) => entry.kind === "on_device") ? " Each on-device extra loads its own model, which adds memory and processing." : "";
-    extraState.textContent = on.length === 0 ? "Extra: none" : `Extra: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`;
+    finalPassState.hidden = finalPass === undefined;
+    finalPassState.textContent = finalPass === undefined ? "" : `Final pass: ${finalPass.name}. Its text is used after you stop.`;
+    extraState.textContent = finalPass !== undefined
+      ? "Paused while a final pass is set"
+      : on.length === 0 ? "Extra: none" : `Extra: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`;
     needsEndpoint.hidden = settings.writing !== null;
     syncCleanup();
   }
@@ -2053,7 +2085,14 @@ function speech(context: PageContext): SpeechRows {
   function checkWordList(): void {
     const request = (wordListRequest += 1);
     const active = activeLive();
+    const finalPass = entries().find((entry) => entry.final_pass === true);
+    const uploadUsesWords = finalPass?.kind === "open_ai" || (finalPass?.kind === "extra" && finalPass.api === "openai");
     say(wordProblem, "");
+    if (uploadUsesWords) {
+      if (wordHint) wordHint.textContent = "The final pass uses this word list.";
+      words.enable(true);
+      return;
+    }
     if (wordHint) wordHint.textContent = wordListNotice(active);
     if (active === undefined || active.kind !== "realtime") {
       words.enable(true);
@@ -2091,7 +2130,7 @@ function speech(context: PageContext): SpeechRows {
   syncChatSource();
   return {
     recognition: [
-      el("div", { class: "grp" }, liveRow, nextDictation, summaryActions, extraState, needsEndpoint),
+      el("div", { class: "grp" }, liveRow, nextDictation, summaryActions, finalPassState, extraState, needsEndpoint),
       ...groups.map(({ node }) => node),
       el("div", { class: "grp" }, wordRow),
     ],
@@ -2203,7 +2242,7 @@ function microphone({ settings, backend, controls, microphones, live, audio, app
 function overlay({ settings, controls, apply }: PageContext): HTMLElement[] {
   return [
     group("Overlay"),
-    row("Show the overlay", "A small pill at the top while capturing.",
+    row("Show the overlay", "Final pass always previews Submit.",
       controls.toggle(settings.overlay.show, (value) =>
         apply((next) => {
           next.overlay.show = value;

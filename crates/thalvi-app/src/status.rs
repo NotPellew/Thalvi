@@ -1,11 +1,12 @@
 //! What the UI is told: the engine's state, the pause switch and the delivery outcome as one typed status.
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use serde::Serialize;
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::device::{Export, Step};
-use thalvi_desktop::engine::EngineState;
+use thalvi_desktop::engine::{EngineState, SubmitPreview};
 use thalvi_desktop::report::{UserError, causes};
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
@@ -47,6 +48,9 @@ pub enum Status {
         pause_ms: u64,
         /// The action is a copy to the clipboard, whatever the route.
         copies: bool,
+        /// The exact text behind a final-pass Submit must be visible during review.
+        #[serde(skip)]
+        final_confirmation: Option<SubmitPreview>,
     },
     /// The writing model is putting the dictation into proper text; `text` is what has come in so far.
     Writing {
@@ -84,6 +88,10 @@ pub enum Status {
         target: Option<String>,
         route: CaptureRoute,
     },
+    FinalPass {
+        target: Option<String>,
+        route: CaptureRoute,
+    },
     Done {
         target: Option<String>,
         route: CaptureRoute,
@@ -104,6 +112,22 @@ pub enum Status {
         #[serde(skip)]
         downloading: bool,
     },
+}
+
+impl Status {
+    /// Whether the overlay must show these exact words before they are sent.
+    pub(crate) const fn requires_final_preview(&self) -> bool {
+        self.final_preview().is_some()
+    }
+
+    pub(crate) const fn final_preview(&self) -> Option<&SubmitPreview> {
+        match self {
+            Self::Pending {
+                final_confirmation, ..
+            } => final_confirmation.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 /// What a failure stopped, which decides what the overlay's label may claim.
@@ -310,13 +334,9 @@ impl View {
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
                 EngineState::Listening if self.wake_words => Status::Listening,
                 EngineState::Listening => Status::KeyboardOnly,
-                EngineState::StartingCapture => Status::Starting {
+                EngineState::StartingCapture | EngineState::LoadingModel => Status::Starting {
                     target,
-                    loading: false,
-                },
-                EngineState::LoadingModel => Status::Starting {
-                    target,
-                    loading: true,
+                    loading: matches!(engine, EngineState::LoadingModel),
                 },
                 EngineState::Capturing {
                     committed,
@@ -332,14 +352,21 @@ impl View {
                     route,
                     text,
                     waiting_for_quiet,
-                } => Status::Pending {
+                } => self.pending_status(target, *route, text, *waiting_for_quiet, None),
+                EngineState::ConfirmingSubmit {
+                    text,
+                    pause,
+                    preview,
+                } => self.pending_status(
+                    target,
+                    CaptureRoute::Submit,
+                    text,
+                    false,
+                    Some((*pause, preview)),
+                ),
+                EngineState::FinalPass { route } => Status::FinalPass {
                     target,
                     route: *route,
-                    text: text.clone(),
-                    waiting_for_quiet: *waiting_for_quiet,
-                    pause_ms: u64::try_from(self.pauses.get(*route).as_millis())
-                        .unwrap_or(u64::MAX),
-                    copies: self.copies,
                 },
                 EngineState::Merging { route } => Status::Merging {
                     target,
@@ -361,6 +388,29 @@ impl View {
                     again: *again,
                 },
             },
+        }
+    }
+
+    fn pending_status(
+        &self,
+        target: Option<String>,
+        route: CaptureRoute,
+        text: &str,
+        waiting_for_quiet: bool,
+        final_preview: Option<(Duration, &SubmitPreview)>,
+    ) -> Status {
+        let (pause, final_confirmation) = final_preview.map_or_else(
+            || (self.pauses.get(route), None),
+            |(pause, preview)| (pause, Some(preview.clone())),
+        );
+        Status::Pending {
+            target,
+            route,
+            text: text.to_owned(),
+            waiting_for_quiet,
+            pause_ms: u64::try_from(pause.as_millis()).unwrap_or(u64::MAX),
+            copies: self.copies,
+            final_confirmation,
         }
     }
 }
@@ -477,39 +527,6 @@ mod tests {
                 },
             ),
             (
-                pending(CaptureRoute::Submit, true),
-                Status::Pending {
-                    target: Some(kitty()),
-                    route: CaptureRoute::Submit,
-                    text: "hello".to_owned(),
-                    waiting_for_quiet: true,
-                    pause_ms: 2500,
-                    copies: false,
-                },
-            ),
-            (
-                pending(CaptureRoute::Paste, false),
-                Status::Pending {
-                    target: Some(kitty()),
-                    route: CaptureRoute::Paste,
-                    text: "hello".to_owned(),
-                    waiting_for_quiet: false,
-                    pause_ms: 700,
-                    copies: false,
-                },
-            ),
-            (
-                pending(CaptureRoute::Write, false),
-                Status::Pending {
-                    target: Some(kitty()),
-                    route: CaptureRoute::Write,
-                    text: "hello".to_owned(),
-                    waiting_for_quiet: false,
-                    pause_ms: 700,
-                    copies: false,
-                },
-            ),
-            (
                 EngineState::Writing {
                     text: "Hello, ".to_owned(),
                 },
@@ -544,6 +561,29 @@ mod tests {
         for (engine, expected) in cases {
             let label = format!("{engine:?}");
             assert_eq!(view(Mode::Idle, engine).status(), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn pending_status_keeps_the_route_text_and_timing_of_the_ending() {
+        for (route, waiting_for_quiet, pause_ms) in [
+            (CaptureRoute::Submit, true, 2500),
+            (CaptureRoute::Paste, false, 700),
+            (CaptureRoute::Write, false, 700),
+        ] {
+            assert_eq!(
+                view(Mode::Idle, pending(route, waiting_for_quiet)).status(),
+                Status::Pending {
+                    target: Some(kitty()),
+                    route,
+                    text: "hello".to_owned(),
+                    waiting_for_quiet,
+                    pause_ms,
+                    copies: false,
+                    final_confirmation: None,
+                },
+                "{route:?}",
+            );
         }
     }
 
@@ -830,6 +870,7 @@ mod tests {
                     waiting_for_quiet: false,
                     pause_ms: 2500,
                     copies: true,
+                    final_confirmation: None,
                 },
                 json!({"state": "pending", "target": "kitty", "route": "submit", "text": "hi",
                        "waitingForQuiet": false, "pauseMs": 2500, "copies": true}),

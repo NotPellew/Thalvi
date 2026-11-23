@@ -291,6 +291,7 @@ fn phase_word(phase: &str) -> &'static str {
         "capturing" => "Capturing",
         "pending" => "Ending",
         "transcribing" => "Transcribing",
+        "finalPass" => "Final pass",
         "merging" => "Merging",
         "delivering" => "Delivering",
         "writing" => "Writing",

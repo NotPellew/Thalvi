@@ -1,8 +1,8 @@
 {
-  "sync_commit": "d09737c79079b6e81bd151ab82d111e7ac628de4",
+  "sync_commit": "7a39a9aaa7210830ef99df3c63ed1fea4710a298",
   "files": {
     "crates/thalvi-app/src/runner.rs": {
-      "sha256": "5ed1d010502f25ad5322b365204838f5ed61fe9104c61cfa8691f53259665aa9",
+      "sha256": "cad9748798a3e9cd6afbe48603a420dd58c9c7008adc8e39d3a9ae3bcc559541",
       "functions": [
         "Requests::take",
         "Requests::read_queued",
@@ -12,7 +12,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "b5bd6c853a7223a9f725b240c533f8edb9592ec466a28dc940b7b57a9f2910ac",
+      "sha256": "b2a62e4d23b8e529105301969b4e04b8d668bca2372f2ee23cd5ebbab1f37f90",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",
@@ -27,7 +27,9 @@
         "Engine::start",
         "download_started",
         "Engine::ask_merge",
-        "Engine::drop_streams"
+        "Engine::drop_streams",
+        "Engine::confirm_final_submit",
+        "Engine::finish_transcript"
       ]
     },
     "crates/thalvi-desktop/src/recognizer.rs": {
@@ -37,7 +39,7 @@
       ]
     },
     "crates/thalvi-desktop/src/delivery.rs": {
-      "sha256": "e3d268ae1ac7a92fe7493a438451a58b21f5c4206be114c74acbecf10518eecd",
+      "sha256": "b3d3c492c6d73c8723f3c6915cfc57349fe997806dca3c44a5188ae3bf66edf8",
       "functions": [
         "Delivery::finish",
         "Delivery::paste_in",
@@ -58,7 +60,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine/streaming.rs": {
-      "sha256": "d8d90478b46ec6f88d013055b15c42c643641d10590f95021ef39f0bddfe628d",
+      "sha256": "a151b3148973c9a3d1bfedb1b6bfda76173eef60ea63b93dcc5c99b8d9d09a5c",
       "functions": [
         "Streams::start",
         "Streams::finish",
@@ -66,7 +68,8 @@
         "hear",
         "park",
         "run",
-        "send_frame"
+        "send_frame",
+        "finished"
       ]
     },
     "crates/thalvi-desktop/src/local.rs": {
@@ -74,6 +77,22 @@
       "functions": [
         "LocalRecognizer::connect",
         "LocalRecognizer::loading"
+      ]
+    },
+    "crates/thalvi-desktop/src/engine/final_pass.rs": {
+      "sha256": "d1c2ce457fc6394d82e29fb08c7fac5a58c7dd073e7d4419679f78c3c4f2958f",
+      "functions": [
+        "Engine::start_final_pass",
+        "Engine::wait_final_pass",
+        "Request::cancel"
+      ]
+    },
+    "crates/thalvi-desktop/src/engine/submit_preview.rs": {
+      "sha256": "c6096f7126df753bebc64412d4a26f6f556b2118530a31cf483e41bf5ed0b6aa",
+      "functions": [
+        "SubmitPreview::watch",
+        "SubmitPreview::shown",
+        "SubmitPreview::failed"
       ]
     }
   }

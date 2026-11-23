@@ -10,7 +10,10 @@ use thalvi_desktop::theme::overlay::{
 };
 
 use super::paint::{Canvas, Fill, Layout, Rgba, Style, Text, TextBounds};
-use super::view::{Tone, View, WIDTH, copies_text, done_message, spaced};
+use super::view::{
+    HEIGHT, SUBMIT_DRAFT_SURFACE, SUBMIT_DRAFT_TEXT, Tone, View, WIDTH, copies_text, done_message,
+    spaced,
+};
 use crate::status::Status;
 
 /// The neon look's state between frames: its theme, the bars' eased level, and where it last
@@ -41,7 +44,7 @@ impl Neon {
         })
     }
 
-    pub(super) fn draw(&mut self, canvas: &mut Canvas, text: &mut Text, view: &View) {
+    pub(super) fn draw(&mut self, canvas: &mut Canvas, text: &mut Text, view: &View) -> bool {
         canvas.clear();
         let elapsed = self.last.map_or(0.0, |last| {
             (view.clock - last).clamp(0.0, art::BAR_EASING.2)
@@ -61,7 +64,7 @@ impl Neon {
             self.shown = 0.0;
         }
         let pill = self.pill(canvas, text, view, moving);
-        if let Some(words) = draft(view) {
+        draft(view).is_some_and(|words| {
             card(
                 canvas,
                 text,
@@ -69,8 +72,8 @@ impl Neon {
                 &self.theme,
                 &words,
                 pill.1 + pill.3 + art::GAP * self.theme.measures.spacing,
-            );
-        }
+            )
+        })
     }
 
     /// Draws the pill; its rectangle.
@@ -448,6 +451,9 @@ fn pill_words(view: &View) -> (Tone, String, Option<&str>) {
         Status::Transcribing { target, .. } => {
             (Tone::Working, words("TRANSCRIBING…"), target.as_deref())
         }
+        Status::FinalPass { target, .. } => {
+            (Tone::Working, words("FINAL PASS…"), target.as_deref())
+        }
         Status::Merging { target, .. } => (Tone::Working, words("MERGING…"), target.as_deref()),
         Status::CleaningUp { target } => (Tone::Working, words("CLEANING UP…"), target.as_deref()),
         Status::Working { target, .. } => (Tone::Working, words("WORKING"), target.as_deref()),
@@ -509,7 +515,7 @@ fn draft(view: &View) -> Option<Draft> {
             notice: true,
             ..words(notice, "", false)
         }),
-        _ if !view.show_draft => None,
+        _ if !view.show_draft && !view.status.requires_final_preview() => None,
         Status::Capturing {
             committed, partial, ..
         } => Some(words(
@@ -544,7 +550,14 @@ fn draft(view: &View) -> Option<Draft> {
 }
 
 /// The card under the pill: the draft's last lines, the ending and the countdown bar.
-fn card(canvas: &mut Canvas, text: &mut Text, view: &View, theme: &Theme, words: &Draft, top: f32) {
+fn card(
+    canvas: &mut Canvas,
+    text: &mut Text,
+    view: &View,
+    theme: &Theme,
+    words: &Draft,
+    top: f32,
+) -> bool {
     let measures = theme.measures;
     let style = measures.text(DRAFT);
     let (inset_x, inset_y) = (
@@ -556,11 +569,12 @@ fn card(canvas: &mut Canvas, text: &mut Text, view: &View, theme: &Theme, words:
     let width = (WIDTH - 2.0 * art::SIDE) * art::CARD_SHARE;
     let left = (WIDTH - width) / 2.0;
     let inner = width - 2.0 * art::BASE_EDGE - 2.0 * inset_x;
-    let committed_color = if words.notice {
-        theme.state.pending
-    } else {
-        theme.fg
-    };
+    let (surface, committed_color, ending_color) =
+        match (view.status.requires_final_preview(), words.notice) {
+            (true, _) => (SUBMIT_DRAFT_SURFACE, SUBMIT_DRAFT_TEXT, SUBMIT_DRAFT_TEXT),
+            (false, true) => (theme.card, theme.state.pending, theme.state.pending),
+            (false, false) => (theme.card, theme.fg, theme.state.pending),
+        };
     let committed = spaced(&words.committed, &words.partial);
     let spans = [
         (committed.as_str(), committed_color),
@@ -574,7 +588,7 @@ fn card(canvas: &mut Canvas, text: &mut Text, view: &View, theme: &Theme, words:
     // The ending sits after the last word, or on a line of its own when it does not fit.
     let (ending_gap, ending_pad, ..) = art::ENDING;
     let ending_width = words.ending.map_or(0.0, |(word, ..)| {
-        text.measure(&[(word, theme.state.pending)], style, Layout::Line, scale)
+        text.measure(&[(word, ending_color)], style, Layout::Line, scale)
             .0
             + 2.0 * ending_pad
     });
@@ -586,13 +600,13 @@ fn card(canvas: &mut Canvas, text: &mut Text, view: &View, theme: &Theme, words:
     let shown = count.min(art::DRAFT_LINES);
     let text_height = shown * style.line_height;
     let counting = words.ending.is_some();
-    let (bar_gap, bar_height, bar_radius, bar_waiting) = art::COUNTDOWN;
+    let (bar_gap, bar_height, ..) = art::COUNTDOWN;
     let height = 2.0 * art::BASE_EDGE
         + 2.0 * inset_y
         + text_height
         + if counting { bar_gap + bar_height } else { 0.0 };
     shadow(canvas, (left, top, width, height), radius, theme);
-    canvas.rect((left, top, width, height), radius, &Fill::Solid(theme.card));
+    canvas.rect((left, top, width, height), radius, &Fill::Solid(surface));
     canvas.outline(
         (left, top, width, height),
         radius,
@@ -610,7 +624,7 @@ fn card(canvas: &mut Canvas, text: &mut Text, view: &View, theme: &Theme, words:
         ending_badge(
             canvas,
             text,
-            (word, theme.state.pending),
+            (word, ending_color),
             style,
             (text_left + end_x, last_top, ending_width),
         );
@@ -630,22 +644,37 @@ fn card(canvas: &mut Canvas, text: &mut Text, view: &View, theme: &Theme, words:
     }
     canvas.clip(None);
     if let Some((_, share, running)) = words.ending {
-        let y = text_top + text_height + bar_gap;
-        canvas.rect(
-            (text_left, y, inner, bar_height),
-            bar_radius,
-            &Fill::Solid(theme.line),
-        );
-        let bar = theme
-            .state
-            .pending
-            .faded(if running { 1.0 } else { bar_waiting });
-        canvas.rect(
-            (text_left, y, inner * share, bar_height),
-            bar_radius,
-            &Fill::Solid(bar),
+        card_countdown(
+            canvas,
+            theme,
+            (text_left, text_top + text_height + bar_gap, inner),
+            share,
+            running,
         );
     }
+    count <= art::DRAFT_LINES
+        && text_top + text_height <= HEIGHT
+        && lines.iter().all(|width| *width <= inner)
+}
+
+fn card_countdown(
+    canvas: &mut Canvas,
+    theme: &Theme,
+    (left, top, width): (f32, f32, f32),
+    share: f32,
+    running: bool,
+) {
+    let (_, height, radius, waiting) = art::COUNTDOWN;
+    canvas.rect((left, top, width, height), radius, &Fill::Solid(theme.line));
+    let bar = theme
+        .state
+        .pending
+        .faded(if running { 1.0 } else { waiting });
+    canvas.rect(
+        (left, top, width * share, height),
+        radius,
+        &Fill::Solid(bar),
+    );
 }
 
 fn ending_badge(
@@ -885,6 +914,7 @@ mod tests {
             waiting_for_quiet,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         };
         let writing = Status::Writing {
             target: None,
@@ -1065,6 +1095,7 @@ mod tests {
             waiting_for_quiet,
             pause_ms: 2000,
             copies: false,
+            final_confirmation: None,
         };
         let working = Status::Working {
             target: None,

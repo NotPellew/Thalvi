@@ -293,3 +293,60 @@ async fn run<R: Recognizer>(
         took,
     }
 }
+
+/// Replays a finished capture through a recognizer that normally takes live audio.
+pub(super) async fn finished<R: Recognizer>(
+    recognizer: &R,
+    frames: &[Frame],
+) -> Result<String, super::final_pass::Outcome> {
+    use super::{RELEASE_LIMIT, RELEASE_SILENCE, final_pass::Outcome};
+    use crate::recognizer::ConnectFailure;
+
+    let replay = async {
+        let mut session = recognizer.connect().await?;
+        let buffers = session.buffers_audio();
+        let mut text = Text::default();
+        if buffers {
+            for frame in frames {
+                session.send_frame(frame).await?;
+            }
+            session.finish_audio().await?;
+            loop {
+                text.on_event(session.next_event().await?, buffers);
+                if text.complete(buffers) {
+                    break;
+                }
+            }
+        } else {
+            for frame in frames.iter().chain(&RELEASE_SILENCE) {
+                session.send_frame(frame).await?;
+            }
+            loop {
+                let settled = text
+                    .complete(buffers)
+                    .then(|| Instant::now() + RELEASE_LIMIT);
+                tokio::select! {
+                    biased;
+                    event = session.next_event() => text.on_event(event?, buffers),
+                    () = until(settled) => break,
+                }
+            }
+        }
+        Ok::<_, RecognizerError>(text.finals.join(" "))
+    };
+    match tokio::time::timeout(merge::LIMIT, replay).await {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(RecognizerError::Unreachable {
+            reason: ConnectFailure::Rejected(code),
+            ..
+        })) => Err(Outcome::HttpStatus(code)),
+        Ok(Err(
+            RecognizerError::Certificate { .. }
+            | RecognizerError::Unreachable { .. }
+            | RecognizerError::Dropped { .. }
+            | RecognizerError::Model { .. },
+        )) => Err(Outcome::Unreachable),
+        Ok(Err(_)) => Err(Outcome::BadReply),
+        Err(_) => Err(Outcome::Timeout),
+    }
+}

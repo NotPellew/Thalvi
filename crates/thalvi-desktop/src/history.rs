@@ -432,6 +432,7 @@ mod tests {
     fn finished(delivered: bool) -> Finished {
         Finished {
             delivered,
+            text_delivery: None,
             maybe_partial: false,
             notice: String::new(),
             headline: "",

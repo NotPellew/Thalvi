@@ -687,10 +687,18 @@ impl Rig for DesktopRig {
                 &self.whisper_helpers,
             )
         };
-        let extras: Vec<_> = config
-            .stt
-            .entries
-            .streaming_extras()
+        let entries = &config.stt.entries;
+        let streams: Vec<_> = match entries.final_pass() {
+            Some(thalvi_desktop::entries::FinalEntry::Live(entry))
+                if !matches!(entry.kind, LiveKind::OpenAi(_)) =>
+            {
+                vec![entry]
+            }
+            Some(_) => Vec::new(),
+            None => entries.streaming_extras().collect(),
+        };
+        let extras: Vec<_> = streams
+            .into_iter()
             .map(|entry| StreamingExtra {
                 entry: entry.clone(),
                 recognizer: Arc::new(chosen(entry, store.clone())),
@@ -1578,7 +1586,22 @@ impl<S: Rig> Runner<S> {
                         },
                     )
                     .await;
+                    let delivered_route = finished
+                        .as_ref()
+                        .filter(|finished| {
+                            finished.text_delivery
+                                == Some(thalvi_desktop::host::Delivered::InWindow)
+                        })
+                        .and(route);
+                    let final_note = engine.settle_final_pass(
+                        delivered_route,
+                        requests.ended || matches!(outcome, CaptureOutcome::Cancelled { .. }),
+                    );
                     ignored.extend(refused.into_inner());
+                    let note = match (final_note, note) {
+                        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+                        (a, b) => a.or(b),
+                    };
                     (finished, route, ignored, note)
                 }
             }
@@ -3405,6 +3428,7 @@ mod tests {
     fn only_a_capture_that_was_not_delivered_fails_as_a_delivery() {
         let finished = |delivered| Finished {
             delivered,
+            text_delivery: None,
             maybe_partial: false,
             notice: "Done.".to_owned(),
             headline: "Done",
