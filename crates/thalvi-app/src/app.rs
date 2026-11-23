@@ -1341,6 +1341,70 @@ mod tests {
     }
 
     #[test]
+    fn only_a_download_of_the_saved_wake_head_reapplies_the_saved_config_under_the_save_lock() {
+        use thalvi_desktop::models::CatalogHead;
+        // (what the saved config selects, the head that was downloaded, whether the engine hears it)
+        type Case = (&'static str, &'static str, CatalogHead, bool);
+        let cases: [Case; 4] = [
+            (
+                "the selected head",
+                r#"{"wake":{"capture":{"model":"hey_mycroft"}}}"#,
+                CatalogHead::HeyMycroft,
+                true,
+            ),
+            (
+                "another head",
+                r#"{"wake":{"capture":{"model":"hey_mycroft"}}}"#,
+                CatalogHead::HeyJarvis,
+                false,
+            ),
+            (
+                "the default head",
+                r#"{"microphone":"USB Mic"}"#,
+                CatalogHead::HeyThalvi,
+                true,
+            ),
+            (
+                "a head from a file",
+                r#"{"wake":{"capture":{"model":"/models/me.onnx"}}}"#,
+                CatalogHead::HeyMycroft,
+                false,
+            ),
+        ];
+        for (at, (case, json, downloaded, reapplied)) in cases.into_iter().enumerate() {
+            let dir =
+                std::env::temp_dir().join(format!("thalvi-app-wake-{}-{at}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let saved = DesktopConfig::from_json_str(json).unwrap();
+            let saves = SyncedConfig::new(
+                Store::new(Some(dir.join("desktop.json"))).unwrap(),
+                saved.clone(),
+            );
+            let applied = Mutex::new(Vec::new());
+
+            saves.wake_head_downloaded(downloaded, |config| {
+                assert!(
+                    saves.lock.try_lock().is_err(),
+                    "{case}: the config is read and sent under the save lock"
+                );
+                applied
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(config.clone());
+            });
+            let applied = applied.into_inner().unwrap_or_else(PoisonError::into_inner);
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert_eq!(
+                applied,
+                if reapplied { vec![saved] } else { Vec::new() },
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
     fn use_built_in_look_suspends_the_active_look_and_keeps_its_overrides() {
         let dir = std::env::temp_dir().join(format!("thalvi-app-builtin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
