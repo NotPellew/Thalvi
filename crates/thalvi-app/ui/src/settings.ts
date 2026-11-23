@@ -337,7 +337,14 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   }
 
   function open(id: string): void {
-    if (!pages.some((page) => page.id === id)) return;
+    const next = pages.find((page) => page.id === id);
+    if (!next) return;
+    const active = document.activeElement;
+    if (active !== null && pagesNode.contains(active) && !next.node.contains(active)) {
+      // A hidden page's focused select keeps WebKitGTK holding the keyboard, so focus must leave it.
+      next.node.hidden = false;
+      next.node.focus({ preventScroll: true });
+    }
     current = id;
     search.value = "";
     applyView();

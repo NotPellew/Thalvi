@@ -252,6 +252,29 @@ describe("pages", () => {
     const labels = Array.from(root.querySelectorAll<HTMLElement>(".row")).map((row) => row.dataset["label"]);
     expect(labels.filter((label, at) => labels.indexOf(label) !== at)).toEqual([]);
   });
+
+  it("moves focus off a hidden page's picker to the newly opened page, leaving the picker unchanged and unsaved", async () => {
+    const stub = await open();
+    goTo("app");
+    const channel = control("Update channel", "select");
+    const before = channel.value;
+    channel.focus();
+    expect(document.activeElement).toBe(channel);
+    stub.openPage("overlay");
+    const section = root.querySelector<HTMLElement>('section[data-page="overlay"]');
+    expect(document.activeElement).toBe(section);
+    expect(section?.hidden).toBe(false);
+    expect(channel.value).toBe(before);
+    expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("leaves focus on the sidebar button when a page opens", async () => {
+    const stub = await open();
+    const button = root.querySelector<HTMLElement>('nav [data-page="app"]');
+    button?.focus();
+    stub.openPage("overlay");
+    expect(document.activeElement).toBe(button);
+  });
 });
 
 describe("applying a change", () => {

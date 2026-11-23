@@ -25,6 +25,7 @@ button.quiet { color: var(--button-quiet); }
 
 main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .pages { flex: 1; overflow-y: auto; padding: var(--pages-pad-y) var(--pages-pad-x); }
+section[data-page]:focus { outline: none; }
 h3 { margin: 0 0 var(--h3-margin-bottom); padding-bottom: var(--h3-pad-bottom); font: var(--weight-label) var(--fs-13) var(--mono); letter-spacing: var(--track-page); color: var(--h3-color); text-shadow: var(--h3-shadow); background: var(--h3-rule); }
 h4 { margin: var(--h4-margin-top) 0 var(--h4-margin-bottom); font: var(--h4-weight) var(--h4-size) var(--h4-family); color: var(--h4-color); letter-spacing: var(--track-section); }
 
