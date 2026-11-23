@@ -60,6 +60,27 @@ export type SecondaryApi = "openai" | "meta";
 /** How a live OpenAI-compatible entry sends each capture. */
 export type OpenAiRequest = "transcriptions" | "chat";
 export type Look = "gunmetal" | "holo" | "neon";
+/** How a look's colours, sizes and effects reach a window, as CSS custom properties. */
+export type LookSurface = "settings" | "overlay";
+export interface LookProperty {
+  /** Dotted id, such as `colors.accent`. */
+  id: string;
+  label: string;
+  /** `colors`, `font`, `spacing`, `shape`, `border`, `surface`, `glow`, `decoration` or `motion`. */
+  category: string;
+  unit: "color" | "text" | "number" | "toggle";
+  min: number | null;
+  max: number | null;
+  step: number | null;
+  /** The looks the property applies to. */
+  looks: Look[];
+  surfaces: LookSurface[];
+}
+/** What Settings draws from: every property a look offers, and each look resolved to CSS custom properties. */
+export interface LookStyles {
+  properties: LookProperty[];
+  looks: Record<Look, Record<string, string>>;
+}
 /** Which builds Thalvi keeps itself updated to. */
 export type UpdateChannel = "stable" | "development";
 
@@ -323,6 +344,10 @@ export interface Backend {
   /** An agent changed the saved settings or a switch the window reads from the OS; the window's own saves never fire this. */
   onSettingsChangedElsewhere(listener: () => void): void;
   getSettings(): Promise<Settings>;
+  /** The look model resolved into the CSS custom properties this window wears, and every property a look offers. */
+  getLookStyles(): Promise<LookStyles>;
+  /** Says this window has its styles, so a show asked for meanwhile can happen. */
+  settingsReady(): Promise<void>;
   /** Applies a merge patch of the settings that changed: it is merged into the config the desktop holds when it runs, so it can't undo a change saved since. Rejects with the plain reason it was refused. */
   saveSettings(patch: SettingsPatch): Promise<void>;
   setListening(on: boolean): Promise<void>;

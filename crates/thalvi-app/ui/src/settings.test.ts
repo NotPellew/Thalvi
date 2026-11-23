@@ -3979,7 +3979,11 @@ describe("attached editor contrast", () => {
       (root.querySelector('.trow.server button[aria-label^="Edit "]') as HTMLButtonElement).click();
       const editor = root.querySelector<HTMLElement>(".table > .editor");
       if (!editor) throw new Error("no attached editor");
-      expect(getComputedStyle(editor).backgroundColor).toBe("rgb(16, 20, 24)");
+      // jsdom does not resolve custom properties, so the rule names the token and the Rust test
+      // holds the value the look model resolves for it.
+      const rules = Array.from(style.sheet?.cssRules ?? []).filter((rule): rule is CSSStyleRule => rule instanceof CSSStyleRule);
+      const rule = rules.find((candidate) => candidate.selectorText === ".table > .editor");
+      expect(rule?.style.getPropertyValue("background")).toBe("var(--editor-bg)");
     } finally {
       style.remove();
     }
