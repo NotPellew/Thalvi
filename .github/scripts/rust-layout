@@ -6,12 +6,11 @@ from pathlib import Path
 
 OS_MODULES = {'linux', 'windows', 'gnome', 'hyprland'}
 OS_PREDICATES = {'target_os', 'target_family', 'windows', 'unix'}
-ALLOWANCES = '.github/scripts/rust-layout.allow'
 
 OS_CFG_FIX = (
     'OS cfg in shared code: move the OS-specific part into the `linux`/`windows` module pair behind the desktop host '
     'interface (crates/thalvi-desktop/src/host.rs), select those modules with `#[cfg(target_os)]` on `mod` or `use` '
-    'only, and let each OS return a typed reason the user sees where it cannot do the thing; do not raise the allowance'
+    'only, and let each OS return a typed reason the user sees where it cannot do the thing'
 )
 TEST_MODULE_FIX = (
     'inline test module is not the end of the file: keep `#[cfg(test)] mod tests {` as the last item, '
@@ -132,23 +131,9 @@ def check_lib(masked: str) -> list[int]:
     return lines
 
 
-def read_allowances(root: Path) -> tuple[dict[str, int], list[str]]:
-    allowed: dict[str, int] = {}
-    problems = []
-    path = root / ALLOWANCES
-    for number, line in enumerate(path.read_text().splitlines() if path.exists() else [], 1):
-        fields = line.split(' ')
-        if len(fields) == 2 and fields[1].isdigit():
-            allowed[fields[0]] = int(fields[1])
-        else:
-            problems.append(f'{ALLOWANCES}:{number}: expected `path count`, one per line, nothing else')
-    return allowed, problems
-
-
 def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[2]
-    allowed, problems = read_allowances(root)
-    seen: set[str] = set()
+    problems: list[str] = []
     for file in sorted(root.glob('crates/*/src/**/*.rs')):
         rel = file.relative_to(root)
         name = rel.as_posix()
@@ -166,19 +151,7 @@ def main() -> int:
             end = masked.find('\n}', tests.end())
             if end < 0 or TEST_DECLARATION.sub('', masked[end + 2 :]).strip():
                 problems.append(f'{name}:{line_of(masked, tests.start())}: {TEST_MODULE_FIX}')
-        lines = os_cfg_lines(masked, exempt_from)
-        seen.add(name)
-        limit = allowed.get(name, 0)
-        if len(lines) > limit:
-            problems.append(f'{name}:{lines[0]}: {len(lines)} OS cfg uses, allowed {limit}; each use is listed below')
-            problems += [f'{name}:{n}: {OS_CFG_FIX}' for n in lines]
-        elif len(lines) < limit:
-            problems.append(f'{name}:1: {len(lines)} OS cfg uses left, allowed {limit}: lower this file to `{name} {len(lines)}` in {ALLOWANCES}, or delete the line at 0')
-    problems += [
-        f'{ALLOWANCES}: {name} is allowed {limit} OS cfg uses but no such file has any: delete the line'
-        for name, limit in allowed.items()
-        if name not in seen and limit > 0
-    ]
+        problems += [f'{name}:{n}: {OS_CFG_FIX}' for n in os_cfg_lines(masked, exempt_from)]
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems else 0
