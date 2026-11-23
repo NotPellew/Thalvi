@@ -1216,8 +1216,8 @@ function speech(context: PageContext): SpeechRows {
   let focusOnClose: () => HTMLElement | null = () => null;
   /** Keeps the open form in step with the entries, such as Remove on the entry that just became Live. */
   let syncEditor: () => void = () => undefined;
-  /** The "Applied." of the last change to one entry, on its row after a saved form or beside its Extra switch, until the next change. */
-  let rowNote: { id: string; text: string; by: "form" | "extra" } | null = null;
+  /** The "Applied." of the last change to one entry, on its row after a saved form or beside the switch flipped, until the next change. */
+  let rowNote: { id: string; text: string; by: "form" | "extra" | "final" } | null = null;
   const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
   const retryProblem = note();
   const useServer = button("Use a speech server instead", () => {
@@ -1447,21 +1447,27 @@ function speech(context: PageContext): SpeechRows {
     for (const { node } of groups) for (const note of node.querySelectorAll(".applied")) note.textContent = "";
   }
 
-  function extraSwitch(entry: SpeechEntry): HTMLElement {
-    const ticked = controls.toggle(isExtraOn(entry), (on) => {
+  /** A switch on an entry's row whose "Applied." outlives a rebuild of the rows. */
+  function rowSwitch(entry: SpeechEntry, by: "extra" | "final", value: boolean, commit: (on: boolean) => Promise<void>): Field {
+    const switched = controls.toggle(value, (on) => {
       forgetNotes();
-      return tick(entry.id, on).then(() => {
-        rowNote = { id: entry.id, text: controls.confirmation(), by: "extra" };
+      return commit(on).then(() => {
+        rowNote = { id: entry.id, text: controls.confirmation(), by };
       });
     });
-    if (rowNote?.id === entry.id && rowNote.by === "extra") ticked.node.querySelector(".applied")?.replaceChildren(rowNote.text);
+    if (rowNote?.id === entry.id && rowNote.by === by) switched.node.querySelector(".applied")?.replaceChildren(rowNote.text);
+    return switched;
+  }
+
+  function extraSwitch(entry: SpeechEntry): HTMLElement {
+    const ticked = rowSwitch(entry, "extra", isExtraOn(entry), (on) => tick(entry.id, on));
     const input = ticked.field as HTMLInputElement;
     input.setAttribute("aria-label", `Extra: ${entry.name}`);
     return el("span", { class: "extra" }, el("label", { for: input.id }, "Extra"), ticked.node);
   }
 
   function finalPassSwitch(entry: SpeechEntry): HTMLElement {
-    const switched = controls.toggle(entry.final_pass === true, (on) => apply((next) => {
+    const switched = rowSwitch(entry, "final", entry.final_pass === true, (on) => apply((next) => {
       for (const candidate of next.stt.entries) {
         if (on && candidate.id === entry.id) candidate.final_pass = true;
         else delete candidate.final_pass;
