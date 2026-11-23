@@ -225,6 +225,7 @@ describe("pages", () => {
         groups: {
           Overlay: ["show the overlay", "show the draft"],
           Look: ["look"],
+          Customize: [],
           Sounds: ["wake sound", "ending heard sound", "cancelled sound", "accepted sound", "error sound"],
         },
       },

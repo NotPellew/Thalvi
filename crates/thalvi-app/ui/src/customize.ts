@@ -1,0 +1,297 @@
+// The Customize section: controls generated from the look descriptors, and a live preview.
+
+import { errorText, OVERLAY_PREVIEW_STATES } from "./contract.ts";
+import type { Backend, JsonObject, Look, LookProperty, LookStyles, LookValue, Settings } from "./contract.ts";
+import type { Field } from "./controls.ts";
+import { el } from "./dom.ts";
+import { LOOKS } from "./look.ts";
+import { row, type PageContext } from "./settings-pages.ts";
+
+const SECTIONS: readonly (readonly [string, readonly string[]])[] = [
+  ["Colors", ["colors"]],
+  ["Typography", ["font"]],
+  ["Surfaces", ["spacing", "shape", "border", "surface"]],
+  ["Effects", ["glow", "decoration", "motion"]],
+];
+
+function filePath(id: string): string[] {
+  const parts = id.split(".");
+  if (parts[0] === "colors") {
+    return parts[1] === "state" ? ["colors", "dark", "state", ...parts.slice(2)] : ["colors", "dark", ...parts.slice(1)];
+  }
+  return parts;
+}
+
+function objectAt(root: JsonObject | undefined, path: readonly string[]): JsonObject | undefined {
+  let node: JsonObject | undefined = root;
+  for (const key of path) {
+    if (node === undefined) return undefined;
+    const next = node[key];
+    if (typeof next !== "object" || next === null || Array.isArray(next)) return undefined;
+    node = next;
+  }
+  return node;
+}
+
+function has(root: JsonObject | undefined, path: readonly string[]): boolean {
+  const parent = objectAt(root, path.slice(0, -1));
+  const leaf = path.at(-1);
+  return parent !== undefined && leaf !== undefined && parent[leaf] !== undefined;
+}
+
+function setLeaf(root: JsonObject, path: readonly string[], value: LookValue): void {
+  let node = root;
+  for (const key of path.slice(0, -1)) {
+    const existing = node[key];
+    if (typeof existing === "object" && existing !== null && !Array.isArray(existing)) {
+      node = existing;
+    } else {
+      const fresh: JsonObject = {};
+      node[key] = fresh;
+      node = fresh;
+    }
+  }
+  const leaf = path.at(-1);
+  if (leaf !== undefined) node[leaf] = value;
+}
+
+function deleteLeaf(root: JsonObject | undefined, path: readonly string[]): void {
+  const parent = objectAt(root, path.slice(0, -1));
+  const leaf = path.at(-1);
+  if (parent !== undefined && leaf !== undefined) Reflect.deleteProperty(parent, leaf);
+}
+
+function say(node: HTMLElement, message: string): void {
+  node.textContent = message;
+  node.hidden = message === "";
+}
+
+function button(label: string, attr: string, onClick: () => void): HTMLButtonElement {
+  const node = el("button", { type: "button", class: "quiet", [attr]: "" }, label);
+  node.addEventListener("click", onClick);
+  return node;
+}
+
+interface Preview {
+  node: HTMLElement;
+  draw(): Promise<void>;
+}
+
+/** Inert sample controls in the window's look, and the real overlay for each state. */
+function overlayPreview(backend: Backend): Preview {
+  const sample = el("div", { class: "preview-sample", "aria-hidden": "true", inert: true },
+    el("input", { type: "checkbox", role: "switch" }),
+    el("select", {}, el("option", {}, "Choose one")),
+    el("button", { type: "button", class: "primary" }, "Primary"),
+    el("span", { class: "badge" }, "Badge"),
+    el("p", { class: "note" }, "Something needs your attention."),
+  );
+  const strip = el("div", { class: "preview-strip" });
+  const canvases = OVERLAY_PREVIEW_STATES.map((state) => {
+    const canvas = el("canvas", { class: "preview-canvas", "data-preview-state": state });
+    strip.append(el("div", { class: "preview-cell" }, el("span", { class: "preview-cap" }, state), canvas));
+    return canvas;
+  });
+  const note = el("p", { class: "note", role: "alert", hidden: true });
+  const node = el("div", { class: "preview", "data-cust-preview": "" }, el("h5", { class: "preview-title" }, "Preview"), sample, strip, note);
+  let generation = 0;
+
+  async function draw(): Promise<void> {
+    const request = ++generation;
+    const scale = window.devicePixelRatio;
+    try {
+      const buffers = await Promise.all(OVERLAY_PREVIEW_STATES.map((state) => backend.previewOverlay(state, scale)));
+      if (request !== generation) return;
+      say(note, "");
+      buffers.forEach((buffer, index) => {
+        const canvas = canvases[index];
+        if (canvas === undefined) return;
+        const view = new DataView(buffer);
+        const width = view.getUint32(0, true);
+        const height = view.getUint32(4, true);
+        canvas.width = width;
+        canvas.height = height;
+        canvas.style.width = `${String(width / scale)}px`;
+        canvas.style.height = `${String(height / scale)}px`;
+        const context = canvas.getContext("2d");
+        if (context === null) throw new Error("This window cannot draw the preview.");
+        context.putImageData(new ImageData(new Uint8ClampedArray(buffer, 8), width, height), 0, 0);
+      });
+    } catch (error) {
+      if (request !== generation) return;
+      for (const canvas of canvases) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+      say(note, errorText(error));
+    }
+  }
+
+  return { node, draw };
+}
+
+/** The Customize section for the look saved in Settings, plus its preview and banners. */
+export function customize(context: PageContext): HTMLElement[] {
+  const { settings, controls, backend, apply, live } = context;
+  let look: Look = settings.look;
+  let styles: LookStyles | null = context.lookStyles;
+  let resets: { path: string[]; button: HTMLButtonElement }[] = [];
+  const banner = el("div", { class: "cust-banner", "data-cust-banner": "" });
+  const fields = el("div", { class: "cust-fields", "data-cust-fields": "" });
+  const actions = el("div", { class: "cust-actions", "data-cust-actions": "" });
+  const preview = overlayPreview(backend);
+  const holder = el("div", { class: "cust", "data-customize": "" }, banner, fields, actions, preview.node);
+
+  const title = (): string => LOOKS.find(([name]) => name === look)?.[1] ?? look;
+  const editable = settings as Settings;
+  const changes = (): JsonObject | undefined => editable.themes?.[look];
+
+  function refreshResets(): void {
+    for (const { path, button } of resets) button.disabled = !has(changes(), path);
+  }
+
+  function afterChange(): void {
+    refreshResets();
+    void preview.draw();
+  }
+
+  function set(id: string, value: LookValue): Promise<void> {
+    const path = filePath(id);
+    return apply((draft) => {
+      draft.themes ??= { version: 1 };
+      const entry = draft.themes[look] ?? {};
+      draft.themes[look] = entry;
+      if (value === "") deleteLeaf(entry, path);
+      else setLeaf(entry, path, value);
+    }).then(afterChange);
+  }
+
+  function reset(id: string): void {
+    void apply((draft) => {
+      deleteLeaf(draft.themes?.[look], filePath(id));
+    }).then(afterChange);
+  }
+
+  function control(property: LookProperty): HTMLElement | null {
+    const value = styles?.values[look][property.id];
+    if (value === undefined) return null;
+    const path = filePath(property.id);
+    let field: Field;
+    const commit = (wanted: LookValue): Promise<void> =>
+      set(property.id, wanted).catch((error: unknown) => {
+        const input = field.field;
+        if (input instanceof HTMLInputElement) {
+          if (input.type === "checkbox") input.checked = value === true;
+          else input.value = String(value);
+        }
+        throw error;
+      });
+
+    if (property.unit === "color" || property.unit === "text") {
+      if (typeof value !== "string") return null;
+      field = controls.text(value, commit, property.unit === "text" ? { placeholder: "System font" } : {});
+      if (property.unit === "color") {
+        const swatch = el("span", { class: "swatch", "data-swatch": "" });
+        swatch.style.backgroundColor = value;
+        field = { node: el("span", { class: "swatch-field" }, swatch, field.node), field: field.field };
+      }
+    } else if (property.unit === "number") {
+      if (typeof value !== "number" || property.min === null || property.max === null || property.step === null) return null;
+      field = controls.slider(value, { min: property.min, max: property.max, step: property.step }, commit);
+    } else {
+      if (typeof value !== "boolean") return null;
+      field = controls.toggle(value, commit);
+    }
+
+    const resetButton = button("↺", "data-reset", () => { reset(property.id); });
+    resetButton.setAttribute("data-reset", property.id);
+    resetButton.setAttribute("aria-label", `Reset ${property.label}`);
+    resetButton.disabled = !has(changes(), path);
+    resets.push({ path, button: resetButton });
+    return row(property.label, null, { node: el("span", { class: "cust-control" }, field.node, resetButton), field: field.field });
+  }
+
+  function renderFields(): void {
+    resets = [];
+    const properties = styles?.properties ?? [];
+    const sections = SECTIONS.flatMap(([heading, categories]) => {
+      const rows = properties
+        .filter((property) => categories.includes(property.category) && property.looks.includes(look))
+        .map(control)
+        .filter((node): node is HTMLElement => node !== null);
+      return rows.length === 0 ? [] : [el("section", { class: "cust-cat", "data-category": heading }, el("h5", {}, heading), ...rows)];
+    });
+    fields.replaceChildren(...sections);
+  }
+
+  function act(edit: (draft: Settings) => void, problem: HTMLElement): void {
+    say(problem, "");
+    void apply(edit).then(
+      () => { render(); },
+      (error: unknown) => { say(problem, errorText(error)); },
+    );
+  }
+
+  function renderBanner(): void {
+    const entry = changes();
+    const suspended = entry?.suspended === true;
+    const unreadable = entry?.unreadable;
+    const reason = typeof unreadable === "string" ? unreadable : null;
+    if (!suspended && reason === null) {
+      banner.hidden = true;
+      banner.replaceChildren();
+      fields.hidden = false;
+      actions.hidden = false;
+      return;
+    }
+    banner.hidden = false;
+    fields.hidden = true;
+    actions.hidden = true;
+    const problem = el("p", { class: "note", role: "alert", hidden: true });
+    const parts: HTMLElement[] = [
+      el("span", {}, suspended
+        ? `Custom styling is off for ${title()} — `
+        : `Your ${title()} customizations could not be read (${String(reason)}). `),
+    ];
+    if (suspended) {
+      parts.push(button("Turn back on", "data-banner-on", () => { act((draft) => {
+        const current = draft.themes?.[look];
+        if (current !== undefined) Reflect.deleteProperty(current, "suspended");
+      }, problem); }));
+    }
+    parts.push(button(`Reset ${title()}`, "data-banner-reset", () => { act((draft) => {
+      if (draft.themes !== undefined) Reflect.deleteProperty(draft.themes, look);
+    }, problem); }));
+    parts.push(problem);
+    banner.replaceChildren(...parts);
+  }
+
+  function renderActions(): void {
+    const problem = el("p", { class: "note", role: "alert", hidden: true });
+    const resetLook = button("Reset this look", "data-reset-look", () => { act((draft) => {
+      if (draft.themes !== undefined) Reflect.deleteProperty(draft.themes, look);
+    }, problem); });
+    actions.replaceChildren(resetLook, problem);
+  }
+
+  function render(): void {
+    renderBanner();
+    if (banner.hidden) {
+      renderFields();
+      renderActions();
+    }
+    void preview.draw();
+  }
+
+  live.look = (next: Look) => {
+    look = next;
+    render();
+  };
+  live.lookStyles = (next: LookStyles) => {
+    styles = next;
+    render();
+  };
+  render();
+
+  return [el("h4", { "data-group": "" }, "Customize"), holder];
+}
