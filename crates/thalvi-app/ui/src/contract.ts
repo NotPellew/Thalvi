@@ -218,6 +218,8 @@ export interface Settings {
   stt: {
     /** Live entries (exactly one active) and extra recognizers, whose order carries no meaning. */
     entries: SpeechEntry[];
+    /** Whether the chat model merges the extras' texts with the live text; off, delivery waits for no extra and each is only recorded. */
+    merge: boolean;
     /** Spellings recognition favours; absent when empty. */
     phrases?: string[];
   };

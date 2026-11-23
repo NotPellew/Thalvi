@@ -52,6 +52,7 @@ const SETTINGS: Settings = {
     "never mind": "cancel",
   },
   stt: {
+    merge: true,
     entries: [
       { kind: "realtime", id: "realtime", name: "Realtime transcription (WebSocket)", active: false, address: "wss://asr.example", model: "nemotron", has_key: true },
       { kind: "open_ai", id: "gateway", name: "LLM Gateway", active: false, address: "https://gw.example/v1", model: "whisper-1", request: "transcriptions", language: "", has_key: true },
@@ -244,7 +245,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
       if (activeFinal) {
         return Promise.reject(new Error(`Speech server "${activeFinal.name}" is the one in use, so it cannot also be the final pass.`));
       }
-      if (!hasWritingEndpoint(next.writing) && next.stt.entries.some((entry) => (entry.kind === "extra" ? entry.active : entry.extra === true))) {
+      if (next.stt.merge && !hasWritingEndpoint(next.writing) && next.stt.entries.some((entry) => (entry.kind === "extra" ? entry.active : entry.extra === true))) {
         return Promise.reject(
           new Error(
             !hasWritingEndpoint(saved.writing)

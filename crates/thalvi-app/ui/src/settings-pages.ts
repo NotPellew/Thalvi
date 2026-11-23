@@ -1505,24 +1505,49 @@ function speech(context: PageContext): SpeechRows {
     }, "quiet"),
   );
 
-  /** An extra can be switched on only while there is a writing endpoint; one already on can always be switched off. */
-  function lockTick(input: HTMLInputElement): void {
-    const locked = !input.checked && !hasEndpoint();
+  /** The merge switch: on, the chat model merges the extras' texts; off, the live text is delivered at once and they are only recorded. */
+  const mergeTick = controls.toggle(settings.stt.merge, (on) => {
+    if (on && !hasEndpoint()) {
+      needsEndpoint.hidden = false;
+      return Promise.reject(new Error("Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."));
+    }
+    return apply((next) => {
+      next.stt.merge = on;
+    }).then(syncExtras);
+  });
+  const mergeInput = mergeTick.field as HTMLInputElement;
+  mergeInput.setAttribute("aria-label", "Merge with the chat model");
+  const mergeState = el("small", { class: "merge-state", role: "status" });
+  const mergeRow = el(
+    "div",
+    { class: "row" },
+    el("div", { class: "what" }, el("label", { for: mergeInput.id }, "Merge with the chat model"), mergeState),
+    el("div", { class: "ctl" }, mergeTick.node),
+  );
+  mergeRow.dataset["label"] = "merge with the chat model";
+
+  /** A switch that is off is locked while turning it on needs something it has not; one already on can always be switched off. */
+  function lockTick(input: HTMLInputElement, needed: boolean): void {
+    const locked = needed && !input.checked;
     input.disabled = locked;
     if (locked) input.setAttribute("aria-describedby", needsEndpoint.id);
     else input.removeAttribute("aria-describedby");
   }
 
-  /** What the page says follows the settings: the endpoint, and which extras are on. */
+  /** What the page says follows the settings: the endpoint, which extras are on, and whether they are merged. */
   function syncExtras(): void {
     const finalPass = entries().find((entry) => entry.final_pass === true);
+    const merge = settings.stt.merge;
     for (const { list } of groups) {
-      for (const input of list.querySelectorAll<HTMLInputElement>(".extra:not(.final-pass) input[type=checkbox]")) lockTick(input);
+      for (const input of list.querySelectorAll<HTMLInputElement>(".extra:not(.final-pass) input[type=checkbox]")) lockTick(input, merge && !hasEndpoint());
       for (const row of list.querySelectorAll<HTMLElement>(".trow.server")) {
         const input = row.querySelector<HTMLInputElement>(".final-pass input[type=checkbox]");
         if (input) input.checked = finalPass?.id === row.dataset["id"];
       }
     }
+    mergeInput.checked = merge && finalPass === undefined;
+    mergeInput.disabled = finalPass !== undefined;
+    mergeState.textContent = finalPass === undefined ? "" : "A final pass is set";
     const on = entries().filter(isExtraOn);
     const merged = `The chat model merges ${on.length === 1 ? "its text" : "their texts"} with the live text.`;
     const loads = on.some((entry) => entry.kind === "on_device") ? " Each on-device extra loads its own model, which adds memory and processing." : "";
@@ -1530,8 +1555,10 @@ function speech(context: PageContext): SpeechRows {
     finalPassState.textContent = finalPass === undefined ? "" : `Final pass: ${finalPass.name}. Its text is used after you stop.`;
     extraState.textContent = finalPass !== undefined
       ? "Paused while a final pass is set"
-      : on.length === 0 ? "Extra: none" : `Extra: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`;
-    needsEndpoint.hidden = hasEndpoint();
+      : merge
+        ? on.length === 0 ? "Extra: none" : `Extra: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`
+        : "Merge off: dictation pastes the live text at once; extras are only recorded.";
+    needsEndpoint.hidden = hasEndpoint() || !merge;
     syncCleanup();
   }
 
@@ -2142,7 +2169,7 @@ function speech(context: PageContext): SpeechRows {
   syncChatSource();
   return {
     recognition: [
-      el("div", { class: "grp" }, liveRow, nextDictation, summaryActions, finalPassState, extraState, needsEndpoint),
+      el("div", { class: "grp" }, liveRow, nextDictation, summaryActions, finalPassState, mergeRow, extraState, needsEndpoint),
       ...groups.map(({ node }) => node),
       el("div", { class: "grp" }, wordRow),
     ],

@@ -145,6 +145,12 @@ The final-pass switch (#586) uses the existing Settings patch and validation pat
 the final pass as a cancellable capture state, so a config saved while it waits is applied at the
 same boundary as other changes during capture. No writer, lock or temporary file changes.
 
+The merge switch (#589) adds `stt.merge` and reads it in `check_endpoint_kept`: removing the writing
+endpoint is refused only while an extra is on and the merge is on, and a form without the switch reads
+it as `any_extra`, as the loader does. That is the refusal `Store::check` already returns before
+`write_atomically`, under the save lock. `agent.rs` changes only in its tests module. No writer, lock
+or temporary file changes, so the model and its three invariants are unchanged.
+
 | Code | Model action and boundary |
 | --- | --- |
 | `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window), `settings_patch` | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: `settings_patch` merges the window's patch (only what the user changed) over the config read under the lock, with `settings::merged`, which `plan_over` uses too; the Settings save sets its field (the look) and carries the others over. This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |
