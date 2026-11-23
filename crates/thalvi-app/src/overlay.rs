@@ -98,7 +98,8 @@ impl Visibility {
 
 /// What the overlay's thread is told.
 enum Message {
-    Status(Box<Status>, Visibility),
+    Status(Box<Status>),
+    Enabled(bool),
     Visibility(Visibility),
     Draft(bool),
     Style(Arc<Style>),
@@ -225,9 +226,16 @@ impl Overlay {
         );
     }
 
-    /// Shows `status`, and shows or hides the overlay as `visibility` says.
-    pub fn show(&self, status: &Status, visibility: Visibility) {
-        self.send(Message::Status(Box::new(status.clone()), visibility));
+    /// Hands `status` to the overlay's thread, which shows or hides as the status and the
+    /// enabled switch say.
+    pub fn show(&self, status: &Status) {
+        self.send(Message::Status(Box::new(status.clone())));
+    }
+
+    /// Whether the "Show the overlay" setting is on; a change takes effect at once, without a
+    /// new status.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.send(Message::Enabled(enabled));
     }
 
     pub fn apply(&self, visibility: Visibility) {
@@ -394,9 +402,15 @@ enum Shown {
 }
 
 /// What the overlay's thread keeps between waits.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is its own state: the setting, the wanted visibility, the theme, a pending restyle"
+)]
 struct Overlaying {
     view: View,
     started: Instant,
+    /// Whether the "Show the overlay" setting is on.
+    enabled: bool,
     /// Whether the surface should show.
     wanted: bool,
     /// Where the surface is.
@@ -443,6 +457,7 @@ impl Overlaying {
         Self {
             view: View::new(takes_clicks),
             started: now,
+            enabled: true,
             wanted: false,
             shown: Shown::Hidden,
             hide_at: None,
@@ -484,10 +499,18 @@ impl Overlaying {
 
     fn take(&mut self, message: Message, now: Instant) {
         match message {
-            Message::Status(status, visibility) => {
+            Message::Status(status) => {
                 self.view.set_status(*status, self.clock(now));
                 self.mark_stale();
-                self.want(visibility, now);
+                self.want(Visibility::of(&self.view.status, self.enabled), now);
+            }
+            Message::Enabled(enabled) if enabled != self.enabled => {
+                self.enabled = enabled;
+                let visibility = Visibility::of(&self.view.status, enabled);
+                // A finished confirmation or failure headline is not brought back by switching on.
+                if !matches!(visibility, Visibility::ShowFor(_)) {
+                    self.want(visibility, now);
+                }
             }
             Message::Visibility(visibility) => self.want(visibility, now),
             Message::Draft(show) => {
@@ -504,7 +527,7 @@ impl Overlaying {
                 self.style_dirty = true;
                 self.mark_stale();
             }
-            Message::Style(_) | Message::Theme(_) => {}
+            Message::Enabled(_) | Message::Style(_) | Message::Theme(_) => {}
             Message::Recordings(kinds) => self.recorder.set_kinds(kinds),
         }
     }
@@ -728,11 +751,7 @@ mod tests {
             let _ = overlay.settle(&mut surface, &mut painter, 0.5, now);
             overlay.deadline()
         };
-        let first = step(
-            Some(Message::Status(Box::new(capturing()), Visibility::Show)),
-            false,
-            at(0),
-        );
+        let first = step(Some(Message::Status(Box::new(capturing()))), false, at(0));
         assert_eq!(first, Some(at(0) + view::FRAME), "the wave's next frame");
         // Nothing changed and no frame is due: the surface is left alone.
         step(None, false, at(10));
@@ -743,14 +762,7 @@ mod tests {
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
         });
-        let deadline = step(
-            Some(Message::Status(
-                done,
-                Visibility::ShowFor(Duration::from_secs(1)),
-            )),
-            false,
-            at(100),
-        );
+        let deadline = step(Some(Message::Status(done)), false, at(100));
         assert_eq!(
             deadline,
             Some(at(1100)),
@@ -758,7 +770,7 @@ mod tests {
         );
         step(None, true, at(1100));
         step(
-            Some(Message::Status(Box::new(capturing()), Visibility::Show)),
+            Some(Message::Status(Box::new(capturing()))),
             false,
             at(2000),
         );
@@ -778,20 +790,14 @@ mod tests {
             ..Fake::default()
         };
         let mut overlay = Overlaying::new(true, start);
-        overlay.take(
-            Message::Status(Box::new(capturing()), Visibility::Show),
-            start,
-        );
+        overlay.take(Message::Status(Box::new(capturing())), start);
         overlay.settle(&mut surface, &mut painter, 0.0, start);
         assert!(
             !overlay.cancels(&painter, 386.0, 17.0),
             "a hidden overlay cancels nothing"
         );
         surface.refuse = false;
-        overlay.take(
-            Message::Status(Box::new(capturing()), Visibility::Show),
-            start + RETRY_AFTER,
-        );
+        overlay.take(Message::Status(Box::new(capturing())), start + RETRY_AFTER);
         overlay.settle(&mut surface, &mut painter, 0.0, start + RETRY_AFTER);
         assert_eq!(surface.calls, ["show", "show"]);
         assert!(
@@ -911,7 +917,7 @@ mod tests {
         overlay.show_draft(false);
         overlay.set_style(Arc::new(defaults_of(Look::Neon)));
         overlay.set_dark(false);
-        overlay.show(&capturing(), Visibility::Show);
+        overlay.show(&capturing());
         overlay.apply(Visibility::Hide);
         overlay.level(0.25);
         let waiting = overlay.waiting.lock().unwrap().take().unwrap();
@@ -940,10 +946,7 @@ mod tests {
         let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
         let (mut surface, mut overlay) = (Fake::default(), Overlaying::new(false, start));
         let pending = paste_countdown(None, "hello", 2500);
-        overlay.take(
-            Message::Status(Box::new(pending), Visibility::Show),
-            at(10_000),
-        );
+        overlay.take(Message::Status(Box::new(pending)), at(10_000));
         overlay.settle(&mut surface, &mut painter, 0.0, at(10_000));
         assert_eq!(overlay.view.label.as_deref(), Some("PASTE IN 3 s"));
         overlay.due(at(11_000));
@@ -957,18 +960,12 @@ mod tests {
         let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
         let mut surface = Fake::default();
         let mut overlay = Overlaying::new(false, start);
-        overlay.take(
-            Message::Status(Box::new(capturing()), Visibility::Show),
-            start,
-        );
+        overlay.take(Message::Status(Box::new(capturing())), start);
         overlay.settle(&mut surface, &mut painter, 0.0, start);
         surface.vanish = true;
         overlay.shown = Shown::Showing { stale: true };
         overlay.settle(&mut surface, &mut painter, 0.0, start + view::FRAME);
-        overlay.take(
-            Message::Status(Box::new(capturing()), Visibility::Show),
-            start + view::FRAME,
-        );
+        overlay.take(Message::Status(Box::new(capturing())), start + view::FRAME);
         overlay.settle(&mut surface, &mut painter, 0.0, start + view::FRAME);
         assert_eq!(surface.calls, ["show", "present", "show"]);
     }
@@ -983,10 +980,7 @@ mod tests {
         };
         let mut overlay = Overlaying::new(false, start);
         let mut again = |overlay: &mut Overlaying, surface: &mut Fake, now: Instant| {
-            overlay.take(
-                Message::Status(Box::new(capturing()), Visibility::Show),
-                now,
-            );
+            overlay.take(Message::Status(Box::new(capturing())), now);
             overlay.settle(surface, &mut painter, 0.0, now);
         };
         again(&mut overlay, &mut surface, start);
@@ -1012,7 +1006,7 @@ mod tests {
         overlay.shown = Shown::Showing { stale: true };
         overlay.settle(&mut surface, &mut painter, 0.0, start + 3 * RETRY_AFTER);
         overlay.take(
-            Message::Status(Box::new(capturing()), Visibility::Show),
+            Message::Status(Box::new(capturing())),
             start + 3 * RETRY_AFTER + Duration::from_millis(40),
         );
         overlay.settle(
@@ -1035,10 +1029,7 @@ mod tests {
             ..Fake::default()
         };
         let mut overlay = Overlaying::new(true, start);
-        overlay.take(
-            Message::Status(Box::new(capturing()), Visibility::Show),
-            start,
-        );
+        overlay.take(Message::Status(Box::new(capturing())), start);
         overlay.settle(&mut surface, &mut painter, 0.0, start);
         let hide_at = start + Duration::from_millis(20);
         overlay.take(Message::Visibility(Visibility::Hide), hide_at);
@@ -1052,6 +1043,51 @@ mod tests {
         assert!(
             !overlay.cancels(&painter, 386.0, 17.0),
             "a press on an unplaced overlay cancels nothing"
+        );
+    }
+
+    #[test]
+    fn switching_the_overlay_off_or_on_takes_effect_at_once_without_a_new_status() {
+        let start = Instant::now();
+        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let (mut surface, mut overlay) = (Fake::default(), Overlaying::new(false, start));
+        overlay.take(Message::Status(Box::new(capturing())), start);
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        assert_eq!(surface.calls, ["show"], "capturing shows the overlay");
+        overlay.take(Message::Enabled(false), start);
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        assert_eq!(
+            surface.calls,
+            ["show", "hide"],
+            "switching off hides at once"
+        );
+        overlay.take(Message::Enabled(true), start);
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        assert_eq!(
+            surface.calls,
+            ["show", "hide", "show"],
+            "switching on shows again at once"
+        );
+        assert!(
+            matches!(overlay.view.status, Status::Capturing { .. }),
+            "no new status arrived"
+        );
+        // A finished delivery while disabled stays hidden, and switching on does not bring it back.
+        overlay.take(Message::Enabled(false), start);
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        let done = Box::new(Status::Done {
+            target: None,
+            route: CaptureRoute::Paste,
+            notice: "Delivered.".to_owned(),
+        });
+        overlay.take(Message::Status(done), start);
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        overlay.take(Message::Enabled(true), start);
+        overlay.settle(&mut surface, &mut painter, 0.0, start);
+        assert_eq!(
+            surface.calls,
+            ["show", "hide", "show", "hide"],
+            "a Done while disabled stays hidden, and switching on does not show it"
         );
     }
 
@@ -1119,10 +1155,7 @@ mod tests {
             pending: true,
             ..Fake::default()
         };
-        overlay.take(
-            Message::Status(Box::new(capturing()), Visibility::Show),
-            start,
-        );
+        overlay.take(Message::Status(Box::new(capturing())), start);
         overlay.settle(&mut surface, &mut painter, 0.0, start);
         surface.pending = false;
         let placed = start + PLACE_AFTER;
