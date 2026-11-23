@@ -1216,8 +1216,8 @@ function speech(context: PageContext): SpeechRows {
   let focusOnClose: () => HTMLElement | null = () => null;
   /** Keeps the open form in step with the entries, such as Remove on the entry that just became Live. */
   let syncEditor: () => void = () => undefined;
-  /** The "Applied." of the last saved form, shown on that entry's row until the next change. */
-  let rowNote: { id: string; text: string } | null = null;
+  /** The "Applied." of the last change to one entry, on its row after a saved form or beside its Extra switch, until the next change. */
+  let rowNote: { id: string; text: string; by: "form" | "extra" } | null = null;
   const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
   const retryProblem = note();
   const useServer = button("Use a speech server instead", () => {
@@ -1240,6 +1240,7 @@ function speech(context: PageContext): SpeechRows {
   );
   backend.onStatus((status) => {
     currentStatus = status;
+    if (rowNote?.text === APPLIED_LATER_TEXT && !DURING_CAPTURE.includes(status.state)) rowNote = { ...rowNote, text: APPLIED_TEXT };
     updateSummary();
   });
   backend.getStatus().then(
@@ -1449,8 +1450,11 @@ function speech(context: PageContext): SpeechRows {
   function extraSwitch(entry: SpeechEntry): HTMLElement {
     const ticked = controls.toggle(isExtraOn(entry), (on) => {
       forgetNotes();
-      return tick(entry.id, on);
+      return tick(entry.id, on).then(() => {
+        rowNote = { id: entry.id, text: controls.confirmation(), by: "extra" };
+      });
     });
+    if (rowNote?.id === entry.id && rowNote.by === "extra") ticked.node.querySelector(".applied")?.replaceChildren(rowNote.text);
     const input = ticked.field as HTMLInputElement;
     input.setAttribute("aria-label", `Extra: ${entry.name}`);
     return el("span", { class: "extra" }, el("label", { for: input.id }, "Extra"), ticked.node);
@@ -1487,7 +1491,7 @@ function speech(context: PageContext): SpeechRows {
       whereLine(entry),
       el("span", { class: "tail" }, ...role, edit),
       ...deviceLine(entry),
-      ...(rowNote?.id === entry.id ? [el("small", { class: "applied", role: "status" }, rowNote.text)] : []),
+      ...(rowNote?.id === entry.id && rowNote.by === "form" ? [el("small", { class: "applied", role: "status" }, rowNote.text)] : []),
     );
   }
 
@@ -1760,7 +1764,7 @@ function speech(context: PageContext): SpeechRows {
         )
         .then(() => {
           forgetNotes();
-          rowNote = { id: entry.id, text: controls.confirmation() };
+          rowNote = { id: entry.id, text: controls.confirmation(), by: "form" };
           closeEditor();
           checkWordList();
         })
