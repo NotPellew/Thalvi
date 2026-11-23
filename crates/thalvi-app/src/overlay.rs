@@ -401,22 +401,24 @@ enum Shown {
     Showing { stale: bool },
 }
 
+/// Whether the surface should show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wanted {
+    Hidden,
+    Shown,
+    /// Shown until this time, then hidden.
+    Until(Instant),
+}
+
 /// What the overlay's thread keeps between waits.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each flag is its own state: the setting, the wanted visibility, the theme, a pending restyle"
-)]
 struct Overlaying {
     view: View,
     started: Instant,
     /// Whether the "Show the overlay" setting is on.
     enabled: bool,
-    /// Whether the surface should show.
-    wanted: bool,
+    wanted: Wanted,
     /// Where the surface is.
     shown: Shown,
-    /// When a shown-for-a-while overlay hides.
-    hide_at: Option<Instant>,
     /// When the next frame is due while something moves.
     frame_at: Option<Instant>,
     /// The last failure to show, reported once.
@@ -458,9 +460,8 @@ impl Overlaying {
             view: View::new(takes_clicks),
             started: now,
             enabled: true,
-            wanted: false,
+            wanted: Wanted::Hidden,
             shown: Shown::Hidden,
-            hide_at: None,
             frame_at: None,
             failure: None,
             retry_at: None,
@@ -538,24 +539,21 @@ impl Overlaying {
         {
             self.asked_at = Some(now);
         }
-        let (wanted, hide_at) = match visibility {
-            Visibility::Show => (true, None),
-            Visibility::Hide => (false, None),
-            Visibility::ShowFor(time) => (true, Some(now + time)),
+        self.wanted = match visibility {
+            Visibility::Show => Wanted::Shown,
+            Visibility::Hide => Wanted::Hidden,
+            Visibility::ShowFor(time) => Wanted::Until(now + time),
         };
-        self.wanted = wanted;
-        self.hide_at = hide_at;
         // A status that asks to show again also asks to draw, so a vanished surface is made again.
-        if wanted {
+        if self.wanted != Wanted::Hidden {
             self.mark_stale();
         }
     }
 
     /// A deadline passed: hide once shown long enough, or draw the next frame.
     fn due(&mut self, now: Instant) {
-        if self.hide_at.is_some_and(|at| now >= at) {
-            self.wanted = false;
-            self.hide_at = None;
+        if matches!(self.wanted, Wanted::Until(at) if now >= at) {
+            self.wanted = Wanted::Hidden;
         } else if self.frame_at.is_some_and(|at| now >= at) {
             self.mark_stale();
         }
@@ -576,7 +574,11 @@ impl Overlaying {
     }
 
     fn deadline(&self) -> Option<Instant> {
-        [self.hide_at, self.frame_at, self.retry_at]
+        let hide_at = match self.wanted {
+            Wanted::Until(at) => Some(at),
+            Wanted::Hidden | Wanted::Shown => None,
+        };
+        [hide_at, self.frame_at, self.retry_at]
             .into_iter()
             .flatten()
             .min()
@@ -590,7 +592,7 @@ impl Overlaying {
         level: f32,
         now: Instant,
     ) -> Draw {
-        if !self.wanted {
+        if self.wanted == Wanted::Hidden {
             if !matches!(self.shown, Shown::Hidden) {
                 surface.hide();
                 self.shown = Shown::Hidden;
@@ -933,7 +935,7 @@ mod tests {
         assert_eq!(*thread.style, defaults_of(Look::Neon));
         assert!(!thread.dark);
         assert!(matches!(thread.view.status, Status::Capturing { .. }));
-        assert!(!thread.wanted, "the later hide wins");
+        assert_eq!(thread.wanted, Wanted::Hidden, "the later hide wins");
         assert!(
             (f32::from_bits(overlay.level.load(Ordering::Relaxed)) - 0.25).abs() < f32::EPSILON
         );
