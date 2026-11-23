@@ -451,28 +451,7 @@ pub(crate) fn write_atomically(path: &Path, contents: &str) -> std::io::Result<(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    let written =
-        write_private(&temporary, contents).and_then(|()| std::fs::rename(&temporary, path));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written
-}
-
-/// Writes a new file only its owner can read: the config can hold an API key.
-fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
-    use std::io::Write;
-
-    let _ = std::fs::remove_file(path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    // On Windows a file under the per-user %APPDATA% is readable by its owner only.
-    options.open(path)?.write_all(contents.as_bytes())
+    thalvi_desktop::private::write_atomically(path, contents.as_bytes())
 }
 
 #[cfg(test)]

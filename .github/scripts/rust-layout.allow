@@ -1,5 +1,2 @@
-crates/thalvi-app/src/settings.rs 1
 crates/thalvi-app/src/startup.rs 5
 crates/thalvi-app/src/updater.rs 3
-crates/thalvi-desktop/src/history.rs 1
-crates/thalvi-desktop/src/metrics.rs 2
