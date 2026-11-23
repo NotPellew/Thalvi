@@ -6298,7 +6298,8 @@ async fn dictate(rig: &mut Rig, route: CaptureRoute) -> u64 {
 async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
     LocalSet::new()
         .run_until(async {
-            // (name, route, the reply, what is delivered, the notice, whether the cancelled cue played)
+            // (name, route, the reply, what is delivered, the notice, whether the cancelled cue
+            // played, how the cleanup went)
             let cases = [
                 (
                     "a reply in time",
@@ -6307,6 +6308,7 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     Some("I think we should ship it on Friday."),
                     None,
                     false,
+                    "cleaned",
                 ),
                 (
                     "a submit shows the cleaned text",
@@ -6315,6 +6317,7 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     Some("Tell Anna I am late."),
                     None,
                     false,
+                    "cleaned",
                 ),
                 (
                     "an error pastes the raw words",
@@ -6323,6 +6326,7 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     Some(WORDS),
                     Some("Cleanup failed: The writing model failed with status 500. — pasted as said"),
                     false,
+                    "raw: The writing model failed with status 500.",
                 ),
                 (
                     "no reply by the limit pastes the raw words",
@@ -6331,21 +6335,29 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     Some(WORDS),
                     Some("Cleanup failed: The cleanup took longer than 3 seconds. — pasted as said"),
                     false,
+                    "raw: The cleanup took longer than 3 seconds.",
                 ),
             ];
-            for (name, route, reply, delivered, notice, _) in cases {
+            for (name, route, reply, delivered, notice, _, cleanup) in cases {
                 let (url, mut asked, _feed) = chat(reply).await;
                 let dir = record_dir(&format!("cleanup-{name}"));
-                let (mut rig, engine, frames) = Rig::recording(
+                let (mut rig, mut engine, mut frames) = Rig::recording(
                     &cleaning(&url),
                     Recorder::in_dir(ALL, &dir).unwrap(),
                 );
-                let task = capture_in(
-                    engine,
-                    frames,
-                    WakeTrigger::Capture,
-                    Some(WindowApp::new("kitty", "secret")),
-                );
+                let task = tokio::task::spawn_local(async move {
+                    assert_eq!(
+                        engine.listen(&mut frames).await.unwrap(),
+                        WakeTrigger::Capture
+                    );
+                    let outcome = engine
+                        .capture(&mut frames, Some(WindowApp::new("kitty", "secret")))
+                        .await;
+                    let record = engine.take_cleanup();
+                    let next_record = engine.take_cleanup();
+                    engine.finish().await;
+                    (outcome, record, next_record)
+                });
                 let decided = dictate(&mut rig, route).await;
                 let body = request(&mut asked).await.body;
                 assert_eq!(
@@ -6384,7 +6396,14 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     rig.at(rig.now() + 2_500).await;
                 }
                 let text = delivered.unwrap();
-                assert_eq!(finished(task).await, accepted(route, text), "{name}");
+                let (outcome, record, next_record) = finished(task).await;
+                assert_eq!(outcome, accepted(route, text), "{name}");
+                assert_eq!(
+                    record,
+                    Some((cleanup.to_owned(), WORDS.to_owned())),
+                    "{name}: the caller learns how the cleanup went and the words it rewrote"
+                );
+                assert_eq!(next_record, None, "{name}: the cleanup is taken once");
                 assert_eq!(rig.notices(), notice.into_iter().collect::<Vec<_>>(), "{name}");
                 let row = read_lines(&dir.join("metrics.jsonl"))
                     .into_iter()
@@ -7763,7 +7782,9 @@ async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
                 );
                 rig.handle.cancel();
                 settle().await;
-                engine.finish().await;
+                tokio::time::timeout(ms(5_000), engine.finish())
+                    .await
+                    .expect("cancel stops the remaining cue instead of blocking the caller");
                 assert!(
                     rig.gate.is_enabled(),
                     "input returns after the remaining cue stops"
