@@ -106,6 +106,11 @@ function script(): Status[] {
   ];
 }
 
+/** Whether the writing settings name an endpoint; numbers as digits alone is not one. */
+function hasWritingEndpoint(writing: Settings["writing"]): boolean {
+  return writing !== null && (writing.local === true || ((writing.url ?? "").trim() !== "" && (writing.model ?? "").trim() !== ""));
+}
+
 export function fakeBackend(params: URLSearchParams): Backend {
   const statuses = script();
   const pinned = params.get("at");
@@ -239,10 +244,10 @@ export function fakeBackend(params: URLSearchParams): Backend {
       if (activeFinal) {
         return Promise.reject(new Error(`Speech server "${activeFinal.name}" is the one in use, so it cannot also be the final pass.`));
       }
-      if (next.writing === null && next.stt.entries.some((entry) => (entry.kind === "extra" ? entry.active : entry.extra === true))) {
+      if (!hasWritingEndpoint(next.writing) && next.stt.entries.some((entry) => (entry.kind === "extra" ? entry.active : entry.extra === true))) {
         return Promise.reject(
           new Error(
-            saved.writing === null
+            !hasWritingEndpoint(saved.writing)
               ? "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."
               : "Switch off the extra recognizers before removing the writing model.",
           ),

@@ -1507,7 +1507,7 @@ function speech(context: PageContext): SpeechRows {
 
   /** An extra can be switched on only while there is a writing endpoint; one already on can always be switched off. */
   function lockTick(input: HTMLInputElement): void {
-    const locked = !input.checked && settings.writing === null;
+    const locked = !input.checked && !hasEndpoint();
     input.disabled = locked;
     if (locked) input.setAttribute("aria-describedby", needsEndpoint.id);
     else input.removeAttribute("aria-describedby");
@@ -1531,7 +1531,7 @@ function speech(context: PageContext): SpeechRows {
     extraState.textContent = finalPass !== undefined
       ? "Paused while a final pass is set"
       : on.length === 0 ? "Extra: none" : `Extra: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`;
-    needsEndpoint.hidden = settings.writing !== null;
+    needsEndpoint.hidden = hasEndpoint();
     syncCleanup();
   }
 
@@ -1543,7 +1543,18 @@ function speech(context: PageContext): SpeechRows {
     return null;
   }
 
-  const hasEndpoint = (): boolean => settings.writing !== null;
+  const hasWritingEndpoint = (candidate: { readonly url?: string; readonly model?: string; readonly local?: boolean } | null): boolean =>
+    candidate !== null && (candidate.local === true || ((candidate.url ?? "").trim() !== "" && (candidate.model ?? "").trim() !== ""));
+  const hasEndpoint = (): boolean => hasWritingEndpoint(settings.writing);
+  const numbers = controls.toggle(settings.writing?.numbers_as_digits !== false, (on) => apply((next) => {
+    if (on) {
+      if (next.writing === null) return;
+      delete next.writing.numbers_as_digits;
+      if (!hasWritingEndpoint(next.writing) && Object.keys(next.writing).length === 0) next.writing = null;
+    } else {
+      next.writing = { ...next.writing, numbers_as_digits: false };
+    }
+  }));
   const cleanup = controls.toggle(settings.writing?.clean_dictation === true, (on) => {
     if (!hasEndpoint()) return Promise.reject(new Error("Set a writing endpoint first"));
     return apply((next) => {
@@ -1790,7 +1801,7 @@ function speech(context: PageContext): SpeechRows {
     return apply((next) => {
       if (value === "local") next.writing = { ...next.writing, local: true };
       else if (next.writing?.url && next.writing.model) next.writing.local = false;
-      else next.writing = null;
+      else next.writing = next.writing?.numbers_as_digits === false ? { numbers_as_digits: false } : null;
     }).then(() => { syncChatSource(); syncExtras(); });
   });
   let chosenBuild: ChatBuild = writing?.chat_build ?? "vulkan";
@@ -1897,7 +1908,7 @@ function speech(context: PageContext): SpeechRows {
         return Promise.reject(new Error("Set the address and the model of the writing endpoint first."));
       }
       return apply((next) => {
-        next.writing = null;
+        next.writing = next.writing?.numbers_as_digits === false ? { numbers_as_digits: false } : null;
       }).then(syncExtras);
     }
     if (!local && (url.trim() === "" || model.trim() === "")) {
@@ -2140,6 +2151,11 @@ function speech(context: PageContext): SpeechRows {
       row("Chat model source", "Writing and extras use this.", source),
       ...localRows,
       ...manualRows,
+      row(
+        "Write numbers as digits",
+        "“fifteen” becomes “15”.",
+        numbers,
+      ),
       row(
         "Clean up dictation",
         "Tidies each dictation before it is pasted.",

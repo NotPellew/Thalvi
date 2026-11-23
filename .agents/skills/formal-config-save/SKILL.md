@@ -118,6 +118,12 @@ change it.
 
 An unreadable look, and a built-in-look save that fails, are recorded on `LastError` for the tray and Settings. Neither writes `desktop.json` or takes the save lock.
 
+The numbers-as-digits setting (#588) shapes the form in `settings_json` and narrows the writing
+key restore in `unmask_keys`: a writing object with no endpoint keeps no key. Saves still go
+through `Store::check`/`Store::save` and `settings_set`'s existing lock and temporary name; no
+new writer, lock or temporary file is added, and the model and its three invariants are
+unchanged.
+
 The opt-in dictation cleanup (#465) adds one agent test in `agent.rs`. `settings_set` is unchanged: the new field is refused by the same config load as every other writing field. No writer of `desktop.json` or `AppState::config` is added, so the model and its three invariants are unchanged.
 
 The experimental Whisper entry (#481) adds no writer:

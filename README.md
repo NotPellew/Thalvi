@@ -60,6 +60,7 @@ On first launch, Thalvi writes default settings, opens Settings, and downloads t
 - **On this computer:** download **Qwen3 4B** (`Q4_K_M`, ~2.5 GB, Apache-2.0) and a pinned `llama.cpp` runtime (Vulkan GPU or CPU) directly from Settings—no server to manage.
 - **Manual endpoint:** point at any OpenAI-compatible chat completions API (`llama.cpp`, Ollama, vLLM, etc.).
 - **Prompts & cleanup:** customize the **Writing prompt**, **Opening phrases** (e.g., `"write me an email"`), **App styles** (per-app/window-title prompts on Hyprland and Windows), and opt-in **Clean up dictation** (removes filler words and fixes punctuation on normal pastes).
+- **Write numbers as digits.** Thalvi puts spoken English and German numbers in digits by default in final dictation. “I have fifteen open issues” becomes “I have 15 open issues” and “zwei Komma fünf” becomes “2,5”. Expressions like “the other one” keep their words. The rules work offline and independently of cleanup. The switch is under **Settings → Chat model → Write numbers as digits**.
 
 ### Wake words, looks, history & privacy
 

@@ -16,9 +16,9 @@ def state(variables: dict[str, str]) -> str:
         'cleaning': 'dictation cleanup of a submit',
         'ending': 'ending cue plays, recognizer releases',
         'finalPass': 'waiting for the final recognizer',
-        'finalCleanup': 'dictation cleanup after the final pass',
+        'finalCleanup': 'dictation cleanup before the review',
         'preview': 'waiting for the full Submit preview',
-        'confirm': 'showing the settled submit text',
+        'confirm': 'showing the submit text for approval',
         'secondary': 'merging the streaming texts',
         'writing': 'explicit write request',
     }[stage]

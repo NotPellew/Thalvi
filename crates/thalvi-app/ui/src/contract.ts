@@ -188,6 +188,8 @@ export interface WritingSettings {
   apps?: WritingAppStyle[];
   /** Present only when dictation is cleaned before it is pasted. */
   clean_dictation?: boolean;
+  /** Whether a delivered dictation gets its number words as digits; absent with no writing settings (the default, on). */
+  numbers_as_digits?: boolean;
 }
 export type LiveEntry = RealtimeEntry | OnDeviceEntry | OpenAiEntry;
 export type SpeechEntry = LiveEntry | ExtraEntry;
