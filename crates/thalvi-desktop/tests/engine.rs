@@ -4380,7 +4380,7 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
 async fn a_hold_with_no_speech_or_under_the_minimum_pastes_nothing_and_says_why() {
     // (recognizer ready, speech, release, what the user is told)
     type Case = (bool, Option<(u64, Say)>, u64, CaptureError);
-    let cases: [Case; 5] = [
+    let cases: [Case; 6] = [
         (false, None, 150, CaptureError::HoldTooShort),
         (
             true,
@@ -4395,6 +4395,7 @@ async fn a_hold_with_no_speech_or_under_the_minimum_pastes_nothing_and_says_why(
             1000,
             CaptureError::NothingHeard,
         ),
+        (false, None, 300, CaptureError::NothingHeard),
         (false, None, 400, CaptureError::NothingHeard),
     ];
     LocalSet::new()
@@ -6353,10 +6354,11 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     let outcome = engine
                         .capture(&mut frames, Some(WindowApp::new("kitty", "secret")))
                         .await;
+                    let cleanup_note = engine.take_cleanup_note();
                     let record = engine.take_cleanup();
                     let next_record = engine.take_cleanup();
                     engine.finish().await;
-                    (outcome, record, next_record)
+                    (outcome, cleanup_note, record, next_record)
                 });
                 let decided = dictate(&mut rig, route).await;
                 let body = request(&mut asked).await.body;
@@ -6396,8 +6398,13 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     rig.at(rig.now() + 2_500).await;
                 }
                 let text = delivered.unwrap();
-                let (outcome, record, next_record) = finished(task).await;
+                let (outcome, cleanup_note, record, next_record) = finished(task).await;
                 assert_eq!(outcome, accepted(route, text), "{name}");
+                assert_eq!(
+                    cleanup_note.as_deref(),
+                    notice,
+                    "{name}: delivery can keep showing the cleanup fallback"
+                );
                 assert_eq!(
                     record,
                     Some((cleanup.to_owned(), WORDS.to_owned())),
@@ -7792,6 +7799,63 @@ async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
             }
         })
         .await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_native_cue_player_reports_the_latest_calls_first_sample_timing() {
+    use std::io::Write;
+    use std::time::Instant;
+    use thalvi_desktop::cues::{CueError, Cues, Mic};
+    use thalvi_desktop::engine::{CpalCuePlayer, CuePlayer};
+
+    const TEST: &str = "the_native_cue_player_reports_the_latest_calls_first_sample_timing";
+    const CHECKED: &str = "Checked the native cue timing";
+    if std::env::var_os("THALVI_PRIVATE_ALSA_TEST").is_some() {
+        let player = CpalCuePlayer::new(Cues::default(), InputGate::default());
+        let called = Instant::now();
+        assert_eq!(player.timing_since(called), None);
+        let played = player.play(Cue::Wake, Mic::Open).await;
+        let timing = player
+            .timing_since(called)
+            .expect("the output callback reported the first sample");
+        match played {
+            Ok(returned) => assert_eq!(returned, Some(timing)),
+            // ALSA's null output may reject pausing after the sample has arrived.
+            Err(CueError::Failed(error)) if error.to_string().contains("snd_pcm_pause") => {}
+            Err(error) => panic!("{error}"),
+        }
+        assert_eq!(player.timing_since(Instant::now()), None);
+        println!("{CHECKED}");
+        return;
+    }
+
+    // ALSA reads its configuration process-wide, so only the child gets a software output.
+    let config = std::env::temp_dir().join(format!("thalvi-cue-alsa-{}.conf", std::process::id()));
+    std::fs::File::create_new(&config)
+        .unwrap()
+        .write_all(b"pcm.!default { type null }\n")
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env("ALSA_CONFIG_PATH", &config)
+            .env("THALVI_PRIVATE_ALSA_TEST", "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    std::fs::remove_file(config).unwrap();
+    let result = result
+        .expect("the native cue timing test finished")
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        result.status.success() && stdout.contains(CHECKED),
+        "{stdout}\n{stderr}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
