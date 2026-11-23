@@ -22,7 +22,7 @@ use thalvi_desktop::theme::{Style, defaults_of};
 
 use crate::status::{Failure, FailureKind, LastError, Status};
 use painter::Painter;
-pub use view::View;
+pub use view::{Sample, View};
 
 /// Draws a synthetic view with the live overlay renderer, without opening a desktop surface.
 /// Returns the pixel dimensions and straight-alpha RGBA bytes, or `None` if allocation fails.
@@ -1238,5 +1238,41 @@ mod tests {
         let lines = shown_lines(&mut overlay, root.path()).await;
         assert_eq!(lines.len(), 1, "turning metrics on writes the next show");
         assert_eq!(lines[0]["event"], "desktop_overlay_shown");
+    }
+
+    #[test]
+    fn each_preview_state_draws_its_own_frame_at_both_scales() {
+        let style = Arc::new(defaults_of(Look::Holo));
+        let states = [
+            Sample::Live,
+            Sample::Quiet,
+            Sample::Working,
+            Sample::Pending,
+            Sample::Done,
+            Sample::Failed,
+        ];
+        let mut frames = Vec::new();
+        for state in states {
+            let (width, height, rgba) =
+                render_rgba(&View::sample(state), Arc::clone(&style), true, 1.0)
+                    .expect("a preview frame");
+            assert_eq!(
+                (width, height, rgba.len()),
+                (460, 200, 460 * 200 * 4),
+                "{state:?}"
+            );
+            frames.push(rgba);
+        }
+        for (i, first) in frames.iter().enumerate() {
+            for (j, second) in frames.iter().enumerate() {
+                assert!(
+                    i == j || first != second,
+                    "states {i} and {j} draw the same frame"
+                );
+            }
+        }
+        let (width, height, rgba) = render_rgba(&View::sample(Sample::Live), style, true, 2.0)
+            .expect("a scaled preview frame");
+        assert_eq!((width, height, rgba.len()), (920, 400, 920 * 400 * 4));
     }
 }

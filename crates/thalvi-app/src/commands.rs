@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -25,12 +25,13 @@ use thalvi_desktop::models::{
     SpeechModelInfo, SpeechProgress, WHISPER_TURBO, WakeModelInfo,
 };
 use thalvi_desktop::report::{Report, System, causes};
+use thalvi_desktop::theme::Style;
 use thalvi_desktop::transducer::check_folder;
 use thalvi_desktop::wake::validate_wake_model;
 
 use crate::app::AppState;
 use crate::menu_entry;
-use crate::overlay;
+use crate::overlay::{self, Sample, View};
 use crate::runner::{AudioStatus, Control};
 use crate::settings::{merged, settings_json};
 use crate::startup;
@@ -57,6 +58,23 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
 #[tauri::command]
 pub fn get_look_styles(state: State<'_, AppState>) -> Value {
     crate::look_styles::response(&state.config())
+}
+
+/// Draws the real overlay for a synthetic state, as framed raw RGBA bytes for the preview canvas.
+#[tauri::command]
+pub async fn preview_overlay(
+    state: String,
+    scale: f32,
+    app_state: State<'_, AppState>,
+) -> Result<tauri::ipc::Response, String> {
+    let sample: Sample = state.parse()?;
+    let scale = scale.clamp(1.0, 3.0);
+    let config = app_state.config();
+    let look = config.look;
+    let style = Arc::new(Style::resolve(look, config.themes.of(look)));
+    let dark = app_state.is_dark();
+    let bytes = crate::preview::draw(View::sample(sample), style, dark, scale).await?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Says the settings window has its styles; a show asked for meanwhile now happens.
