@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { DownloadFailure, errorText } from "./contract.ts";
-import type { AudioStatus, Backend, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, Level, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, Level, LookStyles, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 /** The rejection of `download_speech_model`, which carries `{ message, causes }`, as a typed error. */
 function downloadFailure(rejection: unknown): DownloadFailure {
@@ -40,6 +40,8 @@ export function tauriBackend(): Backend {
       });
     },
     getSettings: () => invoke<Settings>("get_settings"),
+    getLookStyles: () => invoke<LookStyles>("get_look_styles"),
+    settingsReady: () => invoke<undefined>("settings_ready"),
     saveSettings: (patch) => invoke<undefined>("save_settings", { patch }),
     setListening: (on) => invoke<undefined>("set_listening", { on }),
     dismissError: () => invoke<undefined>("dismiss_error"),

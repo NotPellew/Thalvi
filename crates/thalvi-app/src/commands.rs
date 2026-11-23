@@ -6,6 +6,7 @@
 )]
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
@@ -50,6 +51,21 @@ pub fn get_audio(state: State<'_, AppState>) -> AudioStatus {
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
     settings_json(&state.config())
+}
+
+/// The look model resolved for Settings, so the window can wear the look before it is shown.
+#[tauri::command]
+pub fn get_look_styles(state: State<'_, AppState>) -> Value {
+    crate::look_styles::response(&state.config())
+}
+
+/// Says the settings window has its styles; a show asked for meanwhile now happens.
+#[tauri::command]
+pub fn settings_ready(app: AppHandle, state: State<'_, AppState>) {
+    state.settings_ready.store(true, Ordering::SeqCst);
+    if state.settings_wanted.swap(false, Ordering::SeqCst) {
+        crate::app::show_settings(&app);
+    }
 }
 
 /// Saves what Settings changed: `patch` holds only the changed settings, as a JSON merge patch.

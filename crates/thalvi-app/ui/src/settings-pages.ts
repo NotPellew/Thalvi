@@ -14,6 +14,7 @@ import type {
   ScriptSettings,
   AppSettings,
   LiveEntry,
+  Look,
   OnDeviceEntry,
   OpenAiRequest,
   SecondaryApi,
@@ -34,7 +35,7 @@ import { DownloadFailure, errorText } from "./contract.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
 import { disclosureMemory, el, focusAfterRemoval, setChildren } from "./dom.ts";
-import { applyLook, lookPicker } from "./look.ts";
+import { lookPicker } from "./look.ts";
 
 /** What a control says once its value is applied. */
 export const APPLIED_TEXT = "Applied.";
@@ -65,8 +66,8 @@ export interface PageContext {
   startAtLogin: SwitchRead;
   /** Whether Thalvi is in the app menu, or why that could not be read. */
   menuEntry: SwitchRead;
-  /** The settings window, so a look picked here shows at once. */
-  root: HTMLElement;
+  /** Shows a look on this window at once, before the desktop has saved it. */
+  showLook: (look: Look) => void;
   /** Shows the page with this id. */
   open: (id: string) => void;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
@@ -2255,13 +2256,13 @@ function overlay({ settings, controls, apply }: PageContext): HTMLElement[] {
   ];
 }
 
-function look({ settings, controls, root, apply }: PageContext): HTMLElement[] {
+function look({ settings, controls, apply, showLook }: PageContext): HTMLElement[] {
   const applied = el("small", { class: "applied", role: "status" });
   const problem = note();
   const picker = lookPicker(settings.look, (next) => {
     applied.textContent = "";
     say(problem, "");
-    applyLook(root, next);
+    showLook(next);
     apply((draft) => {
       draft.look = next;
     }).then(
@@ -2270,7 +2271,7 @@ function look({ settings, controls, root, apply }: PageContext): HTMLElement[] {
       },
       (error: unknown) => {
         say(problem, errorText(error));
-        applyLook(root, settings.look);
+        showLook(settings.look);
         for (const input of picker.querySelectorAll<HTMLInputElement>("input")) input.checked = input.value === settings.look;
       },
     );

@@ -1,19 +1,9 @@
-:root {
-  color-scheme: light dark;
-  --bg: light-dark(#e8eff7, #020617);
-  --fg: light-dark(#07182e, #eafff3);
-  --mut: light-dark(#3d5a73, #9cc7b4);
-  --line: light-dark(#b9cbdd, #12315e);
-  --surf: light-dark(#f7fbff, #04122e);
-  --neon: light-dark(#007a43, #2bff88);
-  --blue: light-dark(#0b3d91, #3b82f6);
-  --deep: light-dark(#d3e2f3, #061a3d);
-  --warn: light-dark(#b42318, #ff6b5e);
-  --amber: light-dark(#8a5a00, #ffc24b);
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
-}
+/* Chrome every look shares. Every colour, size and effect arrives as a custom property the look
+   model resolves, set on #settings before the window is first shown. */
+
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
-body { margin: 0; color: var(--fg); }
-:focus-visible { outline: 2px solid var(--neon); outline-offset: 2px; }
+body { margin: 0; }
+#settings { color-scheme: var(--scheme); background: var(--bg); color: var(--fg); caret-color: var(--caret); font: var(--fs-body)/var(--line-height) var(--sans); }
+#settings ::selection { background: var(--selection); }
+:focus-visible { outline: var(--focus-width) solid var(--neon); outline-offset: var(--focus-offset); box-shadow: var(--focus-glow); }

@@ -1,10 +1,10 @@
 // The settings window: sidebar, search, pages, and the one way a change is applied.
 
-import type { AudioStatus, Backend, Settings, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Look, LookStyles, Settings, Status } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
-import { applyLook } from "./look.ts";
+import { applyLook, applyLookStyles } from "./look.ts";
 import { settingsPatch } from "./patch.ts";
 import {
   APPLIED_LATER_TEXT,
@@ -54,6 +54,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   const touchedDuringSearch = new Set<HTMLDetailsElement>();
   // What the desktop holds; pages read it and change it only through `apply`.
   let settings: Settings | null = null;
+  // The looks' resolved styles, and which read is newest so a slow answer cannot win.
+  let lookStyles: LookStyles | null = null;
+  let displayedLook: Look = "gunmetal";
+  let styleRequest = 0;
+  let loadRequest = 0;
+  let windowReady = false;
   let runtimeFailure = "";
   let runtimeCauses: string[] = [];
   let loadFailure = "";
@@ -224,34 +230,73 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     }, { once: true });
   }
 
-  async function load(typing: Typing | null = null): Promise<void> {
-    loadFailure = "";
-    feedback();
-    let loaded: Settings;
+  /** Shows a look at once; the styles read last are on hand, so picking one does not wait. */
+  function showLook(look: Look): void {
+    displayedLook = look;
+    applyLook(root, look);
+    if (lookStyles) applyLookStyles(root, lookStyles.looks[look]);
+  }
+
+  /** Reads the resolved look styles and puts the current look's on the window. */
+  async function refreshLookStyles(): Promise<void> {
+    const request = ++styleRequest;
+    let styles: LookStyles;
     try {
-      await queue;
-      loaded = await backend.getSettings();
+      styles = await backend.getLookStyles();
     } catch (error) {
-      loadFailure = errorText(error);
-      feedback();
+      if (request === styleRequest) {
+        loadFailure = errorText(error);
+        feedback();
+      }
       return;
     }
+    if (request !== styleRequest) return;
+    lookStyles = styles;
+    applyLookStyles(root, styles.looks[displayedLook]);
+  }
+
+  function load(typing: Typing | null = null): void {
+    const request = ++loadRequest;
+    void loadSettings(request, typing).catch((error: unknown) => {
+      if (request !== loadRequest) return;
+      loadFailure = errorText(error);
+      feedback();
+    }).finally(() => {
+      if (request !== loadRequest || windowReady) return;
+      windowReady = true;
+      void backend.settingsReady().catch((error: unknown) => {
+        loadFailure = errorText(error);
+        feedback();
+      });
+    });
+  }
+
+  async function loadSettings(request: number, typing: Typing | null): Promise<void> {
+    loadFailure = "";
+    feedback();
+    await queue;
+    if (request !== loadRequest) return;
+    const stylesReady = refreshLookStyles();
+    const loaded = await backend.getSettings().finally(() => stylesReady);
+    if (request !== loadRequest) return;
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
     const holdKeyUnavailable = await backend.getHoldKeyUnavailable();
     const appStylesUnavailable = await backend.getAppStylesUnavailable();
     const holdKeyDefaults = await backend.getHoldKeyDefaults();
     const startAtLogin = await backend.getStartAtLogin().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
     const menuEntry = await backend.getMenuEntry().catch((error: unknown): SwitchRead => ({ kind: "unreadable", message: errorText(error) }));
-    audio = await backend.getAudio().catch(() => ({
+    const loadedAudio = await backend.getAudio().catch(() => ({
       selected: loaded.microphone,
       active: null,
       paused: false,
       problem: null,
     }));
+    if (request !== loadRequest) return;
+    audio = loadedAudio;
     settings = loaded;
-    applyLook(root, loaded.look);
+    showLook(loaded.look);
     pages = buildPages({
-      settings: loaded, backend, root, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply,
+      settings: loaded, backend, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply, showLook,
     });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
@@ -284,6 +329,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       }
       for (const key of Object.keys(settings)) Reflect.deleteProperty(settings, key);
       Object.assign(settings, next);
+      if (Object.hasOwn(patch, "look") || Object.hasOwn(patch, "themes")) void refreshLookStyles();
     };
     const result = queue.then(run);
     queue = result.catch(() => undefined);
@@ -355,7 +401,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     live.update(state);
   });
   backend.onSettingsChangedElsewhere(() => {
-    void load(typingNow());
+    load(typingNow());
   });
   backend.onStatus(showStatus);
   backend.getStatus().then(showStatus).catch((error: unknown) => {
@@ -363,5 +409,5 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     runtimeCauses = [];
     feedback();
   });
-  void load();
+  load();
 }
