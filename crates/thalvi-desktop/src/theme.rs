@@ -218,7 +218,7 @@ impl Scale {
     fn parse(value: f64, min: f32, max: f32) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "a scale is a small finite f32"
+            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
         )]
         let value = value as f32;
         if value.is_finite() && (min..=max).contains(&value) {
@@ -283,7 +283,7 @@ impl Tracking {
     fn parse(value: f64) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "a scale is a small finite f32"
+            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
         )]
         let value = value as f32;
         if value.is_finite() && (0.0..=0.4).contains(&value) {
@@ -308,7 +308,7 @@ impl Opacity {
     fn parse(value: f64) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "a scale is a small finite f32"
+            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
         )]
         let value = value as f32;
         if value.is_finite() && (0.6..=1.0).contains(&value) {
@@ -333,7 +333,7 @@ impl Strength {
     fn parse(value: f64) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "a scale is a small finite f32"
+            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
         )]
         let value = value as f32;
         if value.is_finite() && (0.0..=1.5).contains(&value) {
@@ -358,7 +358,7 @@ impl Mesh {
     fn parse(value: f64) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "a scale is a small finite f32"
+            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
         )]
         let value = value as f32;
         if value.is_finite() && (0.0..=0.15).contains(&value) {
@@ -1375,7 +1375,7 @@ fn leaf_weight(value: &Value, path: &str) -> Result<Weight, String> {
     }
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "checked non-negative and integral"
+        reason = "checked non-negative and integral; a value past u64 saturates, which parse rejects"
     )]
     #[expect(clippy::cast_sign_loss, reason = "checked non-negative")]
     Weight::parse(value as u64).map_err(|reason| format!("{path}: {reason}"))
@@ -1423,7 +1423,7 @@ fn leaf_px(value: &Value, path: &str, min: u8, max: u8) -> Result<Px, String> {
     }
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "checked non-negative and integral"
+        reason = "checked non-negative and integral; a value past u64 saturates, which parse rejects"
     )]
     #[expect(clippy::cast_sign_loss, reason = "checked non-negative")]
     Px::parse(value as u64, min, max).map_err(|reason| format!("{path}: {reason}"))
