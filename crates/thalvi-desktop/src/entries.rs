@@ -34,6 +34,10 @@ pub enum EntryError {
         "Speech server \"{0}\" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first."
     )]
     ActiveExtra(String),
+    #[error("Speech server \"{0}\" is the one in use, so it cannot also be the final pass.")]
+    ActiveFinalPass(String),
+    #[error("Choose only one speech server for the final pass.")]
+    SeveralFinalPasses,
     #[error("Speech server \"{name}\": {reason}")]
     Fields { name: String, reason: String },
     #[error(
@@ -175,6 +179,19 @@ impl ExtraEntry {
     }
 }
 
+/// The recognizer chosen to transcribe a finished capture.
+#[derive(Clone, Copy)]
+pub enum FinalEntry<'a> {
+    Live(&'a LiveEntry),
+    Upload(&'a ExtraEntry),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FinalIndex {
+    Live(usize),
+    Upload(usize),
+}
+
 /// The speech servers: any number of live and extra entries, exactly one live entry active.
 #[derive(Clone, Debug)]
 pub struct Entries {
@@ -182,13 +199,17 @@ pub struct Entries {
     /// Index into `live`; always in range.
     active: usize,
     extras: Vec<ExtraEntry>,
+    final_pass: Option<FinalIndex>,
     dropped_legacy_server: bool,
     dropped_active_legacy_server: bool,
 }
 
 impl PartialEq for Entries {
     fn eq(&self, other: &Self) -> bool {
-        self.live == other.live && self.active == other.active && self.extras == other.extras
+        self.live == other.live
+            && self.active == other.active
+            && self.extras == other.extras
+            && self.final_pass == other.final_pass
     }
 }
 
@@ -206,6 +227,7 @@ impl Default for Entries {
             }],
             active: 0,
             extras: Vec::new(),
+            final_pass: None,
             dropped_legacy_server: false,
             dropped_active_legacy_server: false,
         }
@@ -233,6 +255,15 @@ impl Entries {
     #[must_use]
     pub fn extras(&self) -> &[ExtraEntry] {
         &self.extras
+    }
+
+    /// The one entry doing a final pass, when chosen.
+    #[must_use]
+    pub fn final_pass(&self) -> Option<FinalEntry<'_>> {
+        match self.final_pass? {
+            FinalIndex::Live(index) => Some(FinalEntry::Live(&self.live[index])),
+            FinalIndex::Upload(index) => Some(FinalEntry::Upload(&self.extras[index])),
+        }
     }
 
     /// Whether loading this config dropped a saved Thalvi server entry.
@@ -296,7 +327,9 @@ impl Entries {
         let mut seen: Vec<(String, String)> = Vec::new();
         let mut dropped_legacy_server = false;
         let mut removed_active = false;
+        let mut final_pass = None;
         for entry in raw {
+            let marked = entry.final_pass();
             let built = entry.build(false)?;
             if let Built::RemovedLegacyServer { active } = &built {
                 dropped_legacy_server = true;
@@ -314,6 +347,16 @@ impl Entries {
                 return Err(EntryError::Id(name.to_owned()));
             }
             seen.push((id.to_owned(), name.to_owned()));
+            if marked {
+                let index = match &built {
+                    Built::Live { .. } => FinalIndex::Live(live.len()),
+                    Built::Extra(_) => FinalIndex::Upload(extras.len()),
+                    Built::RemovedLegacyServer { .. } => continue,
+                };
+                if final_pass.replace(index).is_some() {
+                    return Err(EntryError::SeveralFinalPasses);
+                }
+            }
             match built {
                 Built::Live { entry, on } => {
                     active.push(on);
@@ -348,10 +391,14 @@ impl Entries {
             }
             _ => return Err(EntryError::ActiveLive),
         };
+        if final_pass == Some(FinalIndex::Live(active)) {
+            return Err(EntryError::ActiveFinalPass(live[active].name.clone()));
+        }
         Ok(Self {
             live,
             active,
             extras,
+            final_pass,
             dropped_legacy_server,
             dropped_active_legacy_server: removed_active,
         })
@@ -411,6 +458,7 @@ impl Entries {
                 })
                 .into_iter()
                 .collect(),
+            final_pass: None,
             dropped_legacy_server: false,
             dropped_active_legacy_server: false,
         })
@@ -456,6 +504,8 @@ enum RawEntry {
         #[serde(default)]
         active: bool,
         #[serde(default)]
+        final_pass: bool,
+        #[serde(default)]
         extra: bool,
         address: String,
         model: String,
@@ -467,6 +517,8 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
+        #[serde(default)]
+        final_pass: bool,
         #[serde(default)]
         extra: bool,
         address: String,
@@ -486,6 +538,8 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
+        #[serde(default, rename = "final_pass")]
+        _final_pass: bool,
         #[serde(default, rename = "address")]
         _address: String,
     },
@@ -494,6 +548,8 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
+        #[serde(default)]
+        final_pass: bool,
         #[serde(default)]
         extra: bool,
         #[serde(default)]
@@ -505,6 +561,8 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
+        #[serde(default)]
+        final_pass: bool,
         address: String,
         model: String,
         #[serde(default)]
@@ -531,15 +589,18 @@ impl Built {
 }
 
 impl RawEntry {
-    /// Checks the fields. An extra entry that is switched off is kept as written unless
-    /// `strict`, which is how an entry is checked where it is added or edited.
-    fn build(self, strict: bool) -> Result<Built, EntryError> {
-        if let Self::LegacyServer { active, .. } = &self
-            && !strict
-        {
-            return Ok(Built::RemovedLegacyServer { active: *active });
+    fn final_pass(&self) -> bool {
+        match self {
+            Self::Realtime { final_pass, .. }
+            | Self::OpenAi { final_pass, .. }
+            | Self::OnDevice { final_pass, .. }
+            | Self::Extra { final_pass, .. } => *final_pass,
+            Self::LegacyServer { .. } => false,
         }
-        let (id, name) = match &self {
+    }
+
+    fn validated_identity(&self) -> Result<(String, String), EntryError> {
+        let (id, name) = match self {
             Self::Realtime { id, name, .. }
             | Self::OpenAi { id, name, .. }
             | Self::LegacyServer { id, name, .. }
@@ -552,7 +613,23 @@ impl RawEntry {
         if id.is_empty() || id.chars().count() > MAX_ID_CHARS {
             return Err(EntryError::Id(name));
         }
+        Ok((id, name))
+    }
+
+    /// Checks the fields. An extra entry that is switched off is kept as written unless
+    /// `strict`, which is how an entry is checked where it is added or edited.
+    fn build(self, strict: bool) -> Result<Built, EntryError> {
+        if let Self::LegacyServer { active, .. } = &self
+            && !strict
+        {
+            return Ok(Built::RemovedLegacyServer { active: *active });
+        }
+        let (id, name) = self.validated_identity()?;
+        let final_pass = self.final_pass();
         let live = |kind, on, extra| {
+            if on && final_pass {
+                return Err(EntryError::ActiveFinalPass(name.clone()));
+            }
             if on && extra {
                 return Err(EntryError::ActiveExtra(name.clone()));
             }
@@ -627,9 +704,15 @@ impl RawEntry {
                 api,
                 ..
             } => Built::Extra(ExtraEntry {
-                settings: SecondaryStt::new(&address, &model, api_key, api, active || strict)
-                    .map(|settings| settings.with_enabled(active))
-                    .map_err(|e| fields(&name, extra_reason(&e)))?,
+                settings: SecondaryStt::new(
+                    &address,
+                    &model,
+                    api_key,
+                    api,
+                    active || strict || final_pass,
+                )
+                .map(|settings| settings.with_enabled(active))
+                .map_err(|e| fields(&name, extra_reason(&e)))?,
                 id,
                 name,
             }),
@@ -697,51 +780,59 @@ impl RawStt {
     }
 }
 
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum FileEntry<'a> {
+    Realtime {
+        id: &'a str,
+        name: &'a str,
+        active: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        final_pass: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        extra: bool,
+        address: &'a str,
+        model: &'a str,
+        api_key: &'a str,
+    },
+    OpenAi {
+        id: &'a str,
+        name: &'a str,
+        active: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        final_pass: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        extra: bool,
+        address: &'a str,
+        model: &'a str,
+        api_key: &'a str,
+        request: LiveRequest,
+        language: String,
+    },
+    OnDevice {
+        id: &'a str,
+        name: &'a str,
+        active: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        final_pass: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        extra: bool,
+        model: String,
+    },
+    Extra {
+        id: &'a str,
+        name: &'a str,
+        active: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        final_pass: bool,
+        address: &'a str,
+        model: &'a str,
+        api_key: &'a str,
+        api: SecondaryApi,
+    },
+}
 impl Serialize for Entries {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        #[serde(tag = "kind", rename_all = "snake_case")]
-        enum File<'a> {
-            Realtime {
-                id: &'a str,
-                name: &'a str,
-                active: bool,
-                #[serde(skip_serializing_if = "std::ops::Not::not")]
-                extra: bool,
-                address: &'a str,
-                model: &'a str,
-                api_key: &'a str,
-            },
-            OpenAi {
-                id: &'a str,
-                name: &'a str,
-                active: bool,
-                #[serde(skip_serializing_if = "std::ops::Not::not")]
-                extra: bool,
-                address: &'a str,
-                model: &'a str,
-                api_key: &'a str,
-                request: LiveRequest,
-                language: String,
-            },
-            OnDevice {
-                id: &'a str,
-                name: &'a str,
-                active: bool,
-                #[serde(skip_serializing_if = "std::ops::Not::not")]
-                extra: bool,
-                model: String,
-            },
-            Extra {
-                id: &'a str,
-                name: &'a str,
-                active: bool,
-                address: &'a str,
-                model: &'a str,
-                api_key: &'a str,
-                api: SecondaryApi,
-            },
-        }
         let live = self.live.iter().enumerate().map(|(index, entry)| {
             let (id, name, active, extra) = (
                 entry.id.as_str(),
@@ -749,20 +840,23 @@ impl Serialize for Entries {
                 index == self.active,
                 entry.extra,
             );
+            let final_pass = self.final_pass == Some(FinalIndex::Live(index));
             match &entry.kind {
-                LiveKind::Realtime(realtime) => File::Realtime {
+                LiveKind::Realtime(realtime) => FileEntry::Realtime {
                     id,
                     name,
                     active,
+                    final_pass,
                     extra,
                     address: &realtime.address,
                     model: &realtime.model,
                     api_key: &realtime.api_key,
                 },
-                LiveKind::OpenAi(live) => File::OpenAi {
+                LiveKind::OpenAi(live) => FileEntry::OpenAi {
                     id,
                     name,
                     active,
+                    final_pass,
                     extra,
                     address: live.settings.address(),
                     model: live.settings.model(),
@@ -770,24 +864,30 @@ impl Serialize for Entries {
                     request: live.request,
                     language: live.language.map(|l| l.to_string()).unwrap_or_default(),
                 },
-                LiveKind::OnDevice(choice) => File::OnDevice {
+                LiveKind::OnDevice(choice) => FileEntry::OnDevice {
                     id,
                     name,
                     active,
+                    final_pass,
                     extra,
                     model: choice.label(),
                 },
             }
         });
-        let second = self.extras.iter().map(|entry| File::Extra {
-            id: &entry.id,
-            name: &entry.name,
-            active: entry.ticked(),
-            address: entry.settings.address(),
-            model: entry.settings.model(),
-            api_key: entry.settings.api_key(),
-            api: entry.settings.api(),
-        });
+        let second = self
+            .extras
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| FileEntry::Extra {
+                id: &entry.id,
+                name: &entry.name,
+                active: entry.ticked(),
+                final_pass: self.final_pass == Some(FinalIndex::Upload(index)),
+                address: entry.settings.address(),
+                model: entry.settings.model(),
+                api_key: entry.settings.api_key(),
+                api: entry.settings.api(),
+            });
         serializer.collect_seq(live.chain(second))
     }
 }
@@ -799,6 +899,48 @@ mod tests {
     use super::*;
     use crate::config::DesktopConfig;
     use crate::whisper::WhisperBackend;
+
+    #[test]
+    fn final_pass_round_trips_a_disabled_upload_and_refuses_multiple_or_active_entries() {
+        let mut config = json!({"stt": {"entries": [
+            {"kind":"on_device", "id":"live", "name":"Live", "active":true},
+            {"kind":"extra", "id":"upload", "name":"Upload", "active":false,
+                "address":"https://speech.example/v1", "model":"asr", "api_key":"fixture", "final_pass":true},
+            {"kind":"on_device", "id":"local", "name":"Local", "active":false}
+        ]}});
+        let saved = DesktopConfig::from_json_str(&config.to_string()).unwrap();
+        assert!(
+            matches!(saved.stt.entries.final_pass(), Some(FinalEntry::Upload(entry)) if !entry.ticked() && entry.settings.api_key() == "fixture")
+        );
+        let json = serde_json::to_value(&saved).unwrap();
+        assert_eq!(json["stt"]["entries"][2]["final_pass"], true);
+        assert_eq!(
+            DesktopConfig::from_json_str(&json.to_string())
+                .unwrap()
+                .stt
+                .entries,
+            saved.stt.entries
+        );
+        config["stt"]["entries"][2]["final_pass"] = json!(true);
+        assert!(
+            DesktopConfig::from_json_str(&config.to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("Choose only one")
+        );
+        config["stt"]["entries"][1]["final_pass"] = json!(false);
+        assert!(
+            matches!(DesktopConfig::from_json_str(&config.to_string()).unwrap().stt.entries.final_pass(),
+            Some(FinalEntry::Live(entry)) if entry.id == "local")
+        );
+        config["stt"]["entries"][0]["final_pass"] = json!(true);
+        assert!(
+            DesktopConfig::from_json_str(&config.to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("cannot also be the final pass")
+        );
+    }
 
     fn entries(json: &str) -> Result<Entries, String> {
         DesktopConfig::from_json_str(json)

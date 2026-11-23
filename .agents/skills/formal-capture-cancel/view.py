@@ -15,6 +15,10 @@ def state(variables: dict[str, str]) -> str:
         'pre': 'reading controls queued before the capture',
         'cleaning': 'dictation cleanup of a submit',
         'ending': 'ending cue plays, recognizer releases',
+        'finalPass': 'waiting for the final recognizer',
+        'finalCleanup': 'dictation cleanup after the final pass',
+        'preview': 'waiting for the full Submit preview',
+        'confirm': 'showing the settled submit text',
         'secondary': 'merging the streaming texts',
         'writing': 'explicit write request',
     }[stage]
@@ -34,6 +38,10 @@ ACTIONS = {
     'CueReturns': None,
     'CloseReturns': 'recognizer released',
     'SecondaryReturns': 'merge returns',
+    'FinalReturns': 'final pass settles',
+    'FinalCleanupReturns': 'cleanup returns',
+    'PreviewReturns': 'preview is shown or unavailable',
+    'ConfirmReturns': 'confirmation ends',
     'WritingReturns': 'write request returns',
     'FinishEmpty': 'no controls left',
 }

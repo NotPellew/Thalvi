@@ -477,6 +477,14 @@ impl Text {
     }
 
     #[cfg(test)]
+    pub(super) fn load_weight_fixture(&mut self) -> &'static str {
+        self.fonts
+            .db_mut()
+            .load_font_data(include_bytes!("fixtures/variable-weight.ttf").to_vec());
+        "Thalvi Test Weight"
+    }
+
+    #[cfg(test)]
     pub fn alternative_family<'a>(&self, names: &'a [&'a str], mono: bool) -> Option<&'a str> {
         let db = self.fonts.db();
         let generic = if mono {
@@ -1195,11 +1203,8 @@ mod tests {
     #[test]
     fn a_variable_font_draws_different_ink_at_weight_400_and_900() {
         let mut text = Text::new();
-        let name = "Thalvi Test Weight";
         // The synthetic face registers at 400 and gets a wider stroke at its axis limit of 700.
-        text.fonts
-            .db_mut()
-            .load_font_data(include_bytes!("fixtures/variable-weight.ttf").to_vec());
+        let name = text.load_weight_fixture();
         let face = text
             .fonts
             .db()
