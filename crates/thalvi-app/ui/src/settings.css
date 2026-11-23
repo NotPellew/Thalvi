@@ -176,6 +176,8 @@ code.line { display: block; padding: var(--code-pad-y) var(--code-pad-x); border
   .bar .msg, #settings[data-look] .bar .err { flex: 1 0 100%; max-height: var(--feedback-max); overflow-y: auto; overflow-wrap: anywhere; text-align: left; }
   .row { flex-direction: column; align-items: stretch; gap: var(--inline-gap); }
   .what { max-width: none; }
+  .row[data-label="live recognizer"] > .what { flex: none; }
+  .row[data-label="live recognizer"] .stack { min-width: 0; max-width: 100%; }
   .ctl { flex: none; justify-content: flex-start; }
   .card { grid-template-columns: minmax(0, 1fr); }
   .card button { grid-column: 1; }
