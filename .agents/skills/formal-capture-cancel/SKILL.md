@@ -143,6 +143,12 @@ the overlay reports a full frame. A refusal, timeout, or lost frame keeps the te
 An accepted result still crosses `FinishEmpty`.
 The model checks delivery admission. It does not check correctness of recognition or a reply's time.
 
+The numbers-as-digits formatter (#588) rewrites a delivered text synchronously in
+`Engine::finish_transcript` and in a submit's pending text before the existing `Prepare`,
+cleanup, preview and confirmation steps; with a final pass it formats the settled replacement
+text. It adds no await, control read, queue step or write to cancellation state, and a task is
+never formatted, so the model actions and bounds are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty

@@ -211,7 +211,7 @@ describe("pages", () => {
         id: "chat",
         title: "Chat model",
         groups: {
-          Writing: ["chat model source", "local chat runtime", "local chat model", "writing endpoint address", "writing model", "writing api key", "clean up dictation", "writing prompt", "opening phrases", "app styles"],
+          Writing: ["chat model source", "local chat runtime", "local chat model", "writing endpoint address", "writing model", "writing api key", "write numbers as digits", "clean up dictation", "writing prompt", "opening phrases", "app styles"],
         },
       },
       {
@@ -1697,6 +1697,14 @@ describe("the fake backend's rule for extra recognizers", () => {
     await expect(put(backend, { ...SETTINGS, writing: endpoint, stt: { entries: [first, second] } })).rejects.toThrow(message);
     await expect(put(backend, { ...SETTINGS, writing, stt: { entries: [{ ...SERVER }, { ...CYBREX, extra: true }] } })).resolves.toBeUndefined();
   });
+
+  it("treats numbers as digits alone as no writing endpoint", async () => {
+    const backend = fakeBackend(new URLSearchParams());
+    await put(backend, settings(writing, true));
+    const off = { numbers_as_digits: false };
+    await expect(put(backend, { ...settings(null, true), writing: off })).rejects.toThrow("Switch off the extra recognizers before removing the writing model.");
+    await expect(put(backend, { ...settings(null, false), writing: off })).resolves.toBeUndefined();
+  });
 });
 
 describe("the fake backend's address check", () => {
@@ -2404,6 +2412,54 @@ describe("writing", () => {
       await settle();
       expect(reason("Writing prompt")).toBe("writing.prompt must not be blank. Restore the default to start over.");
       expect(area().value).toBe("  ");
+    });
+  });
+
+  describe("write numbers as digits", () => {
+    const toggle = (): HTMLInputElement => control("Write numbers as digits", "input");
+
+    it("is on by default and works without a writing endpoint", async () => {
+      const stub = await open();
+      goTo("chat");
+      expect(toggle().checked).toBe(true);
+      expect(toggle().disabled).toBe(false);
+      toggle().click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ numbers_as_digits: false });
+      toggle().click();
+      await settle();
+      expect(sent(stub).writing).toBeNull();
+    });
+
+    it("keeps an explicit off through other edits and clearing the endpoint", async () => {
+      const writing = { url: endpoint.url, model: endpoint.model, has_key: true };
+      const stub = await open({ ...SETTINGS, writing });
+      goTo("chat");
+      toggle().click();
+      await settle();
+      expect(sent(stub).writing).toEqual({ ...writing, numbers_as_digits: false });
+      type(control("Writing model", "input"), "updated");
+      await settle();
+      expect(sent(stub).writing).toEqual({
+        ...writing,
+        model: "updated",
+        numbers_as_digits: false,
+      });
+      type(control("Writing endpoint address", "input"), "");
+      type(control("Writing model", "input"), "");
+      await settle();
+      expect(sent(stub).writing).toEqual({ numbers_as_digits: false });
+      expect(toggle().checked).toBe(false);
+    });
+
+    it("shows an explicit off from the file and turns it back on", async () => {
+      const stub = await open({ ...SETTINGS, writing: { ...endpoint, has_key: true, numbers_as_digits: false } });
+      goTo("chat");
+      expect(toggle().checked).toBe(false);
+      toggle().click();
+      await settle();
+      expect(sent(stub).writing).not.toHaveProperty("numbers_as_digits");
+      expect(sent(stub).writing?.url).toBe(endpoint.url);
     });
   });
 

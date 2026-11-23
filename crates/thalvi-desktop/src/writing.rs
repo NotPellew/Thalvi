@@ -45,6 +45,10 @@ pub enum WritingSettingsError {
         "writing.clean_dictation needs a writing endpoint. Set one under Settings → Chat model → Writing first."
     )]
     CleanWithoutEndpoint,
+    #[error(
+        "writing.{0} needs a writing endpoint. Set one under Settings → Chat model → Writing first."
+    )]
+    NeedsEndpoint(&'static str),
 }
 
 /// How long a dictation cleanup may take before the raw words are pasted instead.
@@ -122,6 +126,24 @@ struct RawWriting {
     apps: Vec<AppStyle>,
     #[serde(default)]
     clean_dictation: bool,
+    #[serde(default = "on")]
+    numbers_as_digits: bool,
+}
+
+fn on() -> bool {
+    true
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip predicate takes a reference"
+)]
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_blank(value: &&str) -> bool {
+    value.is_empty()
 }
 
 /// A validated chat-completions destination. Its key is omitted from debug output.
@@ -145,7 +167,11 @@ impl fmt::Debug for Endpoint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Destination {
     Manual(Endpoint),
-    Computer { saved: Option<Endpoint> },
+    Computer {
+        saved: Option<Endpoint>,
+    },
+    /// Only the Writing page's settings that need no endpoint, such as numbers as digits.
+    None,
 }
 
 /// Validated writing destination and prompt rules.
@@ -158,6 +184,7 @@ pub struct Writing {
     openings: Vec<Opening>,
     apps: Vec<AppStyle>,
     clean_dictation: bool,
+    numbers_as_digits: bool,
 }
 
 impl fmt::Debug for Writing {
@@ -173,6 +200,10 @@ impl fmt::Debug for Writing {
                 .field("local", &true)
                 .field("build", &self.chat_build)
                 .finish_non_exhaustive(),
+            Destination::None => f
+                .debug_struct("Writing")
+                .field("numbers_as_digits", &self.numbers_as_digits)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -185,6 +216,7 @@ impl Serialize for Writing {
             url: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             model: Option<&'a str>,
+            #[serde(skip_serializing_if = "is_blank")]
             api_key: &'a str,
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             local: bool,
@@ -198,10 +230,13 @@ impl Serialize for Writing {
             apps: &'a [AppStyle],
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             clean_dictation: bool,
+            #[serde(skip_serializing_if = "is_true")]
+            numbers_as_digits: bool,
         }
         let (endpoint, local) = match &self.destination {
             Destination::Manual(endpoint) => (Some(endpoint), false),
             Destination::Computer { saved } => (saved.as_ref(), true),
+            Destination::None => (None, false),
         };
         Stored {
             url: endpoint.map(|e| e.url.as_str()),
@@ -213,6 +248,7 @@ impl Serialize for Writing {
             openings: &self.openings,
             apps: &self.apps,
             clean_dictation: self.clean_dictation,
+            numbers_as_digits: self.numbers_as_digits,
         }
         .serialize(serializer)
     }
@@ -264,6 +300,7 @@ impl Writing {
             openings,
             apps,
             clean_dictation,
+            true,
         )
     }
 
@@ -274,6 +311,7 @@ impl Writing {
         openings: Vec<Opening>,
         apps: Vec<AppStyle>,
         clean_dictation: bool,
+        numbers_as_digits: bool,
     ) -> Result<Self, WritingSettingsError> {
         let prompt = match prompt.map(str::trim) {
             Some("") => return Err(WritingSettingsError::Prompt),
@@ -325,6 +363,7 @@ impl Writing {
             openings: checked,
             apps: styles,
             clean_dictation,
+            numbers_as_digits,
         })
     }
 
@@ -332,6 +371,18 @@ impl Writing {
     #[must_use]
     pub fn clean_dictation(&self) -> bool {
         self.clean_dictation
+    }
+
+    /// Whether a delivered dictation gets its number words as digits.
+    #[must_use]
+    pub fn numbers_as_digits(&self) -> bool {
+        self.numbers_as_digits
+    }
+
+    /// Whether a chat endpoint exists to write, merge or clean with.
+    #[must_use]
+    pub fn has_endpoint(&self) -> bool {
+        !matches!(self.destination, Destination::None)
     }
 
     /// The prompt used when no opening matches: the user's own, else [`DEFAULT_PROMPT`].
@@ -405,6 +456,7 @@ impl Writing {
         match &self.destination {
             Destination::Manual(endpoint) => &endpoint.model,
             Destination::Computer { .. } => crate::chat::MODEL.asset.file_name,
+            Destination::None => "",
         }
     }
 
@@ -435,6 +487,7 @@ impl Writing {
             Destination::Computer { saved, .. } => {
                 saved.as_ref().map_or("", |endpoint| endpoint.key.as_str())
             }
+            Destination::None => "",
         }
     }
 
@@ -530,15 +583,38 @@ impl TryFrom<RawWriting> for Writing {
     type Error = WritingSettingsError;
 
     fn try_from(raw: RawWriting) -> Result<Self, Self::Error> {
-        // A missing endpoint is a bad URL, except the cleanup switch, which says so itself.
+        // Cleanup needs an endpoint and says so itself; the other settings that need none are the
+        // Writing page's, such as numbers as digits.
         if raw.clean_dictation
             && !raw.local
             && raw.url.as_ref().is_none_or(|url| url.trim().is_empty())
         {
             return Err(WritingSettingsError::CleanWithoutEndpoint);
         }
+        if raw.url.is_none() && raw.model.is_none() && !raw.local {
+            let custom_prompt = raw.prompt.as_deref().is_some_and(|prompt| {
+                let prompt = prompt.trim();
+                !prompt.is_empty() && prompt != DEFAULT_PROMPT
+            });
+            let setting = if custom_prompt {
+                Some("prompt")
+            } else if !raw.openings.is_empty() {
+                Some("openings")
+            } else if !raw.apps.is_empty() {
+                Some("apps")
+            } else if raw.chat_build.is_some() {
+                Some("chat_build")
+            } else if !raw.api_key.is_empty() {
+                Some("api_key")
+            } else {
+                None
+            };
+            if let Some(setting) = setting {
+                return Err(WritingSettingsError::NeedsEndpoint(setting));
+            }
+        }
         let endpoint = match (raw.url, raw.model) {
-            (None, None) if raw.local => None,
+            (None, None) => None,
             (None, _) => return Err(WritingSettingsError::Url),
             (_, None) => return Err(WritingSettingsError::Model),
             (Some(url), Some(model)) => {
@@ -559,11 +635,7 @@ impl TryFrom<RawWriting> for Writing {
         } else {
             match endpoint {
                 Some(endpoint) => Destination::Manual(endpoint),
-                // The switch without an endpoint says so; a missing endpoint otherwise is a bad URL.
-                None if raw.clean_dictation => {
-                    return Err(WritingSettingsError::CleanWithoutEndpoint);
-                }
-                None => return Err(WritingSettingsError::Url),
+                None => Destination::None,
             }
         };
         Self::with_destination(
@@ -573,6 +645,7 @@ impl TryFrom<RawWriting> for Writing {
             raw.openings,
             raw.apps,
             raw.clean_dictation,
+            raw.numbers_as_digits,
         )
     }
 }
@@ -784,7 +857,7 @@ mod tests {
             )
             .map(|writing| match writing.destination {
                 Destination::Manual(endpoint) => endpoint.url,
-                Destination::Computer { .. } => panic!("manual"),
+                Destination::Computer { .. } | Destination::None => panic!("manual"),
             });
             assert_eq!(result, expected.map(str::to_owned), "{url:?} {model:?}");
         }
@@ -848,6 +921,40 @@ mod tests {
             openings,
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn the_writing_settings_keep_numbers_as_digits_on_unless_turned_off_with_or_without_an_endpoint()
+     {
+        let parse = |json: &str| serde_json::from_str::<Writing>(json);
+        let on = parse(r#"{"url": "http://host/v1", "model": "m"}"#).unwrap();
+        assert!(on.numbers_as_digits(), "on by default");
+        assert!(on.has_endpoint());
+        let off = parse(r#"{"numbers_as_digits": false}"#).unwrap();
+        assert!(!off.numbers_as_digits());
+        assert!(
+            !off.has_endpoint(),
+            "the switch works without a chat endpoint"
+        );
+        let stored = serde_json::to_value(&off).unwrap();
+        assert_eq!(stored, serde_json::json!({"numbers_as_digits": false}));
+        assert_eq!(parse(&stored.to_string()).unwrap(), off);
+        let stored_on = serde_json::to_value(&on).unwrap();
+        assert!(
+            stored_on.get("numbers_as_digits").is_none(),
+            "on is the default and is not stored"
+        );
+        assert_eq!(parse(&stored_on.to_string()).unwrap(), on);
+        let endpoint =
+            parse(r#"{"url": "http://host/v1", "model": "m", "numbers_as_digits": false}"#)
+                .unwrap();
+        assert!(endpoint.has_endpoint());
+        assert!(!endpoint.numbers_as_digits());
+        assert!(
+            !parse(&serde_json::to_value(&endpoint).unwrap().to_string())
+                .unwrap()
+                .numbers_as_digits()
+        );
     }
 
     #[test]

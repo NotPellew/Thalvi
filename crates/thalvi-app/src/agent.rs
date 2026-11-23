@@ -1556,6 +1556,50 @@ mod tests {
     }
 
     #[test]
+    fn numbers_as_digits_round_trips_off_without_a_writing_endpoint_and_on_stores_nothing() {
+        let rig = Rig::new("numbers", "{}");
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["writing"],
+            Value::Null,
+            "on by default"
+        );
+        let set = rig.set(json!({"writing": {"numbers_as_digits": false}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        let writing = rig.fake.config().writing.unwrap();
+        assert!(!writing.numbers_as_digits());
+        assert!(!writing.has_endpoint(), "the switch needs no endpoint");
+        let shown = rig.ask(&Request::SettingsGet);
+        assert_eq!(shown["settings"]["writing"]["numbers_as_digits"], false);
+        assert!(shown["settings"]["writing"].get("url").is_none());
+        assert_eq!(rig.fake.saves.store.load().unwrap(), rig.fake.config());
+
+        let set = rig.set(json!({"writing": {"numbers_as_digits": true}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        assert!(rig.fake.config().writing.is_none(), "on is the default");
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["writing"],
+            Value::Null
+        );
+
+        // Removing an endpoint that had a key keeps the explicit off without carrying the key.
+        let rig = Rig::new(
+            "numbers-key",
+            r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "secret-value"}}"#,
+        );
+        let set = rig.set(json!({
+            "writing": {"url": null, "model": null, "numbers_as_digits": false}
+        }));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        let writing = rig.fake.config().writing.unwrap();
+        assert!(!writing.numbers_as_digits());
+        assert!(!writing.has_endpoint());
+        assert_eq!(writing.key(), "", "the removed endpoint's key goes with it");
+        let shown = rig.ask(&Request::SettingsGet);
+        assert!(!shown.to_string().contains("secret-value"), "{shown}");
+        assert_eq!(shown["settings"]["writing"]["numbers_as_digits"], false);
+    }
+
+    #[test]
     fn writing_apps_are_checked_and_set_like_settings() {
         let rig = Rig::new(
             "writing-apps",

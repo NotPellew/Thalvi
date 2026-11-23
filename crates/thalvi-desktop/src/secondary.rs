@@ -172,6 +172,12 @@ pub struct Language(&'static str);
 pub struct LanguageError;
 
 impl Language {
+    /// The lower-case ISO 639-1 code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        self.0
+    }
+
     /// `text` as a language code, or none when it is blank.
     ///
     /// # Errors

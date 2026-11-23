@@ -151,6 +151,10 @@ areas your change touches. Editing rules are in
 - **Dictation cleanup is opt-in.** `writing.clean_dictation`, stored only when on and refused without an endpoint, cleans each paste or submit after any final pass or merge with one built-in prompt and pastes the whole reply; a submit is cleaned before its confirmation, so that confirmation shows the text that will be sent; a failure or no reply within 3 s pastes the raw words and says so, and a cancel pastes nothing. Tasks and explicit writes are never cleaned.
   Why: tidier dictation must never cost the user their words.
   Rejected: cleaning by default, a user-editable cleanup prompt, pasting a partial reply.
+- **Local rules format dictated numbers as digits.** `writing.numbers_as_digits` defaults to on for English and German paste, submit, and write. One deterministic formatter runs after the ending is stripped and the final transcript settles, before cleanup and submit confirmation.
+  Tasks, live partials, word-list tokens, and other languages pass through unchanged.
+  Why: recognizers vary in how they write numbers. Local rules produce consistent digits offline, including without a chat endpoint.
+  Rejected: relying on the cleanup prompt or encoding number style in the word list.
 - **Local chat is a pinned prebuilt child.** Settings installs llama.cpp b12255 and Qwen3 4B Q4_K_M (Apache-2.0); the runtime's own Vulkan device check chooses GPU or CPU, with a CPU override. Writing and merging lazily share one loopback child with a fresh key, deterministic sampling and thinking disabled in the template; loading is cancellable and measured separately. One crash gets one restart on the next use, and quitting stops it.
   Why: the 4B kept EN/DE/ES meaning in the fixed comparison and CPU generation stayed below 1.6 s on the desktop; the smaller candidates invented text or translated it. Windows laptop acceptance remains required.
   Rejected: user builds, containers, OS services, a reasoning-budget flag alone, and downloading into a remote server.

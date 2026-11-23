@@ -167,7 +167,11 @@ fn check_keys(
 /// Refuses removing the writing endpoint while an extra recognizer is on: the loader would refuse
 /// it too, but only as "needs a writing model", which does not say what to do first.
 fn check_endpoint_kept(settings: &mut Value, current: &DesktopConfig) -> Result<(), String> {
-    let removed = current.writing.is_some() && settings.get("writing").is_none_or(Value::is_null);
+    let removed = current.writing.as_ref().is_some_and(Writing::has_endpoint)
+        && settings
+            .get("writing")
+            .and_then(Value::as_object)
+            .is_none_or(|writing| !writing_has_endpoint(writing));
     let extra_on = entries_of(settings).any(|entry| {
         let flag = if entry.get("kind").and_then(Value::as_str) == Some("extra") {
             "active"
@@ -182,6 +186,21 @@ fn check_endpoint_kept(settings: &mut Value, current: &DesktopConfig) -> Result<
         );
     }
     Ok(())
+}
+
+/// Whether the form's writing settings name an endpoint to write with; numbers as digits can be
+/// kept without one.
+fn writing_has_endpoint(writing: &serde_json::Map<String, Value>) -> bool {
+    if writing.get("local") == Some(&Value::Bool(true)) {
+        return true;
+    }
+    let filled = |key: &str| {
+        writing
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    filled("url") && filled("model")
 }
 
 /// Puts an unchanged theme back as stored, and refuses a changed one this build cannot use.
@@ -361,6 +380,15 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
                     .to_owned(),
             ),
         );
+        writing.insert(
+            "numbers_as_digits".to_owned(),
+            Value::Bool(
+                config
+                    .writing
+                    .as_ref()
+                    .is_none_or(Writing::numbers_as_digits),
+            ),
+        );
     }
     if let Some(settings) = settings.as_object_mut() {
         settings.insert(
@@ -405,7 +433,8 @@ fn unmask_keys(settings: &mut Value, current: &DesktopConfig) {
     }
     if let Some(writing) = settings.get_mut("writing").and_then(Value::as_object_mut) {
         writing.remove("has_key");
-        if !writing.contains_key("api_key") {
+        // A key belongs to an endpoint; numbers as digits alone keeps none.
+        if writing_has_endpoint(writing) && !writing.contains_key("api_key") {
             let saved = current.writing.as_ref().map_or("", Writing::key);
             writing.insert("api_key".to_owned(), Value::String(saved.to_owned()));
         }
@@ -1055,6 +1084,17 @@ mod tests {
             assert_eq!(
                 removed,
                 "Switch off the extra recognizers before removing the writing model."
+            );
+            let kept_flag = with(
+                &base,
+                upload,
+                true,
+                Some(&json!({"numbers_as_digits": false})),
+            );
+            assert_eq!(
+                Store::check(kept_flag, &on).unwrap_err(),
+                "Switch off the extra recognizers before removing the writing model.",
+                "numbers as digits alone is still no writing endpoint"
             );
             // Switching them off and removing the model together is allowed.
             Store::check(with(&base, upload, false, None), &on).unwrap();

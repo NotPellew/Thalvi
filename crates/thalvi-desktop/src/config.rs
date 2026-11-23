@@ -271,7 +271,12 @@ fn build(
         .stt
         .entries(raw.server)
         .map_err(|error: EntryError| error.to_string())?;
-    if entries.any_extra() && raw.writing.is_none() {
+    if entries.any_extra()
+        && raw
+            .writing
+            .as_ref()
+            .is_none_or(|writing| !writing.has_endpoint())
+    {
         return Err(EntryError::ExtrasNeedWriting.to_string());
     }
     Ok(DesktopConfig {
@@ -297,7 +302,10 @@ fn build(
         show_in_menu: raw.show_in_menu,
         hold_key,
         write_key,
-        writing: raw.writing,
+        // Numbers as digits with no endpoint is the default, so it is not kept.
+        writing: raw
+            .writing
+            .filter(|writing| writing.has_endpoint() || !writing.numbers_as_digits()),
     })
 }
 
@@ -893,6 +901,17 @@ mod tests {
     fn the_writing_endpoint_is_absent_by_default_and_refused_when_it_cannot_be_used() {
         let writing = |json: &str| parse(json).map(|config| config.writing);
         assert_eq!(writing(r#"{"writing": null}"#).unwrap(), None);
+        assert_eq!(
+            writing(r#"{"writing": {"numbers_as_digits": true}}"#).unwrap(),
+            None,
+            "on with no endpoint is the default and is not kept"
+        );
+        assert_eq!(writing(r#"{"writing": {}}"#).unwrap(), None);
+        let off = writing(r#"{"writing": {"numbers_as_digits": false}}"#)
+            .unwrap()
+            .unwrap();
+        assert!(!off.numbers_as_digits());
+        assert!(!off.has_endpoint(), "the switch needs no endpoint");
         let endpoint = writing(r#"{"writing": {"url": "http://127.0.0.1:9/v1/", "model": " m "}}"#)
             .unwrap()
             .unwrap();
@@ -946,6 +965,26 @@ mod tests {
             (
                 r#"{"writing": {"clean_dictation": true}}"#,
                 "writing.clean_dictation needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"prompt": "Be brief."}}"#,
+                "writing.prompt needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"openings": [{"phrase": "a b", "prompt": "p"}]}}"#,
+                "writing.openings needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"apps": [{"app": "kitty", "prompt": "p"}]}}"#,
+                "writing.apps needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"chat_build": "cpu"}}"#,
+                "writing.chat_build needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"api_key": "k"}}"#,
+                "writing.api_key needs a writing endpoint",
             ),
         ] {
             let error = writing(json).unwrap_err().to_string();

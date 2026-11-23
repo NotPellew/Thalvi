@@ -36,11 +36,12 @@ use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
 use crate::hold::{Cutoff, HoldKind, KeyState, Press, Presses, Refusal};
 use crate::merge;
 use crate::metrics::{Dictation, Event, Metrics, RecordKinds, Recorder};
+use crate::numbers;
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
 use crate::report::UserError;
-use crate::secondary::{self, SecondaryApi, SecondaryError};
+use crate::secondary::{self, Language, SecondaryApi, SecondaryError};
 use crate::spotter::KeywordSpotter;
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
@@ -469,6 +470,14 @@ enum ListenState {
     Active,
 }
 
+/// How a delivered dictation's number words are written: the switch, the word list whose tokens
+/// stay, and the language the recognizer was told.
+struct NumberRules {
+    as_digits: bool,
+    words: Vec<String>,
+    language: Option<Language>,
+}
+
 /// Wake listening and capture, owning everything they share.
 pub struct Engine<R, W, C> {
     recognizer: R,
@@ -496,6 +505,8 @@ pub struct Engine<R, W, C> {
     /// Dropping the engine aborts them.
     recorded_only: Vec<JoinSet<Answer>>,
     writing: Option<Writing>,
+    /// How a delivered paste, submit or write writes its number words.
+    number_rules: NumberRules,
     chat: Option<crate::chat::Chat>,
     speech: SpeechSource,
     http: reqwest::Client,
@@ -816,7 +827,7 @@ impl Merging {
             .map(Extra::upload)
             .chain(streaming.map(Extra::streaming))
             .collect();
-        let writing = config.writing.clone()?;
+        let writing = config.writing.clone().filter(Writing::has_endpoint)?;
         (!extras.is_empty()).then_some(Self {
             writing,
             uploads,
@@ -1142,6 +1153,14 @@ where
             streams: Streams::default(),
             recorded_only: Vec::new(),
             writing: config.writing.clone(),
+            number_rules: NumberRules {
+                as_digits: config
+                    .writing
+                    .as_ref()
+                    .is_none_or(Writing::numbers_as_digits),
+                words: config.stt.phrases.phrases().to_vec(),
+                language: config.stt.entries.active_live().language(),
+            },
             chat: parts.chat,
             speech: config.speech_source(),
             http: parts.http,
@@ -2188,7 +2207,15 @@ where
                     self.queue_cue(live, Cue::Cancelled);
                 }
             }
-            Ok(FinalStep::Armed(pending)) => {
+            Ok(FinalStep::Armed(mut pending)) => {
+                // A submit's confirmation shows the text that will be sent. A final pass replaces
+                // the text, so its result is formatted when it settles instead.
+                if pending.route == CaptureRoute::Submit && self.final_pass.is_none() {
+                    pending.text = self.text_with_numbers(pending.route, &pending.text);
+                    if let Some(stored) = live.text.pending_mut() {
+                        stored.text.clone_from(&pending.text);
+                    }
+                }
                 if live.relayed {
                     live.relayed = false;
                     live.held.clear();
@@ -2569,6 +2596,12 @@ where
         outcome: CaptureOutcome,
         decided: Instant,
     ) -> CaptureOutcome {
+        let outcome = match outcome {
+            CaptureOutcome::Accepted(request) => {
+                CaptureOutcome::Accepted(self.delivered_with_numbers(&request))
+            }
+            other => other,
+        };
         match outcome {
             CaptureOutcome::Accepted(request)
                 if self.final_pass.is_some() && request.route == CaptureRoute::Submit =>
@@ -3085,6 +3118,31 @@ where
         self.queue_cue(live, Cue::Provisional);
     }
 
+    /// The text about to be delivered, with its number words as digits. A task is never
+    /// formatted. Counts how many numbers changed, never the text.
+    fn delivered_with_numbers(&self, request: &CaptureRequest) -> CaptureRequest {
+        CaptureRequest {
+            route: request.route,
+            text: self.text_with_numbers(request.route, &request.text),
+        }
+    }
+
+    fn text_with_numbers(&self, route: CaptureRoute, text: &str) -> String {
+        if !self.number_rules.as_digits || route == CaptureRoute::Task {
+            return text.to_owned();
+        }
+        let formatted = numbers::format(text, self.number_rules.language, &self.number_rules.words);
+        if formatted.rewritten > 0 {
+            self.recorder.metric(
+                Event::Numbers,
+                "ok",
+                None,
+                json!({"count": formatted.rewritten}),
+            );
+        }
+        formatted.text
+    }
+
     /// Sends the text that would be delivered through the writing endpoint with the built-in
     /// cleanup prompt. The whole wait, including the endpoint becoming ready, is bounded by
     /// [`writing::CLEANUP_LIMIT`] from `decided` (the dictation final). A complete reply inside
@@ -3311,6 +3369,9 @@ where
     ) -> Result<std::borrow::Cow<'a, Endpoint>, Option<WritingError>> {
         if let Destination::Manual(endpoint) = writing.destination() {
             return Ok(std::borrow::Cow::Borrowed(endpoint));
+        }
+        if matches!(writing.destination(), Destination::None) {
+            return Err(Some(WritingError::NotSetUp));
         }
         let Some(chat) = self.chat.as_mut() else {
             return Err(Some(WritingError::NotInstalled));

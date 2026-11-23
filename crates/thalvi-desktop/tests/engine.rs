@@ -6291,6 +6291,211 @@ async fn dictate(rig: &mut Rig, route: CaptureRoute) -> u64 {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_paste_gets_number_words_as_digits_by_default_and_off_delivers_the_same_bytes_as_before()
+{
+    LocalSet::new()
+        .run_until(async {
+            // (name, config, route, the ending, the words, what is delivered)
+            let cases = [
+                (
+                    "on by default",
+                    "{}".to_owned(),
+                    CaptureRoute::Paste,
+                    "paste that",
+                    "I have fifteen open issues",
+                    "I have 15 open issues",
+                ),
+                (
+                    "off",
+                    r#"{"writing": {"numbers_as_digits": false}}"#.to_owned(),
+                    CaptureRoute::Paste,
+                    "paste that",
+                    "I have fifteen open issues",
+                    "I have fifteen open issues",
+                ),
+                (
+                    "a task is not formatted",
+                    "{}".to_owned(),
+                    CaptureRoute::Task,
+                    "do that",
+                    "open tab three",
+                    "open tab three",
+                ),
+            ];
+            for (name, config, route, ending, said, delivered) in cases {
+                let (mut rig, engine, frames) = Rig::new(&config);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(&format!("{said} {ending}")).await;
+                rig.feed_until(3499, Kind::Quiet).await;
+                rig.at(3600).await;
+                assert_eq!(finished(task).await, accepted(route, delivered), "{name}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_sends_the_formatted_text_to_the_writing_model() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut asked, _feed) = chat(Chat::Stream(says!("I have 15 open issues."))).await;
+            let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+            let task = Ask::Ending.start(engine, frames);
+            Ask::Ending
+                .say(&mut rig, "I have fifteen open issues")
+                .await;
+            let asked = request(&mut asked).await;
+            assert_eq!(
+                asked.body["messages"][1],
+                json!({"role": "user", "content": "I have 15 open issues"})
+            );
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "I have 15 open issues.")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_submit_confirms_the_formatted_text_that_is_then_accepted() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("I have fifteen open issues submit").await;
+            rig.state_is(EngineState::PendingEnding {
+                route: CaptureRoute::Submit,
+                text: "I have 15 open issues".to_owned(),
+                waiting_for_quiet: false,
+            })
+            .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Submit, "I have 15 open issues")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cleanup_gets_the_formatted_text_and_the_paste_counts_the_rewrites_without_recording_them()
+{
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("numbers-cleanup");
+            let (url, mut asked, _feed) =
+                chat(Chat::After(500, says!("I have 15 open issues."))).await;
+            let (mut rig, engine, frames) =
+                Rig::recording(&cleaning(&url), Recorder::in_dir(ALL, &dir).unwrap());
+            let task = capture_in(engine, frames, WakeTrigger::Capture, None);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("I have fifteen open issues paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            let body = request(&mut asked).await.body;
+            assert_eq!(body["messages"][0]["content"], CLEANUP_PROMPT);
+            assert_eq!(body["messages"][1]["content"], "I have 15 open issues");
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "I have 15 open issues.")
+            );
+            let metrics = read_lines(&dir.join("metrics.jsonl"));
+            let numbers = metrics
+                .iter()
+                .find(|line| line["event"] == "desktop_numbers")
+                .expect("a numbers metric");
+            assert_eq!(numbers["outcome"], "ok");
+            assert_eq!(numbers["count"], 1);
+            assert!(
+                !numbers.to_string().contains("I have"),
+                "no dictated text in the metrics: {numbers}"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_pass_text_is_formatted_before_cleanup_and_the_submit_confirms_it() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("numbers-final-pass");
+            let (url, mut final_requests) = serve(Reply::Json(
+                r#"{"text":"I have fifteen open issues submit"}"#,
+            ))
+            .await;
+            let (writing, mut chat_requests, _) =
+                chat(Chat::Stream(says!("I have 15 open issues."))).await;
+            let mut config = with_final_pass(&url, &[]);
+            config["writing"] = json!({"url": writing, "model": "chat", "clean_dictation": true});
+            let (mut rig, engine, frames) = Rig::recording(
+                &config.to_string(),
+                Recorder::in_dir(METRICS_ONLY, &dir).unwrap(),
+            );
+            let (worker, mut captures) =
+                final_captures(&rig, engine, frames, &[WakeTrigger::Capture]);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words submit").await;
+            rig.feed_until(3500, Kind::Quiet).await;
+            final_requests.recv().await.unwrap();
+            let cleanup = request(&mut chat_requests).await;
+            assert_eq!(
+                cleanup.body["messages"][1]["content"],
+                "I have 15 open issues"
+            );
+            rig.final_preview("I have 15 open issues.", ms(2500))
+                .await
+                .shown();
+            assert_eq!(
+                captures.recv().await.unwrap().outcome,
+                accepted(CaptureRoute::Submit, "I have 15 open issues.")
+            );
+            finished(worker).await;
+            let metric = read_lines(&dir.join("metrics.jsonl"))
+                .into_iter()
+                .find(|line| line["event"] == "desktop_numbers")
+                .expect("a numbers metric");
+            assert_eq!(metric["count"], 1);
+            std::fs::remove_dir_all(&dir).unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_entries_language_hint_formats_a_german_dictation() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{
+                "stt": {"entries": [{"kind": "open_ai", "id": "de", "name": "German",
+                    "active": true, "address": "http://127.0.0.1:9/v1", "model": "m",
+                    "language": "de"}]}
+            }"#;
+            let (mut rig, engine, frames) = Rig::new(config);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Ich habe fünfzehn offene Tickets paste that")
+                .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,
     reason = "one table of the cleanup's replies, fallbacks and a cancel"
