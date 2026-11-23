@@ -131,10 +131,10 @@ The experimental Whisper entry (#481) adds no writer:
 store, `app.rs` passes the packaged helper folder into `AppState::start`, and `agent.rs` names the model in
 `recognizer`. None writes `desktop.json` or `AppState::config` or takes the save lock.
 
-`AppState::apply` in `app.rs` also sends the overlay the recordings choice, on the channel it uses
-for the look, and `start_overlay` keeps the recorder that choice switches. Neither writes
-`desktop.json` or `AppState::config` or takes the save lock, so the model and its three invariants
-are unchanged.
+`AppState::apply` in `app.rs` also sends the overlay the recordings choice and the Show the
+overlay setting (#619), on the channel it uses for the look, and `start_overlay` keeps the recorder
+that choice switches and sends the setting at start. None of it writes `desktop.json` or
+`AppState::config` or takes the save lock, so the model and its three invariants are unchanged.
 
 Hold-key recovery (#566) changes only `held` in `app.rs`: a desktop that refuses the keys at start
 keeps a watch that binds them at a later config reload, and a refused key change in Settings still
