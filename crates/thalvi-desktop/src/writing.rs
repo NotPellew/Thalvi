@@ -134,14 +134,6 @@ fn on() -> bool {
     true
 }
 
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde's skip predicate takes a reference"
-)]
-fn is_true(value: &bool) -> bool {
-    *value
-}
-
 fn is_blank(value: &&str) -> bool {
     value.is_empty()
 }
@@ -230,8 +222,8 @@ impl Serialize for Writing {
             apps: &'a [AppStyle],
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             clean_dictation: bool,
-            #[serde(skip_serializing_if = "is_true")]
-            numbers_as_digits: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            numbers_as_digits: Option<bool>,
         }
         let (endpoint, local) = match &self.destination {
             Destination::Manual(endpoint) => (Some(endpoint), false),
@@ -248,7 +240,7 @@ impl Serialize for Writing {
             openings: &self.openings,
             apps: &self.apps,
             clean_dictation: self.clean_dictation,
-            numbers_as_digits: self.numbers_as_digits,
+            numbers_as_digits: (!self.numbers_as_digits).then_some(false),
         }
         .serialize(serializer)
     }
