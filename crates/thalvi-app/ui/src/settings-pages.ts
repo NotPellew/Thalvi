@@ -321,6 +321,8 @@ function wakeHeads(context: PageContext): HTMLElement[] {
     function startDownload(wanted: string): void {
       state.sayProblem("");
       downloading.add(wanted);
+      // Hiding a focused Download would drop focus to the page.
+      if (document.activeElement === download) picker.focus();
       state.render();
       backend.downloadWakeModel(wanted).then(
         () => {
@@ -332,7 +334,9 @@ function wakeHeads(context: PageContext): HTMLElement[] {
         (error: unknown) => {
           downloading.delete(wanted);
           state.sayProblem(errorText(error));
+          const onRow = field.node.contains(document.activeElement);
           state.render();
+          if (onRow) download.focus();
         },
       );
     }
