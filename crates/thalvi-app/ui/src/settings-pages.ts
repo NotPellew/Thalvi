@@ -3059,7 +3059,7 @@ function grouped(nodes: HTMLElement[]): HTMLElement[] {
 export function buildPages(context: PageContext): Page[] {
   const rows = speech(context);
   return PAGES.map(([id, title, build]) => {
-    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}` }, el("h3", { id: `page-${id}` }, title), ...grouped(build(context, rows)));
+    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}`, tabindex: "-1" }, el("h3", { id: `page-${id}` }, title), ...grouped(build(context, rows)));
     return { id, title, node };
   });
 }
