@@ -31,7 +31,7 @@ use crate::client;
 use crate::commands;
 use crate::launch::{Launch, relaunch_shows_settings};
 use crate::menu_entry::{self, MenuEntry};
-use crate::overlay::{FailureSink, Overlay, Visibility};
+use crate::overlay::{FailureSink, Overlay};
 use crate::runner::{AudioStatus, Control, EngineLink, Restart};
 use serde_json::Value;
 
@@ -379,6 +379,7 @@ impl AppState {
     fn apply(&self, config: &DesktopConfig) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
+        self.overlay.set_enabled(config.overlay.show);
         self.overlay.show_draft(config.overlay.draft);
         self.overlay.set_style(overlay_style(config));
         self.overlay.set_recordings(config.recordings);
@@ -837,6 +838,7 @@ fn start_overlay(app: &AppHandle, state: &AppState) {
         }
     }));
     let config = state.config();
+    state.overlay.set_enabled(config.overlay.show);
     state.overlay.show_draft(config.overlay.draft);
     state.overlay.set_style(overlay_style(&config));
     // Kept for the thread's life: a later apply reaches it through set_recordings.
@@ -987,8 +989,7 @@ fn show(app: &AppHandle, status: &Status) {
         tray.show(status);
     }
     let _ = app.emit("thalvi://status", status);
-    let enabled = state.overlay_shown.load(Ordering::SeqCst);
-    state.overlay.show(status, Visibility::of(status, enabled));
+    state.overlay.show(status);
 }
 
 /// Opens the settings window; only an explicit user action calls this. A window not yet wearing
