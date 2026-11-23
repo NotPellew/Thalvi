@@ -2153,7 +2153,7 @@ function speech(context: PageContext): SpeechRows {
       ...manualRows,
       row(
         "Write numbers as digits",
-        "“fifteen” becomes “15”. Phrases like “the other one” keep their words.",
+        "“fifteen” becomes “15”.",
         numbers,
       ),
       row(
