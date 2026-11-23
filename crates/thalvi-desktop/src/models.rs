@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,19 @@ const SLOWEST_BYTES_PER_SECOND: u64 = 500_000;
 
 /// Makes each download's temporary file name unique, so concurrent fetches do not share one.
 static DOWNLOADS: AtomicU64 = AtomicU64::new(0);
+
+/// One download per stored path: the app's listener and its Settings window can ask for a file at once.
+static FETCHING: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn fetching(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let mut files = FETCHING.lock().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(
+        files
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+    )
+}
 
 /// What a model file is for; error messages name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -813,6 +826,8 @@ impl ModelStore {
         received: impl FnMut(u64),
     ) -> Result<PathBuf, ModelError> {
         let path = self.dir.join(asset.file_name);
+        let lock = fetching(&path);
+        let _fetching = lock.lock().await;
         let damaged = match stored(&path, asset).await {
             Stored::Intact => return Ok(path),
             Stored::Missing => false,
@@ -1202,7 +1217,10 @@ mod tests {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("bind a test server");
-        let url = format!("http://{}/wake.onnx", listener.local_addr().expect("its address"));
+        let url = format!(
+            "http://{}/wake.onnx",
+            listener.local_addr().expect("its address")
+        );
         let connections = Arc::new(AtomicUsize::new(0));
         let requested = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());

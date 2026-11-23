@@ -318,8 +318,7 @@ function wakeHeads(context: PageContext): HTMLElement[] {
       },
     };
     if (state.custom) state.customPath = model();
-    const download = button("Download", () => {
-      const wanted = model();
+    function startDownload(wanted: string): void {
       downloading.add(wanted);
       state.render();
       backend.downloadWakeModel(wanted).then(
@@ -335,6 +334,9 @@ function wakeHeads(context: PageContext): HTMLElement[] {
           state.render();
         },
       );
+    }
+    const download = button("Download", () => {
+      startDownload(model());
     });
 
     /** Applies a model, and the threshold it starts at when it has one; says why not, and keeps the model in use. */
@@ -418,13 +420,15 @@ function wakeHeads(context: PageContext): HTMLElement[] {
         else useFile(state.customPath, wasCustom);
       } else {
         state.custom = false;
-        const start = infos.get(picker.value)?.threshold;
+        const wanted = picker.value;
+        if (infos.get(wanted)?.cached === false && !downloading.has(wanted)) startDownload(wanted);
+        const start = infos.get(wanted)?.threshold;
         if (start !== undefined) {
           const slider = threshold.field as HTMLInputElement;
           slider.value = String(start);
           slider.dispatchEvent(new Event("input"));
         }
-        use(picker.value, start, wasCustom).then((used) => {
+        use(wanted, start, wasCustom).then((used) => {
           if (!used) {
             const slider = threshold.field as HTMLInputElement;
             slider.value = String(settings.wake.capture.threshold);
