@@ -10,8 +10,6 @@ examine_globs = [
 ]
 
 exclude_re = [
-    # Quitting waits on the real engine thread, which only the app starts; its quit flow is the formal check's.
-    "^crates/thalvi-app/src/runner.rs:\\d+:\\d+: replace EngineLink::quit with \\(\\)$",
     # Nothing reads a restart request's debug text.
     "^crates/thalvi-app/src/runner.rs:\\d+:\\d+: replace <impl std::fmt::Debug for Restart>::fmt ",
     # Each caller has input frames, which pause clears, and step returns before any caller when stopping.
