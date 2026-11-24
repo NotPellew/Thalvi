@@ -193,6 +193,9 @@ between `EngineLink` and `Runner`, tracks rebuild sequence numbers in `Runner::a
 `Runner::capture`, `Settling::settle`, and `Runner::apply_engine` keep the same cancellation
 writes, await boundaries, and delivery admission fence, so the model actions are unchanged.
 
+Publishing a queued rebuild to the UI and `state` (#677) makes `Publisher::mutate` also update a
+separate `rebuilding` watch. No mapped function changed, so the model actions are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
