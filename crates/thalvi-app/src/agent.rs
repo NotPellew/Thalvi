@@ -561,13 +561,24 @@ fn no_effect(running: &impl Running, why: &str) -> String {
     )
 }
 
-async fn pause(running: &impl Running, wait: Duration) -> String {
+/// Waits until both the audio flag and the status say whether listening is paused, so a reply
+/// never reports a state that lags the change it confirms.
+async fn paused_is(running: &impl Running, wait: Duration, paused: bool) -> bool {
     let mut audio = running.audio();
-    if audio.borrow().paused {
+    let mut status = running.status();
+    reached(&mut audio, wait, |audio| audio.paused == paused).await
+        && reached(&mut status, wait, |status| {
+            matches!(status, Status::Paused) == paused
+        })
+        .await
+}
+
+async fn pause(running: &impl Running, wait: Duration) -> String {
+    if running.audio().borrow().paused {
         return no_effect(running, "Thalvi is already paused.");
     }
     running.control(Control::SetListening(false));
-    if reached(&mut audio, wait, |audio| audio.paused).await {
+    if paused_is(running, wait, true).await {
         took_effect(running)
     } else {
         no_effect(running, "Thalvi did not pause.")
@@ -575,12 +586,11 @@ async fn pause(running: &impl Running, wait: Duration) -> String {
 }
 
 async fn resume(running: &impl Running, wait: Duration) -> String {
-    let mut audio = running.audio();
-    if !audio.borrow().paused {
+    if !running.audio().borrow().paused {
         return no_effect(running, "Thalvi is already listening.");
     }
     running.control(Control::SetListening(true));
-    if reached(&mut audio, wait, |audio| !audio.paused).await {
+    if paused_is(running, wait, false).await {
         took_effect(running)
     } else {
         no_effect(running, "Thalvi did not resume.")
@@ -588,10 +598,9 @@ async fn resume(running: &impl Running, wait: Duration) -> String {
 }
 
 async fn toggle(running: &impl Running, wait: Duration) -> String {
-    let mut audio = running.audio();
-    let was = audio.borrow().paused;
+    let was = running.audio().borrow().paused;
     running.control(Control::ToggleListening);
-    if reached(&mut audio, wait, |audio| audio.paused != was).await {
+    if paused_is(running, wait, !was).await {
         took_effect(running)
     } else {
         no_effect(
@@ -1861,6 +1870,34 @@ mod tests {
             json!({"ok": true, "took_effect": true})
         );
         assert_eq!(rig.fake.shown.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_reports_the_state_listening_has_once_the_status_has_left_paused() {
+        let fake = Fake::new("resume-lag", "{}");
+        fake.pause_audio(true);
+        fake.ignoring.store(true, Ordering::SeqCst);
+        let reply = tokio::spawn({
+            let fake = Arc::clone(&fake);
+            async move { answer(&fake, Duration::from_secs(5), &Request::Resume.line()).await }
+        });
+
+        while !fake.sent().contains(&format!("{:?}", Control::SetListening(true))) {
+            tokio::task::yield_now().await;
+        }
+        // The microphone reopens before the status is published.
+        fake.audio.send_modify(|audio| audio.paused = false);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!reply.is_finished(), "the reply waits for the status");
+        fake.set_status(Status::Listening);
+
+        let reply: Value = serde_json::from_str(&reply.await.unwrap()).unwrap();
+        assert_eq!(
+            reply,
+            json!({"ok": true, "took_effect": true, "state": "listening"})
+        );
     }
 
     #[test]
