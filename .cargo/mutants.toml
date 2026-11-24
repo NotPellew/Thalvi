@@ -18,4 +18,10 @@ exclude_re = [
     "^crates/thalvi-app/src/runner.rs:\\d+:\\d+: replace \\|\\| with && in Runner<S>::end_unopened_feed$",
     # The native output adapter's drop hook calls CueEngine::stop, which is tested with a fake speaker.
     "^crates/thalvi-desktop/src/engine.rs:\\d+:\\d+: replace <impl Drop for StopOnDrop>::drop with \\(\\)$",
+    # Equivalent: keeping frames no consumer reads changes memory use, not what a capture delivers or records.
+    "^crates/thalvi-desktop/src/engine.rs:\\d+:\\d+: replace Engine<R, W, C>::keeps_sent -> bool with true$",
+    # Equivalent: frame and release orders come from one process-wide counter, so they are equal only after it wraps.
+    "^crates/thalvi-desktop/src/hold.rs:\\d+:\\d+: replace < with <= in Cutoff::precedes$",
+    # Equivalent: the down branch returns right after the write, and every later key event reconciles the bits before reading them.
+    "^crates/thalvi-desktop/src/hold.rs:\\d+:\\d+: replace \\|= with &= in HoldHook::on_modifier$",
 ]
