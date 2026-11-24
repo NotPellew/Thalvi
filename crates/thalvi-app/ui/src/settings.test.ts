@@ -2413,6 +2413,14 @@ describe("the speech model catalog", () => {
     expect(meter().hidden).toBe(true);
     expect(text("[role=status]")).toBe("");
     expect(download().hidden).toBe(true);
+
+    // Closing the editor without saving and reopening it still shows the downloaded model as Downloaded.
+    button("Cancel").click();
+    await settle();
+    await editLocal();
+    await settle();
+    expect(text(".badge")).toBe("Downloaded");
+    expect(download().hidden).toBe(true);
   });
 
   it.each([
@@ -4456,5 +4464,23 @@ describe("local chat model", () => {
     button("Yes, delete model").click();
     await settle();
     expect(stub.backend.removeChatModel).toHaveBeenCalledOnce();
+  });
+
+  it("clears the checking status when a chat model download fails and leaves retry enabled", async () => {
+    const stub = await open({ ...SETTINGS, writing: { local: true } });
+    goTo("chat");
+    stub.backend.downloadChatModel.mockImplementation(() => {
+      const progress = stub.backend.onChatModelProgress.mock.calls[0]?.[0];
+      progress?.({ name: "chat", percent: 0, status: "verifying", message: null, causes: [] });
+      expect(rowOf("Local chat model").querySelector("output")?.textContent).toBe("Checking the installation and download checksums…");
+      return Promise.reject(new Error("Could not download the chat runtime: could not connect to github.com."));
+    });
+    button("Download chat model").click();
+    await settle();
+    const row = rowOf("Local chat model");
+    expect(row.querySelector('[role="alert"]')?.textContent).toContain("Could not download the chat runtime");
+    expect((row.querySelector("progress") as HTMLProgressElement).hidden).toBe(true);
+    expect(button("Download chat model").disabled).toBe(false);
+    expect(row.querySelector("output")?.textContent).toBe("");
   });
 });
