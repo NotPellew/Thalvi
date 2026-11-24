@@ -1070,17 +1070,18 @@ mod tests {
                 removed,
                 "Switch off the extra recognizers before removing the writing model."
             );
-            let kept_flag = with(
-                &base,
-                upload,
-                true,
-                Some(&json!({"numbers_as_digits": false})),
-            );
-            assert_eq!(
-                Store::check(kept_flag, &on).unwrap_err(),
-                "Switch off the extra recognizers before removing the writing model.",
-                "numbers as digits alone is still no writing endpoint"
-            );
+            for incomplete in [
+                json!({"numbers_as_digits": false}),
+                json!({"url": "http://127.0.0.1:8000/v1", "model": " "}),
+                json!({"model": "m"}),
+            ] {
+                let incomplete_form = with(&base, upload, true, Some(&incomplete));
+                assert_eq!(
+                    Store::check(incomplete_form, &on).unwrap_err(),
+                    "Switch off the extra recognizers before removing the writing model.",
+                    "{incomplete} does not name a complete writing endpoint"
+                );
+            }
             // Switching them off and removing the model together is allowed.
             Store::check(with(&base, upload, false, None), &on).unwrap();
         }
@@ -1360,6 +1361,18 @@ mod tests {
             .remove("writing_default_prompt");
         config = DesktopConfig::from_json_str(&form.to_string()).unwrap();
         assert!(judged(&config, &json!({"look": "neon"})).is_ok());
+
+        let (_, dir) = store("judge-wake");
+        let missing = dir.join("missing.onnx");
+        let defaults = store_defaults();
+        let patch = json!({"wake": {"capture": {"model": missing}}});
+        let refused = judged(&defaults, &patch).unwrap_err();
+        assert!(
+            refused.contains("could not be loaded") && refused.contains("missing.onnx"),
+            "{refused}"
+        );
+        let saved = load(&patch).unwrap();
+        assert!(judged(&saved, &json!({"look": "neon"})).is_ok());
 
         let mut saved_conversation = settings_json(&store_defaults()).unwrap();
         saved_conversation["wake"]["conversation"]["model"] = json!("hey_jarvis");
