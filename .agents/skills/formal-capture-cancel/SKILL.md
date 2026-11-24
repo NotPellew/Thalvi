@@ -50,6 +50,9 @@ The download-size notice (#485) changes only `runner.rs`'s tests module, for
 `Step`'s new `Download` payload. No mapped function
 changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the model actions are unchanged.
 
+The scripted-feed wait fix (#612) changes only `pump_until` in `runner.rs`'s tests module. No mapped
+function changed, so the model actions are unchanged.
+
 Retrying a wake model after its download (#616) changes only `runner.rs`'s tests module, for a rig whose
 wake head loads once cached. No mapped function changed, so the model actions are unchanged.
 

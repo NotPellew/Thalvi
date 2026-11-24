@@ -22,9 +22,39 @@ use thalvi_desktop::theme::{Style, defaults_of};
 
 use crate::status::{Failure, FailureKind, LastError, Status};
 use painter::Painter;
-pub use view::View;
+pub use view::{Sample, View};
 
-/// Draws a synthetic view with the live overlay renderer, without opening a desktop surface.
+/// Draws preview frames with one painter, restyling it when the look or palette changes.
+#[derive(Default)]
+pub struct Renderer {
+    painter: Option<Painter>,
+    scale: f32,
+}
+
+impl Renderer {
+    /// Draws `view` in `style` at `scale`, rebuilding the painter only when the scale changes.
+    /// Returns the pixel dimensions and straight-alpha RGBA bytes, or `None` if no skin was built.
+    pub fn draw(
+        &mut self,
+        view: &View,
+        style: Arc<Style>,
+        dark: bool,
+        scale: f32,
+    ) -> Option<(u32, u32, Vec<u8>)> {
+        if self.painter.is_none() || self.scale.to_bits() != scale.to_bits() {
+            self.painter = Some(Painter::new(scale, style, dark)?);
+            self.scale = scale;
+        } else {
+            let painter = self.painter.as_mut()?;
+            if !painter.restyle(&style, dark) {
+                return None;
+            }
+        }
+        Some(self.painter.as_mut()?.rgba(view))
+    }
+}
+
+/// Draws a synthetic view with a fresh live-overlay renderer, without opening a desktop surface.
 /// Returns the pixel dimensions and straight-alpha RGBA bytes, or `None` if allocation fails.
 #[must_use]
 pub fn render_rgba(
@@ -33,8 +63,7 @@ pub fn render_rgba(
     dark: bool,
     scale: f32,
 ) -> Option<(u32, u32, Vec<u8>)> {
-    let mut painter = Painter::new(scale, style, dark)?;
-    Some(painter.rgba(view))
+    Renderer::default().draw(view, style, dark, scale)
 }
 
 /// How long a delivery's confirmation stays on screen.
@@ -1238,5 +1267,78 @@ mod tests {
         let lines = shown_lines(&mut overlay, root.path()).await;
         assert_eq!(lines.len(), 1, "turning metrics on writes the next show");
         assert_eq!(lines[0]["event"], "desktop_overlay_shown");
+    }
+
+    #[test]
+    fn each_preview_state_draws_its_own_frame_at_both_scales() {
+        let style = Arc::new(defaults_of(Look::Holo));
+        let states = [
+            Sample::Live,
+            Sample::Quiet,
+            Sample::Working,
+            Sample::Pending,
+            Sample::Done,
+            Sample::Failed,
+        ];
+        let mut frames = Vec::new();
+        for state in states {
+            let (width, height, rgba) =
+                render_rgba(&View::sample(state), Arc::clone(&style), true, 1.0)
+                    .expect("a preview frame");
+            assert_eq!(
+                (width, height, rgba.len()),
+                (460, 200, 460 * 200 * 4),
+                "{state:?}"
+            );
+            frames.push(rgba);
+        }
+        for (i, first) in frames.iter().enumerate() {
+            for (j, second) in frames.iter().enumerate() {
+                assert!(
+                    i == j || first != second,
+                    "states {i} and {j} draw the same frame"
+                );
+            }
+        }
+        let (width, height, rgba) = render_rgba(&View::sample(Sample::Live), style, true, 2.0)
+            .expect("a scaled preview frame");
+        assert_eq!((width, height, rgba.len()), (920, 400, 920 * 400 * 4));
+    }
+
+    #[test]
+    fn one_renderer_reuses_its_painter_without_ever_showing_a_stale_look() {
+        use thalvi_desktop::theme::{LookOverrides, Themes};
+
+        let view = View::sample(Sample::Live);
+        let themes = Themes::load(&serde_json::json!({
+            "version": 1,
+            "holo": {"colors": {"dark": {"accent": "#ff0000"}}},
+        }));
+        let changed = themes.of(Look::Holo);
+        assert!(matches!(changed, Some(LookOverrides::Usable(_))));
+        let accent = Arc::new(Style::resolve(Look::Holo, changed));
+        let neon = Arc::new(defaults_of(Look::Neon));
+        let cases = [
+            (Arc::new(defaults_of(Look::Holo)), 1.0),
+            (accent, 1.0),
+            (Arc::clone(&neon), 1.0),
+            (neon, 2.0),
+        ];
+        let mut renderer = Renderer::default();
+        let mut previous = None;
+        for (style, scale) in cases {
+            let fresh = render_rgba(&view, Arc::clone(&style), true, scale).expect("a fresh frame");
+            let reused = renderer
+                .draw(&view, Arc::clone(&style), true, scale)
+                .expect("a reused frame");
+            assert_eq!(reused, fresh, "a stale look at scale {scale}");
+            if (scale - 2.0).abs() < f32::EPSILON {
+                assert_eq!((reused.0, reused.1), (920, 400));
+            }
+            if let Some(previous) = previous {
+                assert_ne!(fresh, previous, "the cases must look different");
+            }
+            previous = Some(fresh);
+        }
     }
 }

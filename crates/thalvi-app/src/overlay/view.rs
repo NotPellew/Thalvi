@@ -45,6 +45,36 @@ pub(super) enum Tone {
     Failed,
 }
 
+/// The six states Settings can preview, named exactly as the command takes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sample {
+    Live,
+    Quiet,
+    Working,
+    Pending,
+    Done,
+    Failed,
+}
+
+impl std::str::FromStr for Sample {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "live" => Ok(Self::Live),
+            "quiet" => Ok(Self::Quiet),
+            "working" => Ok(Self::Working),
+            "pending" => Ok(Self::Pending),
+            "done" => Ok(Self::Done),
+            "failed" => Ok(Self::Failed),
+            _ => Err(
+                "The overlay preview state must be live, quiet, working, pending, done or failed."
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
 /// What the one line of text shows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) enum Line {
@@ -187,6 +217,62 @@ impl View {
             sweep: false,
             clock: 0.0,
         }
+    }
+
+    /// A fixed view for one preview state, drawn without a recognizer.
+    #[must_use]
+    pub fn sample(state: Sample) -> Self {
+        let mut view = Self::new(false);
+        let status = match state {
+            Sample::Live => Status::Capturing {
+                target: None,
+                committed: "Hello from Thalvi".to_owned(),
+                partial: None,
+                notice: None,
+            },
+            Sample::Quiet => Status::Pending {
+                target: None,
+                route: CaptureRoute::Paste,
+                text: "Waiting for quiet".to_owned(),
+                waiting_for_quiet: true,
+                pause_ms: 2500,
+                copies: false,
+                final_confirmation: None,
+            },
+            Sample::Working => Status::Working {
+                target: None,
+                route: CaptureRoute::Paste,
+                cancellable: false,
+            },
+            Sample::Pending => Status::Pending {
+                target: None,
+                route: CaptureRoute::Paste,
+                text: "Hold on".to_owned(),
+                waiting_for_quiet: false,
+                pause_ms: 2500,
+                copies: false,
+                final_confirmation: None,
+            },
+            Sample::Done => Status::Done {
+                target: Some("kitty".to_owned()),
+                route: CaptureRoute::Paste,
+                notice: "Pasted.".to_owned(),
+            },
+            Sample::Failed => Status::Failed {
+                kind: FailureKind::Other,
+                notice: "The delivery failed.".to_owned(),
+                headline: "Couldn't send it",
+                causes: Vec::new(),
+            },
+        };
+        view.set_status(status, 1.0);
+        view.level = 0.5;
+        if let Some(wave) = &mut view.wave {
+            wave.smoothed = 0.5;
+            wave.phase = 1.0;
+            wave.history = [0.5; HISTORY];
+        }
+        view
     }
 
     pub fn set_draft(&mut self, show: bool) {

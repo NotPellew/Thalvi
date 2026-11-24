@@ -54,6 +54,12 @@ export interface AudioStatus {
   problem: string | null;
 }
 
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+/** A JSON object, as the desktop keeps one look's changes. */
+export interface JsonObject { [key: string]: JsonValue }
+/** The saved custom styling: per-look changes, or why a look is suspended or unreadable. */
+export type Themes = { version?: number } & Partial<Record<Look, JsonObject>>;
+
 export type Ending = "paste" | "write" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
@@ -76,11 +82,17 @@ export interface LookProperty {
   looks: Look[];
   surfaces: LookSurface[];
 }
-/** What Settings draws from: every property a look offers, and each look resolved to CSS custom properties. */
+/** A resolved property value: a colour or font string, a number, or a switch. */
+export type LookValue = string | number | boolean;
+/** What Settings draws from: every property a look offers, each look's CSS properties and its resolved values. */
 export interface LookStyles {
   properties: LookProperty[];
   looks: Record<Look, Record<string, string>>;
+  values: Record<Look, Record<string, LookValue>>;
 }
+/** An overlay state the renderer can draw a preview for. */
+export type OverlayPreviewState = "live" | "quiet" | "working" | "pending" | "done" | "failed";
+export const OVERLAY_PREVIEW_STATES: readonly OverlayPreviewState[] = ["live", "quiet", "working", "pending", "done", "failed"];
 /** Which builds Thalvi keeps itself updated to. */
 export type UpdateChannel = "stable" | "development";
 
@@ -228,6 +240,8 @@ export interface Settings {
   overlay: { show: boolean; draft: boolean };
   microphone: string | null;
   look: Look;
+  /** Custom styling, present only when the desktop holds something. */
+  themes?: Themes;
   update_channel: UpdateChannel;
   recordings: { metrics: boolean; text: boolean; audio: boolean };
   /** The key held to dictate, such as `Alt+KeyZ`; only Windows reads it. */
@@ -350,6 +364,8 @@ export interface Backend {
   getSettings(): Promise<Settings>;
   /** The look model resolved into the CSS custom properties this window wears, and every property a look offers. */
   getLookStyles(): Promise<LookStyles>;
+  /** Straight-alpha RGBA of one overlay state: width and height as u32 LE, then width * height * 4 bytes. */
+  previewOverlay(state: OverlayPreviewState, scale: number): Promise<ArrayBuffer>;
   /** Says this window has its styles, so a show asked for meanwhile can happen. */
   settingsReady(): Promise<void>;
   /** Applies a merge patch of the settings that changed: it is merged into the config the desktop holds when it runs, so it can't undo a change saved since. Rejects with the plain reason it was refused. */

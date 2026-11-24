@@ -9,6 +9,7 @@ mod launch;
 mod look_styles;
 mod menu_entry;
 mod overlay;
+mod preview;
 mod runner;
 mod settings;
 mod startup;

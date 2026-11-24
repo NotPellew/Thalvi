@@ -167,6 +167,21 @@ code.line { display: block; padding: var(--code-pad-y) var(--code-pad-x); border
 #settings[data-look] main .chip > button { height: auto; padding: 0 var(--chip-right) 0 var(--chip-left); border: 0; background: none; box-shadow: none; font: var(--fs-13) var(--mono); text-transform: none; }
 #settings[data-look] main .chip > button:hover { color: var(--neon); background: none; }
 
+/* Custom styling: one row per descriptor, and an inert preview of the window and the overlay. */
+.cust { display: flex; flex-direction: column; gap: var(--inline-gap); }
+.cust-cat > h5 { margin: var(--h4-margin-top) 0 var(--h4-margin-bottom); color: var(--h4-color); font: var(--weight-label) var(--fs-11) var(--mono); letter-spacing: var(--track-section); }
+.cust-control, .swatch-field { display: inline-flex; align-items: center; gap: var(--inline-gap); }
+.swatch { flex: none; width: var(--check-w); height: var(--check-h); border: var(--hairline) solid var(--field-edge); border-radius: var(--radius-check); }
+.cust-actions { display: flex; flex-direction: column; align-items: flex-start; }
+.cust-banner p { margin: 0; }
+.cust-banner button { margin-left: var(--inline-gap); }
+.preview { display: flex; flex-direction: column; gap: var(--inline-gap); }
+.preview-sample { display: flex; align-items: center; flex-wrap: wrap; gap: var(--inline-gap); padding: var(--card-pad-y) var(--card-pad-x); border: var(--hairline) solid var(--card-edge); border-radius: var(--radius-card); background: var(--card-bg); }
+.preview-strip { display: flex; flex-wrap: wrap; gap: var(--inline-gap); }
+.preview-cell { display: flex; flex-direction: column; align-items: center; gap: var(--mini-gap); }
+.preview-cap { color: var(--mut); font: var(--fs-10) var(--mono); text-transform: uppercase; letter-spacing: var(--track-button); }
+.preview-canvas { max-width: 100%; height: auto; border: var(--hairline) solid var(--field-edge); image-rendering: pixelated; }
+
 @media (max-width: 560px) {
   .app { flex-direction: column; }
   main { min-height: 0; }

@@ -152,6 +152,8 @@ pub struct AppState {
     tray: OnceLock<Tray>,
     host: Arc<Desktop>,
     overlay_shown: AtomicBool,
+    /// The system theme the live overlay was last told to follow.
+    dark: AtomicBool,
     /// Why the login entry could not be put back on start, for the switch to show.
     login_problem: Mutex<Option<String>>,
     /// Why the app menu entry could not be rewritten on start, for the switch to show.
@@ -232,6 +234,7 @@ impl AppState {
             tray: OnceLock::new(),
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
             overlay_shown: AtomicBool::new(config.overlay.show),
+            dark: AtomicBool::new(true),
             login_problem: Mutex::new(None),
             menu_problem: Mutex::new(None),
             request_server: Mutex::new(None),
@@ -254,6 +257,12 @@ impl AppState {
     #[must_use]
     pub fn config(&self) -> DesktopConfig {
         self.saves.config()
+    }
+
+    /// Whether the system theme is dark, for a preview to use the live overlay's palette.
+    #[must_use]
+    pub(crate) fn is_dark(&self) -> bool {
+        self.dark.load(Ordering::SeqCst)
     }
 
     /// Builds a settings form from the config now in use, saves it and takes it into effect,
@@ -585,6 +594,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::get_audio,
             commands::get_settings,
             commands::get_look_styles,
+            commands::preview_overlay,
             commands::settings_ready,
             commands::save_settings,
             commands::set_listening,
@@ -885,9 +895,10 @@ fn create_windows(app: &AppHandle) -> tauri::Result<()> {
             .build()?;
     // The overlay follows the system's theme as the settings window sees it, as the web views did.
     if let Ok(theme) = settings.theme() {
-        app.state::<AppState>()
-            .overlay
-            .set_dark(theme == Theme::Dark);
+        let state = app.state::<AppState>();
+        let dark = theme == Theme::Dark;
+        state.dark.store(dark, Ordering::SeqCst);
+        state.overlay.set_dark(dark);
     }
     let (window, handle) = (settings.clone(), app.clone());
     settings.on_window_event(move |event| match event {
@@ -896,10 +907,10 @@ fn create_windows(app: &AppHandle) -> tauri::Result<()> {
             let _ = window.hide();
         }
         WindowEvent::ThemeChanged(theme) => {
-            handle
-                .state::<AppState>()
-                .overlay
-                .set_dark(*theme == Theme::Dark);
+            let state = handle.state::<AppState>();
+            let dark = *theme == Theme::Dark;
+            state.dark.store(dark, Ordering::SeqCst);
+            state.overlay.set_dark(dark);
         }
         _ => {}
     });

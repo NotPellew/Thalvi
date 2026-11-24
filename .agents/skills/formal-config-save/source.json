@@ -1,5 +1,5 @@
 {
-  "sync_commit": "e94d7e6477f13ea3fd0033ec79d7848a5969d1b9",
+  "sync_commit": "905c0804438628c6514af089e729d09b2a7f834e",
   "files": {
     "crates/thalvi-app/src/settings.rs": {
       "sha256": "bf91f4bfa97fb1e6f5c4680fca4f8935f085878aa61d09351cd37502080aa8f1",
@@ -22,16 +22,15 @@
       ]
     },
     "crates/thalvi-app/src/commands.rs": {
-      "sha256": "03db49f0e39381d7a1bf546111e7a39ee2432267af941b7a164ee619364eb888",
+      "sha256": "d0cdfb2a2737356c9e8ed7ee20be64f3f69f9a4ecf0d6ad0947a2e795bc2a499",
       "functions": [
         "save_settings",
         "save",
-        "settings_patch",
-        "download_wake"
+        "settings_patch"
       ]
     },
     "crates/thalvi-app/src/app.rs": {
-      "sha256": "0f28bdf923ee444f7c2f6f959dad66972ee7d3231dbfdc005918f866d5fa78db",
+      "sha256": "80578bcee2917f1134c635cbf30149dbb0c6b3d79ec0a5400504052ab683a452",
       "functions": [
         "setup",
         "AppState::config",
@@ -46,9 +45,7 @@
         "serve_requests",
         "Live::save",
         "Live::set_switch",
-        "SyncedConfig::set",
-        "SyncedConfig::wake_head_downloaded",
-        "AppState::wake_head_downloaded"
+        "SyncedConfig::set"
       ]
     },
     "crates/thalvi-app/src/agent.rs": {

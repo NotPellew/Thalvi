@@ -4229,17 +4229,16 @@ mod tests {
         panic!("{what}");
     }
 
+    /// Lets the paused clock run until `done`, failing after 6.4 s of it; the clock holds still
+    /// while a host call runs on the blocking pool, so a slow thread cannot use up the budget.
     async fn pump_until(what: &str, mut done: impl FnMut() -> bool) {
-        for _ in 0..80 {
-            if done() {
-                return;
+        tokio::time::timeout(Duration::from_millis(6_400), async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(80)).await;
             }
-            tokio::time::advance(Duration::from_millis(80)).await;
-            for _ in 0..16 {
-                tokio::task::yield_now().await;
-            }
-        }
-        panic!("{what}");
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
     }
 
     /// A rig whose wake model loads only once `cached` says its file is there, recording every

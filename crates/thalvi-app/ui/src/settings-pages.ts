@@ -15,6 +15,7 @@ import type {
   AppSettings,
   LiveEntry,
   Look,
+  LookStyles,
   OnDeviceEntry,
   OpenAiRequest,
   SecondaryApi,
@@ -32,6 +33,7 @@ import type {
   WritingSettings,
 } from "./contract.ts";
 import { DownloadFailure, errorText } from "./contract.ts";
+import { customize } from "./customize.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
 import { disclosureMemory, el, focusAfterRemoval, setChildren } from "./dom.ts";
@@ -68,6 +70,8 @@ export interface PageContext {
   menuEntry: SwitchRead;
   /** Shows a look on this window at once, before the desktop has saved it. */
   showLook: (look: Look) => void;
+  /** The resolved look model, refreshed when a look or its changes are saved. */
+  lookStyles: LookStyles | null;
   /** Shows the page with this id. */
   open: (id: string) => void;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
@@ -77,8 +81,12 @@ export interface PageContext {
     audio: (audio: AudioStatus) => void;
     speechModel: (progress: SpeechModelProgress) => void;
     status: (status: Status) => void;
-    /** The page with this id was opened. */
+    /** The page with this id was opened, or is shown again after a rebuild. */
     opened: (id: string) => void;
+    /** The look shown on this window changed. */
+    look: (look: Look) => void;
+    /** The resolved look model was read again. */
+    lookStyles: (styles: LookStyles) => void;
     /** The app's state changed, so what a page shows from disk may be out of date. */
     refresh: () => void;
     /** The update's state changed. */
@@ -2324,7 +2332,8 @@ function overlay({ settings, controls, apply }: PageContext): HTMLElement[] {
   ];
 }
 
-function look({ settings, controls, apply, showLook }: PageContext): HTMLElement[] {
+function look(context: PageContext): HTMLElement[] {
+  const { settings, controls, apply, showLook } = context;
   const applied = el("small", { class: "applied", role: "status" });
   const problem = note();
   const picker = lookPicker(settings.look, (next) => {
@@ -2348,6 +2357,7 @@ function look({ settings, controls, apply, showLook }: PageContext): HTMLElement
     group("Look"),
     row("Look", "How the overlay and this window look.",
       el("div", { class: "stack wide" }, picker, applied, problem)),
+    ...customize(context),
   ];
 }
 
@@ -2870,7 +2880,9 @@ function history(context: PageContext): HTMLElement[] {
       say(problem, errorText(error));
     });
   }
+  const before = live.opened;
   live.opened = (id) => {
+    before(id);
     if (id === "history") {
       refresh();
       last.refresh();
