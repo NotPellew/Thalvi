@@ -52,16 +52,16 @@ fn resolved(property: &Descriptor, scheme: &Scheme) -> Value {
         "colors.state.quiet" => scheme.quiet.to_hex().into(),
         "font.family" => scheme.font_family.clone().into(),
         "font.mono_family" => scheme.mono_family.clone().into(),
-        "font.scale" => number_value(scheme.font_scale, property.step),
+        "font.scale" => decimal(scheme.font_scale),
         "font.weight" => scheme.font_weight.into(),
-        "font.tracking" => number_value(scheme.tracking, property.step),
-        "spacing.scale" => number_value(scheme.spacing, property.step),
+        "font.tracking" => decimal(scheme.tracking),
+        "spacing.scale" => decimal(scheme.spacing),
         "shape.radius" => scheme.radius.into(),
         "shape.chamfer" => scheme.chamfer.into(),
         "border.width" => scheme.border_width.into(),
-        "surface.opacity" => number_value(scheme.opacity, property.step),
-        "glow.strength" => number_value(scheme.glow, property.step),
-        "decoration.mesh" => number_value(scheme.mesh, property.step),
+        "surface.opacity" => decimal(scheme.opacity),
+        "glow.strength" => decimal(scheme.glow),
+        "decoration.mesh" => decimal(scheme.mesh),
         "decoration.scanlines" => scheme.scanlines.into(),
         "decoration.corners" => scheme.corners.into(),
         "motion.shine" => scheme.shine.into(),
@@ -70,16 +70,13 @@ fn resolved(property: &Descriptor, scheme: &Scheme) -> Value {
     }
 }
 
-/// The number at the precision the descriptor's step implies, without binary float noise.
-fn number_value(value: f32, step: Option<f32>) -> Value {
-    let mut places = 0;
-    let mut divisor = step.unwrap_or(1.0);
-    while places < 6 && divisor.fract().abs() > f32::EPSILON {
-        divisor *= 10.0;
-        places += 1;
-    }
-    let factor = 10_f64.powi(places);
-    json!(((f64::from(value) * factor).round()) / factor)
+/// The shortest decimal that reads back as `value`: widening an `f32` shows binary noise
+/// (0.05 becomes 0.05000000074505806) that Settings would print.
+fn decimal(value: f32) -> Value {
+    value
+        .to_string()
+        .parse::<f64>()
+        .map_or(Value::Null, Value::from)
 }
 
 fn properties() -> Vec<Value> {
@@ -91,9 +88,9 @@ fn properties() -> Vec<Value> {
                 "label": property.label,
                 "category": property.category,
                 "unit": property.unit,
-                "min": property.min,
-                "max": property.max,
-                "step": property.step,
+                "min": property.min.map(decimal),
+                "max": property.max.map(decimal),
+                "step": property.step.map(decimal),
                 "looks": property.looks.iter().map(|look| look.name()).collect::<Vec<_>>(),
                 "surfaces": property.surfaces,
             })
@@ -1670,6 +1667,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn numbers_reach_settings_as_the_decimals_they_were_written_as() {
+        let value = response(&config(
+            r#"{"themes":{"version":1,"holo":{"font":{"scale":1.1},"decoration":{"mesh":0.07}}}}"#,
+        ));
+        let scale = value["properties"]
+            .as_array()
+            .and_then(|properties| {
+                properties
+                    .iter()
+                    .find(|property| property["id"] == "font.scale")
+            })
+            .expect("font.scale is offered");
+        assert_eq!(
+            (&scale["min"], &scale["max"], &scale["step"]),
+            (&json!(0.85), &json!(1.25), &json!(0.05))
+        );
+        assert_eq!(value["values"]["holo"]["font.scale"], json!(1.1));
+        assert_eq!(value["values"]["holo"]["decoration.mesh"], json!(0.07));
     }
 
     #[test]
