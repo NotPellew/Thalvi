@@ -4,7 +4,8 @@
 # shellcheck disable=SC2016  # scripts for the sandbox are single-quoted on purpose
 set -euo pipefail
 
-BASE=${THALVI_RIG_BASE:-/var/tmp/thalvi-rig}
+# Canonical, so the paths app.bin records match the ones prune finds.
+BASE=$(readlink -m -- "${THALVI_RIG_BASE:-/var/tmp/thalvi-rig}")
 UID_NUM=$(id -u)
 GNOME_HELPER=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/thalvi-gnome-rig.py
 
@@ -437,6 +438,7 @@ cmd_app_start() {
     esac
   done
   [ -x "$bin" ] || die "no executable $bin"
+  bin=$(readlink -f -- "$bin")
   # The app computes on the NVIDIA GPU, which the compositors never touch. NVIDIA's Vulkan driver fails to load
   # while the Mesa-only EGL vendor list of the sandbox is set.
   if [ "$nvidia" = 1 ]; then
