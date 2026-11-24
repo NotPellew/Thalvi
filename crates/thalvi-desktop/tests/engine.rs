@@ -19,8 +19,8 @@ use thalvi_desktop::engine::fakes::{
     SpotterControl, WakeControl,
 };
 use thalvi_desktop::engine::{
-    CaptureError, CaptureOutcome, Engine, EngineHandle, EngineState, FrameSource, ListenError,
-    Parts, PreviewError, StreamingExtra, SubmitPreview, WakeTrigger,
+    CaptureError, CaptureOutcome, EndingListener, Engine, EngineHandle, EngineState, FrameSource,
+    ListenError, Parts, PreviewError, StreamingExtra, SubmitPreview, WakeTrigger,
 };
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
@@ -2008,34 +2008,55 @@ async fn a_capture_fails_when_the_microphone_gives_no_audio_for_three_seconds() 
 
 #[tokio::test(start_paused = true)]
 async fn a_capture_without_words_for_a_minute_ends_and_keeps_its_text() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Hello world").await;
-            rig.feed_until(40_000, Kind::Quiet).await;
-            rig.partial("more").await;
-            rig.feed_until(70_000, Kind::Quiet).await;
-            rig.partial("[noise]").await;
-            rig.feed_until(90_000, Kind::Quiet).await;
-            rig.partial("uh").await;
-            rig.feed_until(99_960, Kind::Quiet).await;
-            assert!(
-                !task.is_finished(),
-                "words at 40 s restart the minute; noise does not"
-            );
-            rig.feed_until(100_080, Kind::Quiet).await;
-            assert_eq!(
-                finished(task).await,
-                CaptureOutcome::Failed {
-                    error: CaptureError::NoEnding(Duration::from_secs(60)),
-                    recoverable_text: Some("Hello world".to_owned())
-                }
-            );
-        })
-        .await;
+    for (name, config, listener, message) in [
+        (
+            "Nemotron",
+            "{}",
+            EndingListener::Other,
+            "Didn't hear an ending for 1 minute.",
+        ),
+        (
+            "Parakeet",
+            r#"{"stt": {"engine": "local", "model": "parakeet_tdt_v3"}}"#,
+            EndingListener::Parakeet,
+            "Didn't hear an ending for 1 minute. Parakeet may miss an English ending after other languages; add one in your language in Settings → Endings.",
+        ),
+    ] {
+        LocalSet::new()
+            .run_until(async {
+                let (mut rig, engine, frames) = Rig::new(config);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals("Hello world").await;
+                rig.feed_until(40_000, Kind::Quiet).await;
+                rig.partial("more").await;
+                rig.feed_until(70_000, Kind::Quiet).await;
+                rig.partial("[noise]").await;
+                rig.feed_until(90_000, Kind::Quiet).await;
+                rig.partial("uh").await;
+                rig.feed_until(99_960, Kind::Quiet).await;
+                assert!(
+                    !task.is_finished(),
+                    "{name}: words at 40 s restart the minute; noise does not"
+                );
+                rig.feed_until(100_080, Kind::Quiet).await;
+                let error = CaptureError::NoEnding {
+                    idle: Duration::from_secs(60),
+                    listener,
+                };
+                assert_eq!(error.to_string(), message, "{name}");
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Failed {
+                        error,
+                        recoverable_text: Some("Hello world".to_owned())
+                    },
+                    "{name}"
+                );
+            })
+            .await;
+    }
 }
 
 /// Milliseconds after the wake word at which the capture opens; the five-minute cap counts from here.
@@ -2117,7 +2138,10 @@ async fn configured_capture_limits_replace_the_defaults() {
             rig.feed_until(29_920, Kind::Quiet).await;
             assert!(!task.is_finished());
             rig.at(30_000).await;
-            let idle = CaptureError::NoEnding(Duration::from_secs(20));
+            let idle = CaptureError::NoEnding {
+                idle: Duration::from_secs(20),
+                listener: EndingListener::Other,
+            };
             assert_eq!(idle.to_string(), "Didn't hear an ending for 20 seconds.");
             assert_eq!(
                 finished(task).await,
@@ -2169,7 +2193,11 @@ fn the_time_notices_read_whole_minutes_as_minutes_and_the_rest_as_seconds() {
             format!("No words heard for {words}.")
         );
         assert_eq!(
-            CaptureError::NoEnding(seconds).to_string(),
+            CaptureError::NoEnding {
+                idle: seconds,
+                listener: EndingListener::Other,
+            }
+            .to_string(),
             format!("Didn't hear an ending for {words}.")
         );
         assert_eq!(
@@ -4339,7 +4367,10 @@ async fn the_capture_limits_still_end_a_capture_whose_recognizer_stopped_taking_
                     r#"{"idle": 10, "max": 600}"#,
                     true,
                     15_000,
-                    CaptureError::NoEnding(Duration::from_secs(10)),
+                    CaptureError::NoEnding {
+                        idle: Duration::from_secs(10),
+                        listener: EndingListener::Other,
+                    },
                 ),
                 (
                     "idle without words",

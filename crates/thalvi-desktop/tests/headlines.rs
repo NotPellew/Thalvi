@@ -7,7 +7,7 @@ use std::time::Duration;
 use thalvi_desktop::audio::AudioError;
 use thalvi_desktop::capture::CaptureFullError;
 use thalvi_desktop::delivery::TerminalLines;
-use thalvi_desktop::engine::{CaptureError, ListenError};
+use thalvi_desktop::engine::{CaptureError, EndingListener, ListenError};
 use thalvi_desktop::host::HostError;
 use thalvi_desktop::metrics::RecorderError;
 use thalvi_desktop::models::{DownloadFailure, ModelError, ModelKind};
@@ -136,7 +136,13 @@ fn recognition() -> Cases {
             Box::new(CaptureError::MicStopped),
             "Microphone stopped mid-capture",
         ),
-        (Box::new(CaptureError::NoEnding(seconds)), "No ending heard"),
+        (
+            Box::new(CaptureError::NoEnding {
+                idle: seconds,
+                listener: EndingListener::Other,
+            }),
+            "No ending heard",
+        ),
         (Box::new(CaptureError::NoWords(seconds)), "No words heard"),
         (
             Box::new(CaptureError::HoldTooShort),
