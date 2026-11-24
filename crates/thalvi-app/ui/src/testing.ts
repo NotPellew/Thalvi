@@ -146,6 +146,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
+  const rebuildingListeners: ((rebuilding: boolean) => void)[] = [];
   const elsewhereListeners: (() => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const pageListeners: ((page: string) => void)[] = [];
@@ -170,6 +171,8 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     onLevel: vi.fn((listener: (level: number) => void) => levelListeners.push(listener)),
     getAudio: vi.fn(() => Promise.resolve(structuredClone(audioState))),
     onAudio: vi.fn((listener: (audio: AudioStatus) => void) => audioListeners.push(listener)),
+    getRebuilding: vi.fn(() => Promise.resolve(false)),
+    onRebuilding: vi.fn((listener: (rebuilding: boolean) => void) => rebuildingListeners.push(listener)),
     onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
     getLookStyles: vi.fn<(styles?: LookStyles) => Promise<LookStyles>>(() => Promise.resolve(structuredClone(lookStyles))),
@@ -246,6 +249,9 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
       }
     },
     audio: emitAudio,
+    rebuilding: (rebuilding: boolean) => {
+      for (const listener of rebuildingListeners) listener(rebuilding);
+    },
     audioState: () => structuredClone(audioState),
     level: (level: number) => {
       for (const listener of levelListeners) listener(level);

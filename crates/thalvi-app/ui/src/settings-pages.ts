@@ -1248,6 +1248,7 @@ function speech(context: PageContext): SpeechRows {
   const retry = button("Retry", retryDownload);
   const summaryActions = el("div", { class: "trow", hidden: true }, useServer, retry, retryProblem);
   let currentStatus: Status = { state: "listening" };
+  let rebuilding = false;
   const modelTitles = new Map<string, string>();
   let speechModelList: SpeechModelInfo[] = [];
   const speechModels: Promise<SpeechModelInfo[]> = backend.listSpeechModels();
@@ -1272,6 +1273,17 @@ function speech(context: PageContext): SpeechRows {
     },
     () => undefined,
   );
+  backend.onRebuilding((queued) => {
+    rebuilding = queued;
+    updateSummary();
+  });
+  backend.getRebuilding().then(
+    (queued) => {
+      rebuilding = queued;
+      updateSummary();
+    },
+    () => undefined,
+  );
 
   function modelTitleFor(entry: OnDeviceEntry): string {
     const model = entry.model ?? SPEECH_MODEL;
@@ -1282,14 +1294,15 @@ function speech(context: PageContext): SpeechRows {
     switch (status.state) {
       case "listening":
       case "keyboardOnly":
+      case "done":
+        return "Ready";
       case "starting":
       case "capturing":
       case "pending":
       case "writing":
       case "thinking":
       case "working":
-      case "done":
-        return "Ready";
+        return rebuilding ? "Loads after this dictation" : "Ready";
       case "transcribing":
         return "Transcribing…";
       case "finalPass":

@@ -223,6 +223,13 @@ impl EngineLink {
         self.publisher.queue_rebuild();
     }
 
+    /// Whether a settings change that rebuilds the engine is queued or running, so the next
+    /// dictation uses models that are still to load, even while a capture runs on the old ones.
+    #[must_use]
+    pub fn rebuilding_updates(&self) -> watch::Receiver<bool> {
+        self.publisher.rebuilding.subscribe()
+    }
+
     /// Where the hold key's presses and releases come in.
     #[must_use]
     pub fn hold_input(&self) -> HoldInput {
@@ -430,6 +437,8 @@ impl PublisherState {
 pub(crate) struct Publisher {
     state: Mutex<PublisherState>,
     out: watch::Sender<Status>,
+    /// Whether a rebuild is queued or running: the next dictation waits for models still to load.
+    rebuilding: watch::Sender<bool>,
     /// The failure the last speech model load showed, so a reload clears that and no other.
     load_failure: Mutex<Option<Failure>>,
 }
@@ -454,6 +463,7 @@ impl Publisher {
                 applying: false,
             }),
             out,
+            rebuilding: watch::channel(false).0,
             load_failure: Mutex::new(None),
         })
     }
@@ -463,6 +473,11 @@ impl Publisher {
         let result = change(&mut state);
         state.sync_rebuilding();
         let status = state.view.status();
+        self.rebuilding.send_if_modified(|current| {
+            let changed = *current != state.view.rebuilding;
+            *current = state.view.rebuilding;
+            changed
+        });
         self.out.send_if_modified(|current| {
             if *current == status {
                 return false;
@@ -2229,6 +2244,32 @@ mod tests {
                 "{refusal:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_queued_rebuild_is_published_while_the_capture_keeps_its_status() {
+        let (out, status) = watch::channel(Status::Paused);
+        let publisher = Publisher::new(out, EndingPauses::default());
+        let queued = publisher.rebuilding.subscribe();
+        publisher.mode(Mode::Idle);
+        publisher.update(|view| {
+            view.engine = EngineState::Capturing {
+                committed: "keep speaking".to_owned(),
+                partial: None,
+                notice: None,
+            };
+        });
+        assert!(!*queued.borrow());
+
+        publisher.queue_rebuild();
+        assert!(*queued.borrow(), "the next dictation waits for the rebuild");
+        assert!(
+            matches!(&*status.borrow(), Status::Capturing { .. }),
+            "the running capture is not loading"
+        );
+
+        publisher.finish_apply(publisher.start_apply());
+        assert!(!*queued.borrow(), "the rebuild is done");
     }
 
     #[test]

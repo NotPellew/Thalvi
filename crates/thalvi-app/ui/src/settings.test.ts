@@ -2081,6 +2081,23 @@ describe("the next dictation summary and state words", () => {
     expect(stub.backend.saveSettings).toHaveBeenCalled();
   });
 
+  it("says a queued rebuild loads after the running dictation, then shows the load itself", async () => {
+    const stub = await open(local());
+    goTo("recognition");
+    await settle();
+    stub.emit({ state: "capturing", target: null, committed: "", partial: null, notice: null });
+    stub.rebuilding(true);
+    await settle();
+    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming · Loads after this dictation");
+    stub.emit({ state: "loading", notice: "Loading the speech model." });
+    await settle();
+    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming · Loading the speech model.");
+    stub.rebuilding(false);
+    stub.emit({ state: "listening" });
+    await settle();
+    expect(summaryText()).toBe("Next dictation: On this computer · Nemotron Streaming · Ready");
+  });
+
   describe("the summary's actions while the recognizer is being prepared", () => {
     const LOADING: Status = { state: "loading", notice: "Downloading the speech model — 42%" };
     const FAILED: Status = { state: "failed", notice: "n", headline: "Download failed", causes: [], kind: "other" };

@@ -595,6 +595,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_audio,
+            commands::get_rebuilding,
             commands::get_settings,
             commands::get_look_styles,
             commands::preview_overlay,
@@ -926,6 +927,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     let mut status = state.link.status_updates();
     let mut level = state.link.level_updates();
     let mut audio = state.link.audio_updates();
+    let mut rebuilding = state.link.rebuilding_updates();
     let tray = Tray::new(
         app,
         &status.borrow(),
@@ -957,6 +959,12 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
                             tray.listening(current.paused);
                         }
                         let _ = handle.emit("thalvi://audio", current);
+                    }
+                    changed
+                }
+                changed = rebuilding.changed() => {
+                    if changed.is_ok() {
+                        let _ = handle.emit("thalvi://rebuilding", *rebuilding.borrow_and_update());
                     }
                     changed
                 }
@@ -1081,6 +1089,10 @@ impl Running for Live {
 
     fn audio(&self) -> watch::Receiver<AudioStatus> {
         self.0.state::<AppState>().link.audio_updates()
+    }
+
+    fn rebuilding(&self) -> watch::Receiver<bool> {
+        self.0.state::<AppState>().link.rebuilding_updates()
     }
 
     fn last_error(&self) -> Option<Failure> {
