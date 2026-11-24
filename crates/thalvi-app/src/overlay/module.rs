@@ -121,6 +121,7 @@ impl Module {
             target,
             route,
             notice,
+            ..
         } = &view.status
         {
             let message = done_message(*route, target.as_deref(), notice);
@@ -1057,6 +1058,7 @@ mod tests {
             target: None,
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
+            wake_words: true,
         };
         for (finish, shines) in [(Finish::Gunmetal, false), (Finish::Holo, true)] {
             let mut view = shown(done.clone(), false, 0.0, 0.0);
@@ -1187,6 +1189,7 @@ mod tests {
             target: Some("a-window-with-a-rather-long-name".to_owned()),
             route: CaptureRoute::Submit,
             notice: "Delivered, and the answer is on its way.".to_owned(),
+            wake_words: true,
         };
         let view = shown(done, false, 0.0, 0.0);
         let width = COLUMNS;

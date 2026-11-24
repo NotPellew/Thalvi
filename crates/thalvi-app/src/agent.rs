@@ -393,8 +393,14 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
     }
     match &*status.borrow() {
         Status::Paused => "paused",
-        Status::Listening | Status::Done { .. } => "listening",
-        Status::KeyboardOnly => "keyboard",
+        Status::Listening
+        | Status::Done {
+            wake_words: true, ..
+        } => "listening",
+        Status::KeyboardOnly
+        | Status::Done {
+            wake_words: false, ..
+        } => "keyboard",
         Status::Starting { loading: true, .. } | Status::Loading { .. } => "loading",
         Status::Starting { .. } | Status::Capturing { .. } => "capturing",
         Status::Pending { .. } => "pending",
@@ -1992,8 +1998,20 @@ mod tests {
                     target: Some("kitty".to_owned()),
                     route: CaptureRoute::Paste,
                     notice: "Pasted into kitty.".to_owned(),
+                    wake_words: true,
                 },
                 "listening",
+                "delivered",
+                "ready",
+            ),
+            (
+                Status::Done {
+                    target: Some("kitty".to_owned()),
+                    route: CaptureRoute::Paste,
+                    notice: "Pasted into kitty.".to_owned(),
+                    wake_words: false,
+                },
+                "keyboard",
                 "delivered",
                 "ready",
             ),
@@ -2796,6 +2814,7 @@ mod tests {
                 target: Some("kitty".to_owned()),
                 route: CaptureRoute::Paste,
                 notice: "Pasted into kitty.".to_owned(),
+                wake_words: true,
             },
             Status::Failed {
                 notice: "Nothing was delivered. Clipboard recovery failed: No clipboard. Your text follows:\nmy password is hunter2".to_owned(),

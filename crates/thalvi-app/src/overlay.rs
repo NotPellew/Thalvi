@@ -792,6 +792,7 @@ mod tests {
             target: None,
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
+            wake_words: true,
         });
         let deadline = step(Some(Message::Status(done)), false, at(100));
         assert_eq!(
@@ -906,6 +907,7 @@ mod tests {
                     target,
                     route: CaptureRoute::Paste,
                     notice: String::new(),
+                    wake_words: true,
                 },
                 Visibility::ShowFor(Duration::from_secs(1)),
             ),
@@ -1110,6 +1112,7 @@ mod tests {
             target: None,
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
+            wake_words: true,
         });
         overlay.take(Message::Status(done), start);
         overlay.settle(&mut surface, &mut painter, 0.0, start);
