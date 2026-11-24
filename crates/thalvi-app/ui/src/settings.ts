@@ -75,6 +75,8 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     speechModel: () => undefined,
     status: () => undefined,
     opened: () => undefined,
+    look: () => undefined,
+    lookStyles: () => undefined,
     refresh: () => undefined,
     update: () => undefined,
   };
@@ -235,6 +237,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     displayedLook = look;
     applyLook(root, look);
     if (lookStyles) applyLookStyles(root, lookStyles.looks[look]);
+    live.look(look);
   }
 
   /** Reads the resolved look styles and puts the current look's on the window. */
@@ -253,6 +256,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     if (request !== styleRequest) return;
     lookStyles = styles;
     applyLookStyles(root, styles.looks[displayedLook]);
+    live.lookStyles(styles);
   }
 
   function load(typing: Typing | null = null): void {
@@ -295,8 +299,9 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     audio = loadedAudio;
     settings = loaded;
     showLook(loaded.look);
+    live.opened = () => undefined;
     pages = buildPages({
-      settings: loaded, backend, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply, showLook,
+      settings: loaded, backend, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply, showLook, lookStyles,
     });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
@@ -311,6 +316,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     feedback();
     applyView();
     if (typing) typeAgain(typing);
+    live.opened(current);
   }
 
   /** Applies one change on top of what the desktop holds; rejects with the plain reason it was refused, and then nothing changed. */

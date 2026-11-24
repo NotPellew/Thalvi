@@ -136,12 +136,15 @@ export function createControls(confirmation: (atOnce?: boolean) => string) {
     });
     input.value = String(value);
     let kept = value;
+    const stepText = String(range.step);
+    const point = stepText.indexOf(".");
+    const places = point === -1 ? 0 : stepText.length - point - 1;
     const fill = (): void => {
       const share = (input.valueAsNumber - range.min) / (range.max - range.min);
       input.style.setProperty("--p", share.toFixed(3));
-      shown.textContent = input.valueAsNumber.toFixed(2);
+      shown.textContent = input.valueAsNumber.toFixed(places);
     };
-    const shown = el("output", { class: "val", for: input.id }, value.toFixed(2));
+    const shown = el("output", { class: "val", for: input.id }, value.toFixed(places));
     const result = verdict();
     fill();
     input.addEventListener("input", fill);
