@@ -309,7 +309,7 @@ impl AppState {
             write,
         )?;
         drop(watch);
-        self.apply(config);
+        self.apply(config, crate::runner::needs_rebuild(current, config));
         Ok(())
     }
 
@@ -383,7 +383,7 @@ impl AppState {
     pub fn use_built_in_look(&self) -> Result<(), String> {
         let look = self.config().look;
         self.remember(|config| config.themes.suspend(look))?;
-        self.apply(&self.config());
+        self.apply(&self.config(), false);
         Ok(())
     }
 
@@ -405,13 +405,16 @@ impl AppState {
     }
 
     /// Takes `config` into effect: the engine applies it between captures.
-    fn apply(&self, config: &DesktopConfig) {
+    fn apply(&self, config: &DesktopConfig, rebuild: bool) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
         self.overlay.set_enabled(config.overlay.show);
         self.overlay.show_draft(config.overlay.draft);
         self.overlay.set_style(overlay_style(config));
         self.overlay.set_recordings(config.recordings);
+        if rebuild {
+            self.link.begin_rebuild();
+        }
         self.saves.set(config);
         self.link.send(Control::Apply(Box::new(config.clone())));
         self.updates.config_changed();

@@ -191,6 +191,7 @@ mod tests {
             pauses: EndingPauses::default(),
             loading: None,
             wake_words: true,
+            rebuilding: false,
         }
         .status()
     }
