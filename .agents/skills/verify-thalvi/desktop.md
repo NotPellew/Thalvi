@@ -53,8 +53,9 @@ The binary loads `libwebgpu_dawn.so` from its own folder (rpath `$ORIGIN`);
 `app-start` and `ctl` bind every `.so` beside it into the sandbox, and without it
 the app exits 127 at once. A warm target builds in about a minute. Evidence lives under each run's `out/`
 and binaries under `/var/tmp/thalvi-rig/bin/` (`THALVI_RIG_BASE` changes the
-base). `up` prunes runs stopped for 24 h and bin folders unused for 24 h, so copy
-evidence you must keep elsewhere; never commit any of it.
+base). `up` removes runs older than 24 h whose compositor and app have stopped, and
+bin folders no run names that nothing read or changed for 24 h, so copy evidence
+you must keep elsewhere; never commit any of it.
 
 ## Launch
 
@@ -425,9 +426,9 @@ $H app-stop $R     # the app only
 $H down $R         # app and compositors; $R/out stays
 ```
 
-`up` prunes a run whose compositor has been stopped for more than 24 h and a bin
-folder unused for more than 24 h, so keep anything you must retain outside the
-base.
+Once a run is older than 24 h and its compositor and app have stopped, the next
+`up` removes it (Build the commit says the same for `bin/`), so keep anything you
+must retain outside the base.
 
 Before teardown, save the nonempty `app.pid` and `compositor.pid` values in
 your evidence; the helper clears these files when it stops them. Afterwards,

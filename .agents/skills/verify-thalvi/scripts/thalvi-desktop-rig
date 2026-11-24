@@ -33,7 +33,7 @@ say R WAV                  runs with a microphone: play WAV into it, in real tim
 gnome R ARGS...            --gnome runs: windows | focus | key NAME | type TEXT | clip | victim LOG (what holds focus, keys, clipboard)
 sh R CMD...                run any command in a sandbox joined to the same private dirs
 proof R                    write R/out/isolation.txt: what the sandbox cannot reach
-down R                     stop everything started by this run; evidence stays in R/out; up prunes a stopped run after 24 h
+down R                     stop everything started by this run; evidence stays in R/out until a later up prunes it (24 h)
 EOF
 }
 
@@ -245,11 +245,15 @@ cmd_bind() {
 }
 
 prune() {
-  local base=$1 d pid app used
+  local base=$1 d f pid app used live
   while IFS= read -r -d '' d; do
-    pid=
-    [ ! -s "$d/compositor.pid" ] || IFS= read -r pid < "$d/compositor.pid" || true
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then continue; fi
+    live=0
+    for f in "$d/compositor.pid" "$d/app.pid"; do
+      pid=
+      [ ! -s "$f" ] || IFS= read -r pid < "$f" || true
+      [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || live=1
+    done
+    [ "$live" = 0 ] || continue
     if rm -rf -- "$d"; then echo "up: pruned $d" >&2; else echo "up: could not prune $d" >&2; fi
   done < <(find "$base" -mindepth 1 -maxdepth 1 -type d -name 'run-*' -mmin +1440 -print0)
   [ -d "$base/bin" ] || return 0
