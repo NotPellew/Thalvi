@@ -208,6 +208,10 @@ describe("the look's Customize section", () => {
     expect(document.activeElement).toBe(input);
     expect(row(label)).toBe(target);
     expect(target.querySelector("small.applied")?.textContent).toBe("Applied.");
+    if (key === "colors.accent") {
+      const swatch = target.querySelector("[data-swatch]") as HTMLElement;
+      expect(swatch.style.backgroundColor).toBe("rgb(255, 0, 0)");
+    }
   });
 
   it("moves focus from a reset button to its field when the reset disables it", async () => {

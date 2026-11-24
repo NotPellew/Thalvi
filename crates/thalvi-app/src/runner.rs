@@ -43,7 +43,7 @@ use crate::status::{
 use crate::update::Stop;
 
 /// How long a quit waits for the engine to close the microphone and the recognizer.
-const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What the app asks of the engine.
 #[derive(Debug)]
@@ -115,6 +115,8 @@ pub struct AudioStatus {
 /// The app's side of the engine thread.
 pub struct EngineLink {
     control: mpsc::UnboundedSender<Control>,
+    /// Set on quit, so an engine build stops at once while other controls wait in order.
+    quitting: watch::Sender<bool>,
     publisher: Arc<Publisher>,
     status: watch::Receiver<Status>,
     level: watch::Receiver<f32>,
@@ -192,10 +194,12 @@ impl EngineLink {
             problem: None,
         });
         let (feeding_tx, feeding) = watch::channel(false);
+        let (quitting, quitting_rx) = watch::channel(false);
         let (key, key_state) = HoldInput::new();
         let (stopped_tx, stopped) = std_mpsc::channel();
         let link = Self {
             control,
+            quitting,
             publisher: Arc::clone(&publisher),
             status,
             level,
@@ -212,6 +216,7 @@ impl EngineLink {
             audio: audio_tx,
             feeding: Arc::new(feeding_tx),
             key: key_state,
+            quitting: quitting_rx,
             last_writing_window,
         };
         (link, ends, stopped_tx)
@@ -296,8 +301,14 @@ impl EngineLink {
     ///
     /// Blocks for at most a few seconds.
     pub fn quit(&self) {
-        self.send(Control::Quit);
+        self.stop();
         self.wait_stopped();
+    }
+
+    /// Tells the engine to stop, without waiting for it.
+    fn stop(&self) {
+        self.quitting.send_replace(true);
+        self.send(Control::Quit);
     }
 
     /// Waits until the engine has closed the microphone and the recognizer, for at most a few seconds.
@@ -314,6 +325,7 @@ struct RunnerEnds {
     audio: watch::Sender<AudioStatus>,
     feeding: Arc<watch::Sender<bool>>,
     key: watch::Receiver<KeyState>,
+    quitting: watch::Receiver<bool>,
     last_writing_window: Arc<Mutex<Option<WindowApp>>>,
 }
 
@@ -337,6 +349,7 @@ impl RunnerEnds {
             Shared {
                 rig,
                 key: self.key,
+                quitting: self.quitting,
                 history,
                 drafts,
                 feeding: self.feeding,
@@ -947,6 +960,7 @@ struct Shared<S: Rig> {
     last_writing_window: Arc<Mutex<Option<WindowApp>>>,
     /// Whether the hold key is down.
     key: watch::Receiver<KeyState>,
+    quitting: watch::Receiver<bool>,
     history: Arc<History>,
     drafts: Arc<Drafts>,
     /// Whether a file's audio is being fed in place of the microphone's.
@@ -987,6 +1001,7 @@ struct Runner<S: Rig> {
     /// The hold key, for presses the engine is not listening for.
     key: Presses,
     key_state: watch::Receiver<KeyState>,
+    quitting: watch::Receiver<bool>,
 }
 
 impl<S: Rig> Runner<S> {
@@ -1022,6 +1037,7 @@ impl<S: Rig> Runner<S> {
             loading: None,
             key: Presses::new(shared.key.clone()),
             key_state: shared.key,
+            quitting: shared.quitting,
         }
     }
 
@@ -1040,7 +1056,10 @@ impl<S: Rig> Runner<S> {
 
     /// Builds the first engine, or fails the status with why it could not be built.
     async fn start(&mut self, config: DesktopConfig) {
-        match self.build(&config).await {
+        let Some(built) = self.build_interruptible(&config).await else {
+            return;
+        };
+        match built {
             Ok(session) => {
                 self.session = Some(session);
                 self.load_speech_model();
@@ -1051,6 +1070,32 @@ impl<S: Rig> Runner<S> {
                 self.publish_audio();
             }
         }
+    }
+
+    /// Builds an engine for `config`; `None` when quitting began first, which drops the load
+    /// (and any model download in it) at once.
+    async fn build_interruptible(
+        &mut self,
+        config: &DesktopConfig,
+    ) -> Option<Result<Session<S>, Failure>> {
+        let Self {
+            rig,
+            publisher,
+            level,
+            audio,
+            feeding,
+            key_state,
+            quitting,
+            ..
+        } = &mut *self;
+        let built = tokio::select! {
+            biased;
+            // An error means the link is gone, which ends the engine too.
+            _ = quitting.wait_for(|&quit| quit) => None,
+            result = build_session(rig, publisher, level, audio, feeding, key_state, config) => Some(result),
+        };
+        self.stopping |= built.is_none();
+        built
     }
 
     /// Fetches and loads the speech model in the background, and shows what it is doing until it is ready.
@@ -1115,63 +1160,73 @@ impl<S: Rig> Runner<S> {
         println!("{}", failure.notice);
         self.publisher.mode(Mode::Failed(failure));
     }
+}
 
-    async fn build(&self, config: &DesktopConfig) -> Result<Session<S>, Failure> {
-        let gate = InputGate::default();
-        let Loaded {
+async fn build_session<S: Rig>(
+    rig: &S,
+    publisher: &Arc<Publisher>,
+    level: &Arc<watch::Sender<f32>>,
+    audio: &watch::Sender<AudioStatus>,
+    feeding: &Arc<watch::Sender<bool>>,
+    key_state: &watch::Receiver<KeyState>,
+    config: &DesktopConfig,
+) -> Result<Session<S>, Failure> {
+    let gate = InputGate::default();
+    let Loaded {
+        recognizer,
+        wake,
+        cues,
+        recorder,
+        http,
+        chat,
+        spotter,
+        spotter_off,
+        extras,
+        local,
+        extra_locals,
+    } = rig.load(config, &gate, publisher).await?;
+    let metrics = recorder.metrics();
+    let (engine, handle) = Engine::new(
+        Parts {
             recognizer,
+            chat,
             wake,
             cues,
-            recorder,
+            gate: gate.clone(),
             http,
-            chat,
+            hold: key_state.clone(),
+            notice: publisher.notice_sink(),
             spotter,
             spotter_off,
             extras,
-            local,
-            extra_locals,
-        } = self.rig.load(config, &gate, &self.publisher).await?;
-        let metrics = recorder.metrics();
-        let (engine, handle) = Engine::new(
-            Parts {
-                recognizer,
-                chat,
-                wake,
-                cues,
-                gate: gate.clone(),
-                http,
-                hold: self.key_state.clone(),
-                notice: self.publisher.notice_sink(),
-                spotter,
-                spotter_off,
-                extras,
-            },
-            config,
-            recorder,
-        );
-        tokio::task::spawn_local(follow(
-            handle.state(),
-            handle.level(),
-            Arc::clone(&self.publisher),
-            Arc::clone(&self.level),
-            self.audio.subscribe(),
-        ));
-        println!("Transcribing through {}.", config.speech_source());
-        let feeder = Feeder::new(&gate, Arc::clone(&self.feeding));
-        Ok(Session {
-            engine,
-            local,
-            extra_locals,
-            handle,
-            gate,
-            device: config.microphone.clone(),
-            metrics,
-            microphone: None,
-            frames: None,
-            feeder,
-        })
-    }
+        },
+        config,
+        recorder,
+    );
+    tokio::task::spawn_local(follow(
+        handle.state(),
+        handle.level(),
+        Arc::clone(publisher),
+        Arc::clone(level),
+        audio.subscribe(),
+    ));
+    println!("Transcribing through {}.", config.speech_source());
+    let feeder = Feeder::new(&gate, Arc::clone(feeding));
+    Ok(Session {
+        engine,
+        local,
+        extra_locals,
+        handle,
+        gate,
+        device: config.microphone.clone(),
+        metrics,
+        microphone: None,
+        frames: None,
+        feeder,
+    })
+}
 
+impl<S: Rig> Runner<S> {
     fn publish_audio(&self) {
         let next = AudioStatus {
             selected: self.config.microphone.clone(),
@@ -1529,7 +1584,7 @@ impl<S: Rig> Runner<S> {
                 }
                 self.apply_engine(rest).await;
             }
-            if wanted != self.config.microphone {
+            if !self.stopping && wanted != self.config.microphone {
                 self.config.microphone = wanted;
                 self.switch_microphone().await;
             }
@@ -1575,6 +1630,9 @@ impl<S: Rig> Runner<S> {
             presses
         };
         self.rebuild(config).await;
+        if self.stopping {
+            return;
+        }
         let count = pressed(&mut presses);
         if let Some(session) = self.session.as_mut()
             && session.frames.is_some()
@@ -1590,7 +1648,10 @@ impl<S: Rig> Runner<S> {
             self.publisher.mode(Mode::Starting);
         }
         self.close_microphone();
-        match self.build(&config).await {
+        let Some(built) = self.build_interruptible(&config).await else {
+            return;
+        };
+        match built {
             Ok(session) => {
                 if let Some(old) = self.session.replace(session) {
                     old.close().await;
@@ -2283,6 +2344,7 @@ mod tests {
                     route: CaptureRoute::Submit,
                     text: "hi".to_owned(),
                     waiting_for_quiet: false,
+                    preview: None,
                 };
             });
             publisher.woke(Some("kitty".to_owned()), copies);
@@ -3863,6 +3925,7 @@ mod tests {
             Shared {
                 rig: NoticeRig,
                 key: ends.key,
+                quitting: ends.quitting,
                 history: Arc::new(History::at("unused-history")),
                 drafts: Arc::new(Drafts::default()),
                 feeding: ends.feeding,
@@ -3871,8 +3934,7 @@ mod tests {
             },
         );
         for show in [true, false] {
-            runner
-                .handle(Control::HoldKeyFailed("Hyprland refused F9.".to_owned()))
+            Box::pin(runner.handle(Control::HoldKeyFailed("Hyprland refused F9.".to_owned())))
                 .await;
             if show {
                 runner.show_hold_problem();
@@ -3882,7 +3944,7 @@ mod tests {
             }
             link.hold_problems()(HoldReport::Working);
             let control = runner.control.recv().await.unwrap();
-            runner.handle(control).await;
+            Box::pin(runner.handle(control)).await;
             assert!(
                 runner.hold_problem.is_none(),
                 "recovery clears a pending hold failure"
@@ -3908,7 +3970,7 @@ mod tests {
             causes: Vec::new(),
         });
         publisher.mode(other.clone());
-        runner.handle(Control::HoldKeyWorks).await;
+        Box::pin(runner.handle(Control::HoldKeyWorks)).await;
         assert_eq!(
             publisher.view().mode,
             other,
@@ -5111,5 +5173,60 @@ mod tests {
                 })
                 .await;
         }
+    }
+
+    #[tokio::test]
+    async fn quit_stops_during_a_blocked_engine_rebuild_without_waiting_for_load() {
+        use std::collections::VecDeque;
+        use thalvi_desktop::recognizer::FakeRecognizer;
+
+        let initial =
+            DesktopConfig::from_json_str(r#"{"wake":{"capture":{"model":"hey_thalvi"}}}"#).unwrap();
+        let switched =
+            DesktopConfig::from_json_str(r#"{"wake":{"capture":{"model":"hey_jarvis"}}}"#).unwrap();
+
+        LocalSet::new()
+            .run_until(async {
+                let (first_rec, _first_ctl) = FakeRecognizer::new();
+                let (second_rec, _second_ctl) = FakeRecognizer::new();
+                let (load_entered_tx, load_entered) = oneshot::channel();
+                // Kept alive and never signalled: Quit must drop the load future instead of waiting.
+                let (_load_release, load_release_rx) = oneshot::channel();
+                let lab = SwitchLab {
+                    recognizers: RefCell::new(VecDeque::from([first_rec, second_rec])),
+                    load_gate: RefCell::new(Some((load_entered_tx, load_release_rx))),
+                    open_gate: RefCell::new(None),
+                    loads: Cell::new(0),
+                };
+                let (link, ends, _) = EngineLink::wire(&initial, false);
+                let mut status = link.status_updates();
+                let running = tokio::task::spawn_local(ends.run(
+                    initial.clone(),
+                    false,
+                    lab,
+                    Arc::new(Delivery::new(TestHost::default())),
+                    Arc::new(History::at("unused-quit-rebuild-history")),
+                    Arc::new(Drafts::default()),
+                ));
+
+                wait_status(&mut status, "initial recognizer ready", |s| {
+                    *s == Status::Listening
+                })
+                .await;
+
+                link.begin_rebuild();
+                link.send(Control::Apply(Box::new(switched)));
+                tokio::time::timeout(Duration::from_secs(5), load_entered)
+                    .await
+                    .expect("rebuild entered load")
+                    .expect("load_entered sender");
+
+                link.stop();
+                tokio::time::timeout(Duration::from_secs(2), running)
+                    .await
+                    .expect("quit stops without waiting for the blocked load")
+                    .expect("runner exited cleanly");
+            })
+            .await;
     }
 }
