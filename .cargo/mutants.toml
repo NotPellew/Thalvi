@@ -10,6 +10,8 @@ examine_globs = [
 ]
 
 exclude_re = [
+    # Equivalent: the runtime still drops when the call returns, and the engine thread then ends and drops the sender, which wakes wait_stopped.
+    "^crates/thalvi-app/src/runner.rs:\\d+:\\d+: replace finish_runtime with \\(\\)$",
     # Nothing reads a restart request's debug text.
     "^crates/thalvi-app/src/runner.rs:\\d+:\\d+: replace <impl std::fmt::Debug for Restart>::fmt ",
     # Each caller has input frames, which pause clears, and step returns before any caller when stopping.
