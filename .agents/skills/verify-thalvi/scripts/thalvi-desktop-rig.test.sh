@@ -166,7 +166,30 @@ STUB
   pass 'models: --models a.onnx,stem hardlinks the named file and its NAME.* files into the run'
 }
 
+test_prune_keeps_build_named_by_relative_path() {
+  fresh_base
+  local base=$THALVI_RIG_BASE stub
+  stub=$(mktemp -d)
+  stubs+=("$stub")
+  printf '#!/bin/sh\nexit 0\n' > "$stub/bwrap"
+  chmod +x "$stub/bwrap"
+  mkdir -p "$base/bin/rel" "$base/run-rel"
+  printf '#!/bin/sh\n' > "$base/bin/rel/thalvi-desktop"
+  chmod +x "$base/bin/rel/thalvi-desktop"
+  touch "$base/run-rel/software"
+  printf '%s\n' "$$" > "$base/run-rel/compositor.pid"
+  (cd "$base" && PATH="$stub:$PATH" "$rig" app-start "$base/run-rel" bin/./rel/thalvi-desktop > /dev/null 2>&1)
+  touch -d '2 days ago' "$base/bin/rel/thalvi-desktop" "$base/bin/rel"
+  THALVI_RIG_BASE=$base/ "$rig" up --models nosuch > /dev/null 2>&1 || true
+  if [ -d "$base/bin/rel" ]; then
+    pass 'prune: a build a live run started by a relative path stays'
+  else
+    fail 'prune: a build a live run started by a relative path stays'
+  fi
+}
+
 test_missing_model
 test_prune
+test_prune_keeps_build_named_by_relative_path
 test_models_are_hardlinked
 exit "$status"
