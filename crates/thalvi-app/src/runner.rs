@@ -2060,9 +2060,11 @@ mod tests {
 
     #[test]
     fn stopped_is_not_reported_until_background_writes_finish() {
+        let (link, mut ends, stopped) = EngineLink::wire(&feed_config(), false);
         let (writing, started) = std_mpsc::channel();
         let (release, pending) = std_mpsc::channel();
-        let (stopped, status) = std_mpsc::channel();
+        let (quitting, quit) = std_mpsc::channel();
+        let (returned, status) = std_mpsc::channel();
         let closing = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -2074,9 +2076,17 @@ mod tests {
             finish_runtime(runtime, &stopped);
         });
         started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let caller = std::thread::spawn(move || {
+            quitting.send(()).unwrap();
+            link.quit();
+            returned.send(()).unwrap();
+        });
+        quit.recv_timeout(Duration::from_secs(5)).unwrap();
         let premature = status.recv_timeout(Duration::from_millis(100));
         release.send(()).unwrap();
         closing.join().unwrap();
+        caller.join().unwrap();
+        assert!(matches!(ends.control.try_recv(), Ok(Control::Quit)));
         assert!(
             matches!(premature, Err(std_mpsc::RecvTimeoutError::Timeout)),
             "quit acknowledged a pending write"
@@ -4080,6 +4090,7 @@ mod tests {
         wake: RefCell<Option<thalvi_desktop::engine::fakes::FakeWake>>,
         recognizer: RefCell<Option<thalvi_desktop::recognizer::FakeRecognizer>>,
         cues: RefCell<Option<thalvi_desktop::engine::fakes::FakeCuePlayer>>,
+        local: Option<Arc<dyn Preload>>,
     }
 
     struct LabMic {
@@ -4117,7 +4128,7 @@ mod tests {
                 spotter: None,
                 spotter_off: None,
                 extras: Vec::new(),
-                local: None,
+                local: self.local.clone(),
                 extra_locals: Vec::new(),
             }))
         }
@@ -4213,6 +4224,10 @@ mod tests {
 
     impl FedRun {
         fn start(missing: bool, paused: bool) -> Self {
+            Self::with_local(missing, paused, None)
+        }
+
+        fn with_local(missing: bool, paused: bool, local: Option<Arc<dyn Preload>>) -> Self {
             use thalvi_desktop::cues::Cue;
             use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeWake};
             use thalvi_desktop::recognizer::FakeRecognizer;
@@ -4238,6 +4253,7 @@ mod tests {
                 wake: RefCell::new(Some(wake_detector)),
                 recognizer: RefCell::new(Some(recognizer)),
                 cues: RefCell::new(Some(cues)),
+                local,
             };
             let texts = Arc::new(Mutex::new(Vec::new()));
             let host = TestHost(Arc::new(Mutex::new(Vec::new())), Arc::clone(&texts));
@@ -4689,6 +4705,23 @@ mod tests {
         Connected,
     }
 
+    async fn deliver_with_microphone(mut script: FedRun) {
+        deliver(&mut script).await;
+        assert_eq!(script.pasted(), ["Hello"]);
+        status_until(
+            &mut script.status,
+            "the paste was not reported as delivered",
+            |status| matches!(status, Status::Done { route, .. } if *route == CaptureRoute::Paste),
+        )
+        .await;
+        assert_eq!(
+            script.audio.borrow().active.as_deref(),
+            Some("Test microphone")
+        );
+        assert_eq!(script.opens.get(), 1);
+        script.stop().await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn scripted_feed_keeps_pause_keys_retry_and_a_connected_microphone() {
         for case in [
@@ -4706,7 +4739,7 @@ mod tests {
             LocalSet::new()
                 .run_until(async {
                     let missing = !matches!(case, KeptFeed::Connected);
-                    let mut script = FedRun::start(missing, false);
+                    let script = FedRun::start(missing, false);
                     if missing {
                         yield_until(
                             &format!("{label}: the missing microphone was not reported"),
@@ -4774,17 +4807,7 @@ mod tests {
                             assert!(script.audio.borrow().active.is_none(), "{label}");
                             script.stop().await;
                         }
-                        KeptFeed::Connected => {
-                            deliver(&mut script).await;
-                            assert_eq!(script.pasted(), ["Hello"], "{label}");
-                            assert_eq!(
-                                script.audio.borrow().active.as_deref(),
-                                Some("Test microphone"),
-                                "{label}"
-                            );
-                            assert_eq!(script.opens.get(), 1, "{label}");
-                            script.stop().await;
-                        }
+                        KeptFeed::Connected => deliver_with_microphone(script).await,
                     }
                 })
                 .await;
@@ -4880,14 +4903,48 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn startup_shows_the_speech_model_download_before_the_first_capture() {
+        LocalSet::new()
+            .run_until(async {
+                let (release, gate) = oneshot::channel();
+                let local = LocalRecognizer::new(
+                    Scripted {
+                        gate: std::sync::Mutex::new(Some(gate)),
+                        fails: false,
+                    },
+                    "test",
+                    Recorder::disabled().metrics(),
+                );
+                let mut script = FedRun::with_local(false, false, Some(Arc::new(local)));
+                let notice = load_notice(Step::Fetching(gpu_files()));
+                status_until(&mut script.status, "the download was not shown at startup", |status| {
+                    matches!(status, Status::Loading { notice: shown, downloading: true } if *shown == notice)
+                })
+                .await;
+                release.send(()).unwrap();
+                status_until(&mut script.status, "listening was not shown after loading", |status| {
+                    matches!(status, Status::Listening)
+                })
+                .await;
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn changed_settings_publish_the_selected_microphone() {
         LocalSet::new()
             .run_until(async {
                 let script = FedRun::start(false, false);
+                script.link.send(Control::Apply(Box::new(feed_config())));
                 yield_until("listening did not start", || {
                     matches!(&*script.status.borrow(), Status::Listening)
                 })
                 .await;
+                assert_eq!(
+                    script.audio.borrow().active.as_deref(),
+                    Some("Test microphone")
+                );
                 script.link.send(Control::Apply(Box::new(DesktopConfig {
                     microphone: Some("USB Mic".to_owned()),
                     ..feed_config()

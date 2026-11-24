@@ -1013,11 +1013,16 @@ mod tests {
         assert_eq!(bound.window().as_deref(), Some("firefox"));
         let failed = Bound::<FakeWindow>(Err(HostError::Unsupported(String::new())));
         assert_eq!(failed.window(), None);
-        for (host, expected) in [
-            (FakeHost::default(), Some(WindowApp::new("firefox", ""))),
-            (FakeHost::default().clipboard_only(), None),
+        for (host, copies_only, expected) in [
+            (
+                FakeHost::default(),
+                false,
+                Some(WindowApp::new("firefox", "")),
+            ),
+            (FakeHost::default().clipboard_only(), true, None),
         ] {
             let delivery = Delivery::new(host);
+            assert_eq!(delivery.copies_only(), copies_only);
             assert_eq!(delivery.writing_target(&bound), expected);
             assert_eq!(delivery.writing_target(&failed), None);
         }

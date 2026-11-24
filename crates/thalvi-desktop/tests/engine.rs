@@ -2259,7 +2259,7 @@ enum Reply {
 }
 
 /// A secondary transcription endpoint; reports how many frames each uploaded WAV holds.
-async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<usize>) {
+async fn serve(reply: Reply) -> (String, Uploads<usize>) {
     serve_logged([reply], |body| {
         let riff = body.windows(4).position(|w| w == b"RIFF").unwrap();
         let data = u32::from_le_bytes(body[riff + 40..riff + 44].try_into().unwrap());
@@ -2269,10 +2269,25 @@ async fn serve(reply: Reply) -> (String, tokio::sync::mpsc::UnboundedReceiver<us
     .await
 }
 
+/// Observes the uploads an endpoint received without waiting forever for a missing request.
+struct Uploads<T>(tokio::sync::mpsc::UnboundedReceiver<T>);
+
+impl<T> Uploads<T> {
+    async fn recv(&mut self) -> Option<T> {
+        tokio::time::timeout(Duration::from_secs(5), self.0.recv())
+            .await
+            .expect("no upload reached the transcription endpoint")
+    }
+
+    fn try_recv(&mut self) -> Result<T, tokio::sync::mpsc::error::TryRecvError> {
+        self.0.try_recv()
+    }
+}
+
 async fn serve_logged<T: Send + 'static>(
     replies: impl IntoIterator<Item = Reply>,
     log: impl Fn(&[u8]) -> T + Clone + Send + Sync + 'static,
-) -> (String, tokio::sync::mpsc::UnboundedReceiver<T>) {
+) -> (String, Uploads<T>) {
     use axum::Router;
     use axum::body::to_bytes;
     use axum::extract::Request;
@@ -2314,7 +2329,7 @@ async fn serve_logged<T: Send + 'static>(
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (url, rx)
+    (url, Uploads(rx))
 }
 
 /// A config with a direct speech entry live, a chat endpoint at `chat_url` and these extras, in
@@ -3007,16 +3022,27 @@ async fn merge_off_pastes_the_live_text_at_once_and_only_records_what_each_extra
                 ("Silent", Reply::Stall, "timeout", None),
             ] {
                 let dir = record_dir(&format!("merge-off-{outcome}"));
-                let (extra, _uploads) = serve(reply).await;
+                let (extra, mut uploads) = serve(reply).await;
                 let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("unused"))).await;
                 let config = extras_config(&chat_url, Some(false), &[(name, &extra, true)]);
-                let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+                let recorder = Recorder::in_dir(
+                    RecordKinds {
+                        audio: false,
+                        ..ALL
+                    },
+                    &dir,
+                )
+                .unwrap();
                 let (mut rig, engine, frames) = Rig::recording(&config, recorder);
                 let states = watch_states(&rig);
                 let task = capture_and_listen(&rig, engine, frames, 0);
                 live_words(&mut rig).await;
                 let pasted = finished(task).await;
 
+                assert!(
+                    uploads.recv().await.unwrap() > 0,
+                    "{name}: the extra heard audio"
+                );
                 assert_eq!(pasted.outcome, accepted(CaptureRoute::Paste, "live words"));
                 assert_eq!(
                     pasted.at, MERGE_STARTS,
@@ -3075,7 +3101,10 @@ async fn a_capture_does_not_wait_for_the_previous_captures_extra() {
             let states = watch_states(&rig);
             let (worker, mut captures) = captures_and_listen(&rig, engine, frames, 2);
             live_words(&mut rig).await;
-            let first = captures.recv().await.unwrap();
+            let first = tokio::time::timeout(Duration::from_secs(5), captures.recv())
+                .await
+                .expect("the first capture should finish before its extra")
+                .unwrap();
             assert_eq!(first.0, accepted(CaptureRoute::Paste, "live words"));
             assert_eq!(first.1, MERGE_STARTS);
 
@@ -5094,6 +5123,31 @@ async fn an_interrupted_listener_keeps_a_hold_or_reports_a_tap_before_it_resumes
             assert_eq!(engine.take_ignored(), []);
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_press_after_the_callers_last_check_survives_resuming_the_listener() {
+    let (rig, mut engine, mut frames) = Rig::new("{}");
+    let mut presses = engine.stop_listening();
+    rig.key.set(true);
+    assert!(
+        presses.take().is_some(),
+        "the caller accounts for the first press"
+    );
+    rig.key.set(false);
+    rig.key.set(true);
+    engine.resume_listening(presses);
+    assert_eq!(
+        tokio::time::timeout(ms(5), engine.listen(&mut frames))
+            .await
+            .expect("the next press must start a hold")
+            .unwrap(),
+        WakeTrigger::Hold
+    );
+    assert!(
+        engine.take_ignored().is_empty(),
+        "the first press is counted only once"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -8625,6 +8679,42 @@ async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
                     "input returns after the remaining cue stops"
                 );
             }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_microphone_error_while_listening_does_not_cut_the_previous_accepted_cue() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, mut engine, mut frames) = Rig::new("{}");
+            rig.cues.set_length(Cue::Accepted, ms(1000));
+            let task = tokio::task::spawn_local(async move {
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                assert_eq!(
+                    engine.capture(&mut frames, None).await,
+                    accepted(CaptureRoute::Paste, "hello world")
+                );
+                let next = engine.listen(&mut frames).await;
+                (engine, next)
+            });
+            rig.hold().await;
+            rig.say(1000, Say::Partial("hello world")).await;
+            rig.release(1200).await;
+            rig.say(1250, Say::Final("hello world")).await;
+            assert_eq!(rig.started(Cue::Accepted), [1250]);
+            rig.feed.fail(AudioError::DeviceLost);
+            let (engine, next) = finished(task).await;
+            assert!(matches!(
+                next,
+                Err(ListenError::Audio(AudioError::DeviceLost))
+            ));
+            assert!(!rig.cue_log().contains(&(1250, CueLog::Cut(Cue::Accepted))));
+            engine.finish().await;
+            assert!(
+                rig.cue_log()
+                    .contains(&(2250, CueLog::Finished(Cue::Accepted)))
+            );
         })
         .await;
 }
