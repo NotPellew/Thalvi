@@ -988,18 +988,19 @@ fn settled(joined: Result<Answer, JoinError>) -> Option<Answer> {
 /// The next answer of an extra the merge did not wait for; never ready while none is running.
 async fn next_recorded(sets: &mut Vec<JoinSet<Answer>>) -> Answer {
     std::future::poll_fn(|cx| {
-        let mut at = 0;
-        while let Some(set) = sets.get_mut(at) {
-            match set.poll_join_next(cx) {
-                Poll::Ready(None) => {
-                    sets.swap_remove(at);
-                }
-                Poll::Ready(Some(joined)) => {
-                    if let Some(answer) = settled(joined) {
-                        return Poll::Ready(answer);
+        for at in 0..sets.len() {
+            while let Some(set) = sets.get_mut(at) {
+                match set.poll_join_next(cx) {
+                    Poll::Ready(None) => {
+                        sets.swap_remove(at);
                     }
+                    Poll::Ready(Some(joined)) => {
+                        if let Some(answer) = settled(joined) {
+                            return Poll::Ready(answer);
+                        }
+                    }
+                    Poll::Pending => break,
                 }
-                Poll::Pending => at += 1,
             }
         }
         Poll::Pending
