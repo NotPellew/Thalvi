@@ -4,7 +4,6 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::pin;
-use std::rc::Rc;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -116,6 +115,7 @@ pub struct AudioStatus {
 /// The app's side of the engine thread.
 pub struct EngineLink {
     control: mpsc::UnboundedSender<Control>,
+    publisher: Arc<Publisher>,
     status: watch::Receiver<Status>,
     level: watch::Receiver<f32>,
     audio: watch::Receiver<AudioStatus>,
@@ -182,6 +182,8 @@ impl EngineLink {
             notice: STARTING_NOTICE.to_owned(),
             downloading: false,
         });
+        let publisher = Publisher::new(status_tx, config.ending_pause);
+        publisher.update(|view| view.wake_words = config.wake.enabled());
         let (level_tx, level) = watch::channel(0.0);
         let (audio_tx, audio) = watch::channel(AudioStatus {
             selected: config.microphone.clone(),
@@ -194,6 +196,7 @@ impl EngineLink {
         let (stopped_tx, stopped) = std_mpsc::channel();
         let link = Self {
             control,
+            publisher: Arc::clone(&publisher),
             status,
             level,
             audio,
@@ -204,7 +207,7 @@ impl EngineLink {
         };
         let ends = RunnerEnds {
             control: control_rx,
-            status: status_tx,
+            publisher,
             level: Arc::new(level_tx),
             audio: audio_tx,
             feeding: Arc::new(feeding_tx),
@@ -212,6 +215,12 @@ impl EngineLink {
             last_writing_window,
         };
         (link, ends, stopped_tx)
+    }
+
+    /// Marks that a saved settings change requiring an engine rebuild is on its way, so every
+    /// status reader sees Loading before the runner even receives `Control::Apply`.
+    pub fn begin_rebuild(&self) {
+        self.publisher.queue_rebuild();
     }
 
     /// Where the hold key's presses and releases come in.
@@ -293,7 +302,7 @@ impl EngineLink {
 
 struct RunnerEnds {
     control: mpsc::UnboundedReceiver<Control>,
-    status: watch::Sender<Status>,
+    publisher: Arc<Publisher>,
     level: Arc<watch::Sender<f32>>,
     audio: watch::Sender<AudioStatus>,
     feeding: Arc<watch::Sender<bool>>,
@@ -311,13 +320,11 @@ impl RunnerEnds {
         history: Arc<History>,
         drafts: Arc<Drafts>,
     ) {
-        let publisher = Publisher::new(self.status, config.ending_pause);
-        publisher.update(|view| view.wake_words = config.wake.enabled());
         Runner::new(
             config,
             delivery,
             self.control,
-            publisher,
+            self.publisher,
             self.level,
             self.audio,
             Shared {
@@ -403,36 +410,59 @@ async fn load_spotter(
     }
 }
 
+struct PublisherState {
+    view: View,
+    /// Incremented each time a saved settings change requiring a rebuild is queued for the runner.
+    requested_apply: u64,
+    /// Latest `requested_apply` whose `Runner::apply` has completed (including `resume_listening`).
+    completed_apply: u64,
+    /// True while `Runner::apply` is executing a rebuild.
+    applying: bool,
+}
+
+impl PublisherState {
+    fn sync_rebuilding(&mut self) {
+        self.view.rebuilding = self.applying || self.completed_apply < self.requested_apply;
+    }
+}
+
 /// Derives the status from the view and publishes it when it changes.
 pub(crate) struct Publisher {
-    view: RefCell<View>,
+    state: Mutex<PublisherState>,
     out: watch::Sender<Status>,
     /// The failure the last speech model load showed, so a reload clears that and no other.
-    load_failure: RefCell<Option<Failure>>,
+    load_failure: Mutex<Option<Failure>>,
 }
 
 impl Publisher {
-    fn new(out: watch::Sender<Status>, pauses: EndingPauses) -> Rc<Self> {
-        Rc::new(Self {
-            view: RefCell::new(View {
-                // The models load before the first capture can start.
-                mode: Mode::Starting,
-                engine: EngineState::Listening,
-                target: None,
-                copies: false,
-                pauses,
-                loading: None,
-                wake_words: true,
+    fn new(out: watch::Sender<Status>, pauses: EndingPauses) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(PublisherState {
+                view: View {
+                    // The models load before the first capture can start.
+                    mode: Mode::Starting,
+                    engine: EngineState::Listening,
+                    target: None,
+                    copies: false,
+                    pauses,
+                    loading: None,
+                    wake_words: true,
+                    rebuilding: false,
+                },
+                requested_apply: 0,
+                completed_apply: 0,
+                applying: false,
             }),
             out,
-            load_failure: RefCell::new(None),
+            load_failure: Mutex::new(None),
         })
     }
 
-    fn update(&self, change: impl FnOnce(&mut View)) {
-        let mut view = self.view.borrow_mut();
-        change(&mut view);
-        let status = view.status();
+    fn mutate<R>(&self, change: impl FnOnce(&mut PublisherState) -> R) -> R {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let result = change(&mut state);
+        state.sync_rebuilding();
+        let status = state.view.status();
         self.out.send_if_modified(|current| {
             if *current == status {
                 return false;
@@ -440,19 +470,71 @@ impl Publisher {
             *current = status;
             true
         });
+        result
+    }
+
+    fn update(&self, change: impl FnOnce(&mut View)) {
+        self.mutate(|state| change(&mut state.view));
+    }
+
+    fn queue_rebuild(&self) {
+        self.mutate(|state| {
+            state.requested_apply += 1;
+        });
+    }
+
+    fn start_apply(&self) -> u64 {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.requested_apply
+    }
+
+    fn set_applying(&self, applying: bool) {
+        self.mutate(|state| {
+            state.applying = applying;
+        });
+    }
+
+    fn finish_apply(&self, seq: u64) {
+        self.mutate(|state| {
+            state.completed_apply = state.completed_apply.max(seq);
+            state.applying = false;
+        });
     }
 
     fn failed(&self) -> bool {
-        matches!(self.view.borrow().mode, Mode::Failed(_))
+        matches!(
+            self.state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .view
+                .mode,
+            Mode::Failed(_)
+        )
     }
 
     /// Whether the status shows an overlay failure, which recovery may clear.
     fn overlay_failed(&self) -> bool {
-        matches!(&self.view.borrow().mode, Mode::Failed(failure) if failure.headline == "Status overlay unavailable")
+        matches!(
+            &self
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .view
+                .mode,
+            Mode::Failed(failure) if failure.headline == "Status overlay unavailable"
+        )
     }
 
     fn hold_failed(&self) -> bool {
-        matches!(&self.view.borrow().mode, Mode::Failed(failure) if failure.headline == "Hold key unavailable")
+        matches!(
+            &self
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .view
+                .mode,
+            Mode::Failed(failure) if failure.headline == "Hold key unavailable"
+        )
     }
 
     fn mode(&self, mode: Mode) {
@@ -461,7 +543,12 @@ impl Publisher {
 
     /// Takes the speech model load failure off the status, if it still shows it, so the next load shows its progress.
     fn load_retried(&self) {
-        let Some(failure) = self.load_failure.take() else {
+        let Some(failure) = self
+            .load_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
             return;
         };
         self.update(|view| {
@@ -500,8 +587,17 @@ impl Publisher {
         self.out.send_modify(|_| {});
     }
 
-    fn notice_sink(self: &Rc<Self>) -> Box<dyn Fn(&str)> {
-        let publisher = Rc::clone(self);
+    #[cfg(test)]
+    fn view(&self) -> View {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .view
+            .clone()
+    }
+
+    fn notice_sink(self: &Arc<Self>) -> Box<dyn Fn(&str)> {
+        let publisher = Arc::clone(self);
         Box::new(move |notice| {
             println!("{notice}");
             if !publisher.failed() {
@@ -545,7 +641,10 @@ async fn load_showing(local: &(impl Preload + ?Sized), publisher: &Publisher) {
                 headline: error.headline(),
                 causes: causes(&error),
             };
-            *publisher.load_failure.borrow_mut() = Some(failure.clone());
+            *publisher
+                .load_failure
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(failure.clone());
             view.mode = Mode::Failed(failure);
         }
     });
@@ -567,7 +666,7 @@ pub(crate) trait Rig: Sized {
         &self,
         config: &DesktopConfig,
         gate: &InputGate,
-        publisher: &Rc<Publisher>,
+        publisher: &Arc<Publisher>,
     ) -> Result<Loaded<Self>, Failure>;
     fn input(&self, gate: InputGate, device: Option<String>, metrics: Metrics) -> Self::Input;
 }
@@ -658,7 +757,7 @@ impl Rig for DesktopRig {
         &self,
         config: &DesktopConfig,
         gate: &InputGate,
-        publisher: &Rc<Publisher>,
+        publisher: &Arc<Publisher>,
     ) -> Result<Loaded<Self>, Failure> {
         let recorder =
             Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
@@ -860,7 +959,7 @@ struct Runner<S: Rig> {
     /// cannot read the window that was focused before it opened. The title never leaves this.
     last_writing_window: Arc<Mutex<Option<WindowApp>>>,
     control: mpsc::UnboundedReceiver<Control>,
-    publisher: Rc<Publisher>,
+    publisher: Arc<Publisher>,
     level: Arc<watch::Sender<f32>>,
     audio: watch::Sender<AudioStatus>,
     delivery: Arc<Delivery<S::Host>>,
@@ -880,7 +979,7 @@ impl<S: Rig> Runner<S> {
         config: DesktopConfig,
         delivery: Arc<Delivery<S::Host>>,
         control: mpsc::UnboundedReceiver<Control>,
-        publisher: Rc<Publisher>,
+        publisher: Arc<Publisher>,
         level: Arc<watch::Sender<f32>>,
         audio: watch::Sender<AudioStatus>,
         shared: Shared<S>,
@@ -962,7 +1061,7 @@ impl<S: Rig> Runner<S> {
         if local.is_none() && extras.is_empty() {
             return;
         }
-        let publisher = Rc::clone(&self.publisher);
+        let publisher = Arc::clone(&self.publisher);
         self.loading = Some(tokio::task::spawn_local(async move {
             // An extra whose model cannot load fails per capture, with its own notice.
             let preload = async {
@@ -1038,7 +1137,7 @@ impl<S: Rig> Runner<S> {
         tokio::task::spawn_local(follow(
             handle.state(),
             handle.level(),
-            Rc::clone(&self.publisher),
+            Arc::clone(&self.publisher),
             Arc::clone(&self.level),
             self.audio.subscribe(),
         ));
@@ -1390,22 +1489,26 @@ impl<S: Rig> Runner<S> {
 
     /// Applies `config` to the running engine where possible. A failed rebuild keeps the old engine.
     async fn apply(&mut self, config: DesktopConfig) {
-        if config == self.config {
-            return;
+        let seq = self.publisher.start_apply();
+        if config != self.config {
+            // The engine is rebuilt with the microphone it has; a changed one is opened beside it afterwards.
+            let wanted = config.microphone.clone();
+            let rest = DesktopConfig {
+                microphone: self.config.microphone.clone(),
+                ..config
+            };
+            if rest != self.config {
+                if !retunes_only(&self.config, &rest) {
+                    self.publisher.set_applying(true);
+                }
+                self.apply_engine(rest).await;
+            }
+            if wanted != self.config.microphone {
+                self.config.microphone = wanted;
+                self.switch_microphone().await;
+            }
         }
-        // The engine is rebuilt with the microphone it has; a changed one is opened beside it afterwards.
-        let wanted = config.microphone.clone();
-        let rest = DesktopConfig {
-            microphone: self.config.microphone.clone(),
-            ..config
-        };
-        if rest != self.config {
-            self.apply_engine(rest).await;
-        }
-        if wanted != self.config.microphone {
-            self.config.microphone = wanted;
-            self.switch_microphone().await;
-        }
+        self.publisher.finish_apply(seq);
     }
 
     /// Opens the selected microphone beside the one open, or says why it could not and leaves the
@@ -1457,6 +1560,9 @@ impl<S: Rig> Runner<S> {
 
     /// Closes the microphone and replaces the engine by one built from `config`.
     async fn rebuild(&mut self, config: DesktopConfig) {
+        if !self.paused {
+            self.publisher.mode(Mode::Starting);
+        }
         self.close_microphone();
         match self.build(&config).await {
             Ok(session) => {
@@ -1809,9 +1915,19 @@ fn hold_failure(notice: String) -> Failure {
     }
 }
 
+/// Whether changing from `old` to `new` rebuilds the engine (closing and reopening the microphone).
+pub(crate) fn needs_rebuild(old: &DesktopConfig, new: &DesktopConfig) -> bool {
+    let rest = DesktopConfig {
+        microphone: old.microphone.clone(),
+        ..new.clone()
+    };
+    rest != *old && !retunes_only(old, &rest)
+}
+
 /// Whether `new` differs from `old` only in settings a running engine takes without a rebuild.
 fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
     *old == DesktopConfig {
+        look: old.look,
         recordings: old.recordings,
         history: old.history,
         update_channel: old.update_channel,
@@ -1994,7 +2110,7 @@ async fn drive<O>(
 async fn follow(
     mut state: watch::Receiver<EngineState>,
     mut level: watch::Receiver<f32>,
-    publisher: Rc<Publisher>,
+    publisher: Arc<Publisher>,
     level_out: Arc<watch::Sender<f32>>,
     audio: watch::Receiver<AudioStatus>,
 ) {
@@ -2329,7 +2445,7 @@ mod tests {
                 tokio::select! {
                     () = &mut load => panic!("{case}: finished before the GPU download was shown"),
                     () = async {
-                        while publisher.view.borrow().loading != Some(Step::Fetching(gpu_files())) {
+                        while publisher.view().loading != Some(Step::Fetching(gpu_files())) {
                             tokio::task::yield_now().await;
                         }
                     } => {}
@@ -2347,8 +2463,8 @@ mod tests {
             }
             release.send(()).unwrap();
             load.await;
-            assert_eq!(publisher.view.borrow().loading, None, "{case}: loading ends");
-            assert_eq!(publisher.view.borrow().mode, shown, "{case}");
+            assert_eq!(publisher.view().loading, None, "{case}: loading ends");
+            assert_eq!(publisher.view().mode, shown, "{case}");
         }
     }
 
@@ -2428,7 +2544,7 @@ mod tests {
             load_showing(&local, &publisher).await;
             publisher.mode(then);
             publisher.load_retried();
-            assert_eq!(publisher.view.borrow().mode, shown, "{case}");
+            assert_eq!(publisher.view().mode, shown, "{case}");
         }
     }
 
@@ -2507,7 +2623,7 @@ mod tests {
     /// A load of a model being downloaded, driven by the returned sender, and the status it publishes.
     fn loading_download() -> (
         mpsc::UnboundedSender<Step>,
-        Rc<Publisher>,
+        Arc<Publisher>,
         JoinHandle<()>,
         watch::Receiver<Status>,
     ) {
@@ -2525,7 +2641,7 @@ mod tests {
             Recorder::disabled().metrics(),
         ));
         let load = tokio::task::spawn_local({
-            let publisher = Rc::clone(&publisher);
+            let publisher = Arc::clone(&publisher);
             async move { load_showing(&local, &publisher).await }
         });
         (steps, publisher, load, status)
@@ -2885,6 +3001,7 @@ mod tests {
             (r#"{"recordings": {"text": true}}"#, false),
             (r#"{"update_channel": "development"}"#, false),
             (r#"{"history": {"enabled": false}}"#, false),
+            (r#"{"look": "neon"}"#, false),
             (
                 r#"{"themes":{"version":1,"gunmetal":{"font":{"scale":1.25}}}}"#,
                 false,
@@ -2893,12 +3010,20 @@ mod tests {
                 r#"{"history": {"limit": 5}, "recordings": {"audio": true}}"#,
                 false,
             ),
+            (r#"{"history": {"limit": 5}, "look": "neon"}"#, false),
             // The wake switch is a retune: the model stays loaded and the microphone open.
             (r#"{"wake": {"enabled": false}}"#, false),
-            (r#"{"wake": {"enabled": false}, "look": "neon"}"#, true),
+            (r#"{"wake": {"enabled": false}, "look": "neon"}"#, false),
             (r#"{"wake": {"capture": {"model": "hey_jarvis"}}}"#, true),
-            (r#"{"look": "neon"}"#, true),
-            (r#"{"history": {"limit": 5}, "look": "neon"}"#, true),
+            (r#"{"ending_pause": {"paste": 1.0}}"#, true),
+            (
+                r#"{"wake": {"enabled": false}, "ending_pause": {"paste": 1.0}}"#,
+                true,
+            ),
+            (
+                r#"{"history": {"limit": 5}, "ending_pause": {"paste": 1.0}}"#,
+                true,
+            ),
         ] {
             let new = DesktopConfig::from_json_str(change).unwrap();
             assert_eq!(!retunes_only(&old, &new), rebuilds, "{change}");
@@ -3715,7 +3840,7 @@ mod tests {
             &self,
             _: &DesktopConfig,
             _: &InputGate,
-            _: &Rc<Publisher>,
+            _: &Arc<Publisher>,
         ) -> Result<Loaded<Self>, Failure> {
             std::future::pending().await
         }
@@ -3729,13 +3854,13 @@ mod tests {
     async fn working_hold_keys_clear_the_shown_or_pending_failure_without_ending_a_capture() {
         let config = DesktopConfig::from_json_str("{}").unwrap();
         let (link, ends, _) = EngineLink::wire(&config, false);
-        let publisher = Publisher::new(ends.status, config.ending_pause);
+        let publisher = ends.publisher;
         publisher.mode(Mode::Idle);
         let mut runner = Runner::new(
             config,
             Arc::new(Delivery::new(TestHost::default())),
             ends.control,
-            Rc::clone(&publisher),
+            Arc::clone(&publisher),
             ends.level,
             ends.audio,
             Shared {
@@ -3756,7 +3881,7 @@ mod tests {
                 runner.open_microphone().await;
                 runner.show_hold_problem();
                 assert!(
-                    matches!(&publisher.view.borrow().mode, Mode::Failed(f) if f.headline == "Hold key unavailable")
+                    matches!(&publisher.view().mode, Mode::Failed(f) if f.headline == "Hold key unavailable")
                 );
             }
             link.hold_problems()(HoldReport::Working);
@@ -3767,7 +3892,7 @@ mod tests {
                 "recovery clears a pending hold failure"
             );
             assert_eq!(
-                publisher.view.borrow().mode,
+                publisher.view().mode,
                 Mode::Idle,
                 "recovery clears a shown hold failure"
             );
@@ -3792,13 +3917,13 @@ mod tests {
             .await;
         runner.show_hold_problem();
         assert_eq!(
-            publisher.view.borrow().mode,
+            publisher.view().mode,
             other,
             "a pending hold warning must wait while another failure is visible"
         );
         runner.handle(Control::HoldKeyWorks).await;
         assert_eq!(
-            publisher.view.borrow().mode,
+            publisher.view().mode,
             other,
             "unrelated failures stay visible"
         );
@@ -4163,7 +4288,7 @@ mod tests {
             &self,
             _: &DesktopConfig,
             _: &InputGate,
-            _: &Rc<Publisher>,
+            _: &Arc<Publisher>,
         ) -> impl Future<Output = Result<Loaded<Self>, Failure>> {
             use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeWake};
             use thalvi_desktop::recognizer::FakeRecognizer;
@@ -4493,7 +4618,7 @@ mod tests {
             &self,
             config: &DesktopConfig,
             _: &InputGate,
-            _: &Rc<Publisher>,
+            _: &Arc<Publisher>,
         ) -> impl Future<Output = Result<Loaded<Self>, Failure>> {
             use thalvi_desktop::wake::HeadModel;
 
@@ -5462,5 +5587,236 @@ mod tests {
                 script.stop().await;
             })
             .await;
+    }
+
+    struct SwitchMic {
+        gate: InputGate,
+        opened: bool,
+        held: Option<thalvi_desktop::engine::fakes::FrameFeed>,
+        entered: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<()>>,
+    }
+
+    impl Input for SwitchMic {
+        type Frames = thalvi_desktop::engine::fakes::FakeFrames;
+
+        fn active_name(&self) -> Option<&str> {
+            self.opened.then_some("Test microphone")
+        }
+
+        fn select(&mut self, _: Option<String>) {}
+
+        fn pause(&mut self) {
+            self.opened = false;
+            self.held = None;
+        }
+
+        async fn open(mut self) -> Result<(Self, Result<Self::Frames, Failure>), Failure> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+            }
+            if let Some(release) = self.release.take() {
+                let _ = release.await;
+            }
+            let (frames, feed) = thalvi_desktop::engine::fakes::FakeFrames::new(&self.gate);
+            self.opened = true;
+            self.held = Some(feed);
+            Ok((self, Ok(frames)))
+        }
+
+        async fn replace(self) -> Result<(Self, Result<Self::Frames, Failure>), Failure> {
+            self.open().await
+        }
+    }
+
+    struct SwitchLab {
+        recognizers:
+            RefCell<std::collections::VecDeque<thalvi_desktop::recognizer::FakeRecognizer>>,
+        load_gate: RefCell<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+        open_gate: RefCell<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+        loads: Cell<u32>,
+    }
+
+    impl Rig for SwitchLab {
+        type Recognizer = thalvi_desktop::recognizer::FakeRecognizer;
+        type Wake = thalvi_desktop::engine::fakes::FakeWake;
+        type Cues = thalvi_desktop::engine::fakes::FakeCuePlayer;
+        type Input = SwitchMic;
+        type Host = TestHost;
+
+        async fn load(
+            &self,
+            _: &DesktopConfig,
+            _: &InputGate,
+            _: &Arc<Publisher>,
+        ) -> Result<Loaded<Self>, Failure> {
+            use thalvi_desktop::cues::Cue;
+            use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeWake};
+
+            let load_number = self.loads.get() + 1;
+            self.loads.set(load_number);
+            let gate = (load_number == 2)
+                .then(|| self.load_gate.borrow_mut().take())
+                .flatten();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+            let recognizer = self.recognizers.borrow_mut().pop_front().unwrap();
+            let (wake, _) = FakeWake::new();
+            let (cues, cue_control) = FakeCuePlayer::new();
+            for cue in [
+                Cue::Wake,
+                Cue::Provisional,
+                Cue::Accepted,
+                Cue::Cancelled,
+                Cue::Error,
+            ] {
+                cue_control.set_length(cue, Duration::ZERO);
+            }
+            Ok(Loaded {
+                recognizer,
+                wake,
+                cues,
+                recorder: Recorder::disabled(),
+                http: reqwest::Client::new(),
+                chat: None,
+                spotter: None,
+                spotter_off: None,
+                extras: Vec::new(),
+                local: None,
+                extra_locals: Vec::new(),
+            })
+        }
+
+        fn input(&self, gate: InputGate, _: Option<String>, _: Metrics) -> SwitchMic {
+            let (entered, release) = if self.loads.get() == 2 {
+                self.open_gate
+                    .borrow_mut()
+                    .take()
+                    .map_or((None, None), |(e, r)| (Some(e), Some(r)))
+            } else {
+                (None, None)
+            };
+            SwitchMic {
+                gate,
+                opened: false,
+                held: None,
+                entered,
+                release,
+            }
+        }
+    }
+
+    async fn wait_status(
+        status: &mut watch::Receiver<Status>,
+        label: &str,
+        mut matches: impl FnMut(&Status) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches(&status.borrow_and_update()) {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{label}: last status {:?}", *status.borrow()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn switching_the_live_recognizer_shows_loading_until_a_hold_reaches_it() {
+        use std::collections::VecDeque;
+        use thalvi_desktop::recognizer::FakeRecognizer;
+
+        let on_device = DesktopConfig::from_json_str(
+            r#"{"stt":{"entries":[{"kind":"on_device","id":"dev","name":"On this computer","active":true,"model":"nemotron_160ms"}]}}"#,
+        )
+        .unwrap();
+        let streaming = DesktopConfig::from_json_str(
+            r#"{"stt":{"entries":[{"kind":"realtime","id":"rig","name":"Rig","active":true,"address":"ws://127.0.0.1:1","model":"test"},{"kind":"on_device","id":"dev","name":"On this computer","active":false,"model":"nemotron_160ms"}]}}"#,
+        )
+        .unwrap();
+        assert!(needs_rebuild(&on_device, &streaming));
+
+        for press_during_loading in [false, true] {
+            LocalSet::new()
+                .run_until(async {
+                    let (first_rec, _first_ctl) = FakeRecognizer::new();
+                    let (second_rec, mut second_ctl) = FakeRecognizer::new();
+                    second_ctl.fail("Could not reach the speech server.");
+
+                    let (load_entered_tx, load_entered) = oneshot::channel();
+                    let (load_release, load_release_rx) = oneshot::channel();
+                    let (open_entered_tx, open_entered) = oneshot::channel();
+                    let (open_release, open_release_rx) = oneshot::channel();
+                    let lab = SwitchLab {
+                        recognizers: RefCell::new(VecDeque::from([first_rec, second_rec])),
+                        load_gate: RefCell::new(Some((load_entered_tx, load_release_rx))),
+                        open_gate: RefCell::new(Some((open_entered_tx, open_release_rx))),
+                        loads: Cell::new(0),
+                    };
+                    let (link, ends, _) = EngineLink::wire(&on_device, false);
+                    let mut status = link.status_updates();
+                    let running = tokio::task::spawn_local(ends.run(
+                        on_device.clone(),
+                        false,
+                        lab,
+                        Arc::new(Delivery::new(TestHost::default())),
+                        Arc::new(History::at("unused-switch-history")),
+                        Arc::new(Drafts::default()),
+                    ));
+
+                    wait_status(&mut status, "initial recognizer ready", |s| {
+                        *s == Status::Listening
+                    })
+                    .await;
+
+                    link.begin_rebuild();
+                    link.send(Control::Apply(Box::new(streaming.clone())));
+                    assert!(matches!(link.status(), Status::Loading { .. }));
+
+                    tokio::time::timeout(Duration::from_secs(5), load_entered)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(matches!(link.status(), Status::Loading { .. }));
+                    if press_during_loading {
+                        link.hold_input().set(true);
+                        link.hold_input().set(false);
+                    }
+
+                    load_release.send(()).unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), open_entered)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(matches!(link.status(), Status::Loading { .. }));
+                    open_release.send(()).unwrap();
+
+                    if press_during_loading {
+                        wait_status(&mut status, "press during Loading refused", |s| {
+                            matches!(s, Status::Failed { headline, .. } if *headline == Refusal::MicrophoneClosed.headline())
+                        })
+                        .await;
+                    } else {
+                        wait_status(&mut status, "switched recognizer ready", |s| {
+                            *s == Status::Listening
+                        })
+                        .await;
+                    }
+
+                    link.hold_input().set(true);
+                    wait_status(&mut status, "hold reaches new recognizer", |s| {
+                        matches!(s, Status::Failed { notice, headline, .. }
+                            if notice.contains("Could not reach the speech server.")
+                            && *headline != Refusal::MicrophoneClosed.headline())
+                    })
+                    .await;
+                    link.hold_input().set(false);
+
+                    link.send(Control::Quit);
+                    running.await.unwrap();
+                })
+                .await;
+        }
     }
 }

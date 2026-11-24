@@ -415,6 +415,25 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
       { kind: "click", name: "Clear saved key" },
     ],
   },
+  {
+    issue: 620,
+    title: "error bar clears while Copied is focused",
+    pinned: false,
+    steps: [
+      { kind: "wait", ms: 37_000 },
+      { kind: "click", name: "Copy" },
+      { kind: "wait", ms: 2200 },
+    ],
+  },
+  {
+    issue: 620,
+    title: "Dismiss error in the footer bar",
+    pinned: false,
+    steps: [
+      { kind: "wait", ms: 37_000 },
+      { kind: "click", name: "Dismiss error" },
+    ],
+  },
 ];
 
 function replayLine(seed: number, path: string | undefined): string {
