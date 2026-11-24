@@ -1029,6 +1029,7 @@ async fn an_ending_is_delivered_once_the_quiet_pause_has_passed() {
         .run_until(async {
             for case in cases {
                 let (mut rig, engine, frames) = Rig::new("{}");
+                let _previews = rig.show_live_submit_previews();
                 let task = capture_task(engine, frames);
                 rig.open().await;
                 rig.play(&case.script).await;
@@ -1067,6 +1068,7 @@ async fn speech_while_an_ending_is_pending_is_held_until_it_lasts_then_cancels_t
             assert_eq!(tags(&rig.sent()), tags(&before_ending));
 
             rig.finals("Hello submit").await;
+            rig.show_live_submit().await;
             rig.feed_until(1760, Kind::Quiet).await;
             rig.feed_until(1920, Kind::Voice).await;
             assert_eq!(
@@ -1097,6 +1099,7 @@ async fn speech_while_an_ending_is_pending_is_held_until_it_lasts_then_cancels_t
 
             rig.feed_until(3000, Kind::Quiet).await;
             rig.finals("more words submit").await;
+            rig.show_live_submit().await;
             rig.feed_until(5499, Kind::Quiet).await;
             assert!(!task.is_finished());
             rig.at(5500).await;
@@ -1155,6 +1158,7 @@ async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cance
                     route: CaptureRoute::Paste,
                     text: "Hello".to_owned(),
                     waiting_for_quiet,
+                    preview: None,
                 };
                 for (until, kind) in script {
                     rig.feed_until(*until, *kind).await;
@@ -1392,6 +1396,7 @@ fn pending_task(text: &str, waiting_for_quiet: bool) -> EngineState {
         route: CaptureRoute::Task,
         text: text.to_owned(),
         waiting_for_quiet,
+        preview: None,
     }
 }
 
@@ -1482,6 +1487,7 @@ async fn a_whole_capture_command_runs_after_the_task_pause_and_an_explicit_endin
                     rig.partial(said).await;
                     rig.finals(said).await;
                 }
+                rig.show_live_submit().await;
                 if route == CaptureRoute::Task && finals.len() == 1 {
                     assert_eq!(rig.state(), pending_task(text, false), "{finals:?}");
                 }
@@ -2108,6 +2114,7 @@ async fn an_ending_still_pending_when_the_five_minutes_pass_is_not_delivered() {
             }
             rig.feed_until(299_000, Kind::Voice).await;
             rig.finals("Almost done submit").await;
+            rig.show_live_submit().await;
             rig.feed_until(CAPTURE_OPENS + 299_920, Kind::Voice).await;
             assert!(!task.is_finished(), "speech keeps the countdown waiting");
 
@@ -3379,6 +3386,7 @@ async fn the_state_follows_the_capture() {
                 route: CaptureRoute::Paste,
                 text: "Hello".to_owned(),
                 waiting_for_quiet,
+                preview: None,
             };
             assert_eq!(rig.state(), pending(true), "still speaking");
             rig.feed_until(1760, Kind::Voice).await;
@@ -4236,9 +4244,11 @@ async fn a_new_ending_withholds_audio_again_after_speech_was_relayed() {
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
             rig.finals("Hello submit").await;
+            rig.show_live_submit().await;
             rig.feed_until(1760, Kind::Quiet).await;
             rig.feed_until(2000, Kind::Voice).await;
             rig.finals("submit").await;
+            rig.show_live_submit().await;
             let sent = rig.sent().len();
             rig.feed_until(2640, Kind::Quiet).await;
             assert_eq!(rig.sent().len(), sent, "quiet audio is held again");
@@ -4267,6 +4277,7 @@ async fn quiet_hiss_does_not_count_as_speech_to_a_pending_ending() {
                 route: CaptureRoute::Paste,
                 text: "Hello".to_owned(),
                 waiting_for_quiet,
+                preview: None,
             };
             assert_eq!(rig.state(), waiting(true));
             rig.feed_until(1360, Kind::Hiss).await;
@@ -4291,6 +4302,7 @@ async fn a_final_that_continues_after_an_ending_cancels_it_with_a_cue() {
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
             rig.finals("Hello submit").await;
+            rig.show_live_submit().await;
             rig.feed_until(1500, Kind::Quiet).await;
             rig.finals("and then some more").await;
             assert_eq!(rig.started(Cue::Cancelled), [1500]);
@@ -4441,10 +4453,12 @@ async fn cue_lines(name: &str, timing: CueTiming, run: Run) -> Vec<serde_json::V
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
             rig.finals("Hello submit").await;
+            rig.show_live_submit().await;
             rig.feed_until(1500, Kind::Quiet).await;
             rig.partial("more words").await;
             rig.feed_until(3000, Kind::Quiet).await;
             rig.finals("more words submit").await;
+            rig.show_live_submit().await;
             rig.feed_until(5499, Kind::Quiet).await;
             rig.at(5500).await;
         }
@@ -4971,6 +4985,7 @@ async fn spoken_endings_are_text_during_a_hold_and_act_after_the_wake_word() {
                 rig.open().await;
                 rig.feed_until(1000, Kind::Quiet).await;
                 rig.finals(said).await;
+                rig.show_live_submit().await;
                 rig.feed_until(4000, Kind::Quiet).await;
                 assert_eq!(finished(task).await, wake_outcome, "wake word: {said}");
             }
@@ -6071,6 +6086,73 @@ impl Rig {
         );
     }
 
+    async fn show_live_submit(&self) {
+        if let EngineState::PendingEnding {
+            route: CaptureRoute::Submit,
+            preview: Some(preview),
+            ..
+        } = self.state()
+        {
+            preview.shown();
+            settle().await;
+        }
+    }
+
+    fn show_live_submit_previews(&self) -> AbortOnDrop {
+        let mut states = self.handle.state();
+        AbortOnDrop(tokio::task::spawn_local(async move {
+            loop {
+                if let EngineState::PendingEnding {
+                    route: CaptureRoute::Submit,
+                    preview: Some(preview),
+                    ..
+                } = states.borrow_and_update().clone()
+                {
+                    preview.shown();
+                }
+                if states.changed().await.is_err() {
+                    break;
+                }
+            }
+        }))
+    }
+
+    async fn live_submit_preview(
+        &self,
+        expected: &str,
+        expected_waiting_for_quiet: bool,
+    ) -> SubmitPreview {
+        let mut states = self.handle.state();
+        let observed = tokio::time::timeout(
+            Duration::from_secs(5),
+            states.wait_for(|state| {
+                matches!(
+                    state,
+                    EngineState::PendingEnding {
+                        route: CaptureRoute::Submit,
+                        preview: Some(_),
+                        ..
+                    }
+                )
+            }),
+        )
+        .await
+        .expect("the engine should ask for a live Submit preview")
+        .unwrap();
+        let EngineState::PendingEnding {
+            route: CaptureRoute::Submit,
+            text,
+            waiting_for_quiet,
+            preview: Some(preview),
+        } = &*observed
+        else {
+            unreachable!()
+        };
+        assert_eq!(text, expected);
+        assert_eq!(*waiting_for_quiet, expected_waiting_for_quiet);
+        preview.clone()
+    }
+
     async fn final_preview(&self, expected: &str, expected_pause: Duration) -> SubmitPreview {
         let mut states = self.handle.state();
         let observed = tokio::time::timeout(
@@ -6783,12 +6865,10 @@ async fn a_submit_confirms_the_formatted_text_that_is_then_accepted() {
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
             rig.finals("I have fifteen open issues submit").await;
-            rig.state_is(EngineState::PendingEnding {
-                route: CaptureRoute::Submit,
-                text: "I have 15 open issues".to_owned(),
-                waiting_for_quiet: false,
-            })
-            .await;
+            rig.live_submit_preview("I have 15 open issues", false)
+                .await
+                .shown();
+            settle().await;
             rig.feed_until(3499, Kind::Quiet).await;
             rig.at(3600).await;
             assert_eq!(
@@ -6954,12 +7034,10 @@ async fn an_ordinary_submit_never_reformats_its_cleanup_reply_after_the_confirma
                 cleanup.body["messages"][1]["content"],
                 "I have 3 open issues"
             );
-            rig.state_is(EngineState::PendingEnding {
-                route: CaptureRoute::Submit,
-                text: "I have fifteen open issues.".to_owned(),
-                waiting_for_quiet: false,
-            })
-            .await;
+            rig.live_submit_preview("I have fifteen open issues.", false)
+                .await
+                .shown();
+            settle().await;
             rig.feed_until(3499, Kind::Quiet).await;
             rig.at(3600).await;
             assert_eq!(
@@ -7168,6 +7246,7 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     &cleaning(&url),
                     Recorder::in_dir(ALL, &dir).unwrap(),
                 );
+                let _previews = rig.show_live_submit_previews();
                 let task = capture_in(
                     engine,
                     frames,
@@ -7195,20 +7274,10 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     );
                     assert!(!task.is_finished(), "{name}: still within the 3 s");
                     rig.at(decided + 3_000).await;
-                    rig.state_is(EngineState::PendingEnding {
-                        route,
-                        text: WORDS.to_owned(),
-                        waiting_for_quiet: false,
-                    })
-                    .await;
+                    rig.live_submit_preview(WORDS, false).await;
                     rig.at(rig.now() + 2_500).await;
                 } else if route == CaptureRoute::Submit {
-                    rig.state_is(EngineState::PendingEnding {
-                        route,
-                        text: delivered.unwrap().to_owned(),
-                        waiting_for_quiet: false,
-                    })
-                    .await;
+                    rig.live_submit_preview(delivered.unwrap(), false).await;
                     rig.at(rig.now() + 2_500).await;
                 }
                 let text = delivered.unwrap();
@@ -7300,12 +7369,8 @@ async fn cleanup_falls_back_when_the_endpoint_is_not_ready_within_3_s_of_the_fin
             );
             assert!(!task.is_finished(), "the capture has not confirmed yet");
             rig.at(decided + 3_000).await;
-            rig.state_is(EngineState::PendingEnding {
-                route: CaptureRoute::Submit,
-                text: WORDS.to_owned(),
-                waiting_for_quiet: false,
-            })
-            .await;
+            rig.live_submit_preview(WORDS, false).await.shown();
+            settle().await;
             assert_eq!(
                 rig.notices(),
                 vec![
@@ -7553,6 +7618,7 @@ async fn a_heard_ending_is_never_told_when_the_transcript_carries_it_or_the_user
         .run_until(async {
             for (name, script, end, provisional) in cases {
                 let (mut rig, _spot, engine, frames) = hearing("{}");
+                let _previews = rig.show_live_submit_previews();
                 let task = capture_task(engine, frames);
                 rig.open().await;
                 rig.play(&script).await;
@@ -9157,6 +9223,107 @@ async fn final_submit_keeps_the_text_if_the_full_preview_is_not_visible() {
                 );
                 finished(worker).await;
             }
+        })
+        .await;
+}
+
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn live_submit_waits_for_preview_and_keeps_the_full_pause_after_it_is_shown() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Run tests submit").await;
+            let preview = rig.live_submit_preview("Run tests", false).await;
+            rig.feed_until(1400, Kind::Quiet).await;
+            assert!(!task.is_finished(), "must wait for preview before counting");
+            preview.shown();
+            settle().await;
+            rig.feed_until(1400 + 2499, Kind::Quiet).await;
+            assert!(
+                !task.is_finished(),
+                "full cancellation interval runs after the review is shown"
+            );
+            rig.at(1400 + 2500).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Submit, "Run tests")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn live_submit_keeps_the_text_if_the_full_preview_is_not_visible() {
+    LocalSet::new()
+        .run_until(async {
+            for (presented, reported, reason) in [
+                (false, Some(PreviewError::TooLong), PreviewError::TooLong),
+                (false, None, PreviewError::Unavailable),
+                (
+                    true,
+                    Some(PreviewError::Unavailable),
+                    PreviewError::Unavailable,
+                ),
+            ] {
+                let (mut rig, engine, frames) = Rig::new("{}");
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals("Run tests submit").await;
+                let preview = rig.live_submit_preview("Run tests", false).await;
+                if presented {
+                    preview.shown();
+                    settle().await;
+                    rig.feed_until(2000, Kind::Quiet).await;
+                }
+                if let Some(error) = reported {
+                    preview.failed(error);
+                } else {
+                    rig.feed_until(2000, Kind::Quiet).await;
+                }
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Failed {
+                        error: reason.into(),
+                        recoverable_text: Some("Run tests".to_owned()),
+                    }
+                );
+                assert_eq!(rig.started(Cue::Accepted).len(), 0);
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn speaking_more_words_cancels_a_live_submit_preview_without_timing_out() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Run tests submit").await;
+            let _preview = rig.live_submit_preview("Run tests", false).await;
+            rig.feed_until(1500, Kind::Quiet).await;
+            rig.partial("actually wait").await;
+            rig.feed_until(3000, Kind::Quiet).await;
+            assert!(!task.is_finished(), "old preview timeout was cleared");
+            rig.handle.cancel();
+            assert!(matches!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { .. }
+            ));
         })
         .await;
 }

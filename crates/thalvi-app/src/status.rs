@@ -356,62 +356,77 @@ impl View {
                 causes: failure.causes.clone(),
                 kind: failure.kind,
             },
-            (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => match engine {
-                EngineState::Listening if self.wake_words => Status::Listening,
-                EngineState::Listening => Status::KeyboardOnly,
-                EngineState::StartingCapture | EngineState::LoadingModel => Status::Starting {
-                    target,
-                    loading: matches!(engine, EngineState::LoadingModel),
-                },
-                EngineState::Capturing {
-                    committed,
-                    partial,
-                    notice,
-                } => Status::Capturing {
-                    target,
-                    committed: committed.clone(),
-                    partial: partial.clone(),
-                    notice: notice.clone(),
-                },
-                EngineState::PendingEnding {
-                    route,
-                    text,
-                    waiting_for_quiet,
-                } => self.pending_status(target, *route, text, *waiting_for_quiet, None),
-                EngineState::ConfirmingSubmit {
-                    text,
-                    pause,
-                    preview,
-                } => self.pending_status(
-                    target,
-                    CaptureRoute::Submit,
-                    text,
-                    false,
-                    Some((*pause, preview)),
-                ),
-                EngineState::FinalPass { route } => Status::FinalPass {
-                    target,
-                    route: *route,
-                },
-                EngineState::Merging { route } => Status::Merging {
-                    target,
-                    route: *route,
-                },
-                EngineState::TranscribingLive { route } => Status::Transcribing {
-                    target,
-                    route: *route,
-                    cancellable: true,
-                },
-                EngineState::CleaningUp => Status::CleaningUp { target },
-                EngineState::Writing { text } => Status::Writing {
-                    target,
-                    text: text.clone(),
-                },
-                EngineState::Thinking => Status::Thinking { target },
-                EngineState::StartingChat { again } => Status::StartingChat {
-                    target,
-                    again: *again,
-                },
+            (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => {
+                self.engine_status(target, engine)
+            }
+        }
+    }
+
+    fn engine_status(&self, target: Option<String>, engine: &EngineState) -> Status {
+        match engine {
+            EngineState::Listening if self.wake_words => Status::Listening,
+            EngineState::Listening => Status::KeyboardOnly,
+            EngineState::StartingCapture | EngineState::LoadingModel => Status::Starting {
+                target,
+                loading: matches!(engine, EngineState::LoadingModel),
+            },
+            EngineState::Capturing {
+                committed,
+                partial,
+                notice,
+            } => Status::Capturing {
+                target,
+                committed: committed.clone(),
+                partial: partial.clone(),
+                notice: notice.clone(),
+            },
+            EngineState::PendingEnding {
+                route,
+                text,
+                waiting_for_quiet,
+                preview,
+            } => self.pending_status(
+                target,
+                *route,
+                text,
+                *waiting_for_quiet,
+                None,
+                preview.as_ref(),
+            ),
+            EngineState::ConfirmingSubmit {
+                text,
+                pause,
+                preview,
+            } => self.pending_status(
+                target,
+                CaptureRoute::Submit,
+                text,
+                false,
+                Some(*pause),
+                Some(preview),
+            ),
+            EngineState::FinalPass { route } => Status::FinalPass {
+                target,
+                route: *route,
+            },
+            EngineState::Merging { route } => Status::Merging {
+                target,
+                route: *route,
+            },
+            EngineState::TranscribingLive { route } => Status::Transcribing {
+                target,
+                route: *route,
+                cancellable: true,
+            },
+            EngineState::CleaningUp => Status::CleaningUp { target },
+            EngineState::Writing { text } => Status::Writing {
+                target,
+                text: text.clone(),
+            },
+            EngineState::Thinking => Status::Thinking { target },
+            EngineState::StartingChat { again } => Status::StartingChat {
+                target,
+                again: *again,
             },
         }
     }
@@ -422,12 +437,10 @@ impl View {
         route: CaptureRoute,
         text: &str,
         waiting_for_quiet: bool,
-        final_preview: Option<(Duration, &SubmitPreview)>,
+        pause_override: Option<Duration>,
+        preview: Option<&SubmitPreview>,
     ) -> Status {
-        let (pause, final_confirmation) = final_preview.map_or_else(
-            || (self.pauses.get(route), None),
-            |(pause, preview)| (pause, Some(preview.clone())),
-        );
+        let pause = pause_override.unwrap_or_else(|| self.pauses.get(route));
         Status::Pending {
             target,
             route,
@@ -435,7 +448,7 @@ impl View {
             waiting_for_quiet,
             pause_ms: u64::try_from(pause.as_millis()).unwrap_or(u64::MAX),
             copies: self.copies,
-            final_confirmation,
+            final_confirmation: preview.cloned(),
         }
     }
 }
@@ -470,6 +483,7 @@ mod tests {
             route,
             text: "hello".to_owned(),
             waiting_for_quiet,
+            preview: None,
         }
     }
 
@@ -1050,5 +1064,26 @@ mod tests {
                 causes: vec!["connection refused (os error 111)".to_owned()],
             }
         );
+    }
+
+    #[test]
+    fn live_pending_submit_with_preview_requires_final_preview() {
+        let preview = SubmitPreview::default();
+        let status = view(
+            Mode::Idle,
+            EngineState::PendingEnding {
+                route: CaptureRoute::Submit,
+                text: "Run tests".to_owned(),
+                waiting_for_quiet: false,
+                preview: Some(preview.clone()),
+            },
+        )
+        .status();
+        assert!(status.requires_final_preview());
+        assert_eq!(status.final_preview(), Some(&preview));
+
+        let paste = view(Mode::Idle, pending(CaptureRoute::Paste, false)).status();
+        assert!(!paste.requires_final_preview());
+        assert_eq!(paste.final_preview(), None);
     }
 }

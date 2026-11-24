@@ -1080,6 +1080,57 @@ mod tests {
     }
 
     #[test]
+    fn live_submit_shows_when_overlay_is_off_and_rejects_unshown_reviews() {
+        use thalvi_desktop::engine::SubmitPreview;
+
+        let start = Instant::now();
+        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let live_submit = |text: &str| Status::Pending {
+            target: Some("foot".to_owned()),
+            route: CaptureRoute::Submit,
+            text: text.to_owned(),
+            waiting_for_quiet: false,
+            pause_ms: 5000,
+            copies: false,
+            final_confirmation: Some(SubmitPreview::default()),
+        };
+
+        // Short text fits: shown even with overlay and draft disabled.
+        let mut overlay = Overlaying::new(false, start);
+        overlay.take(Message::Draft(false), start);
+        let mut surface = Fake::default();
+        overlay.take(Message::Status(Box::new(live_submit("Run tests"))), start);
+        assert!(matches!(
+            overlay.settle(&mut surface, &mut painter, 0.0, start),
+            Draw::Shown
+        ));
+        assert_eq!(surface.calls, ["show"]);
+
+        // Text too long for the module's single-line ticker is rejected without showing.
+        let mut overlay = Overlaying::new(false, start);
+        let mut surface = Fake::default();
+        let long = "The silver lantern burned through the winter storm and kept glowing all night";
+        overlay.take(Message::Status(Box::new(live_submit(long))), start);
+        assert!(matches!(
+            overlay.settle(&mut surface, &mut painter, 0.0, start),
+            Draw::Idle
+        ));
+        assert_eq!(surface.calls, [] as [&str; 0]);
+
+        // A surface refusal fails the preview instead of letting Submit pass unseen.
+        let mut overlay = Overlaying::new(false, start);
+        let mut surface = Fake {
+            refuse: true,
+            ..Fake::default()
+        };
+        overlay.take(Message::Status(Box::new(live_submit("Run tests"))), start);
+        assert!(matches!(
+            overlay.settle(&mut surface, &mut painter, 0.0, start),
+            Draw::Failed(_)
+        ));
+    }
+
+    #[test]
     fn switching_the_overlay_off_or_on_takes_effect_at_once_without_a_new_status() {
         let start = Instant::now();
         let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();

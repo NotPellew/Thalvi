@@ -258,7 +258,9 @@ pub async fn download_wake(state: &AppState, name: &str) -> Result<(), String> {
     let recorder =
         Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
     let started = Instant::now();
-    let result = store.fetch(&head.asset()).await;
+    let Some(result) = state.downloads.run(store.fetch(&head.asset())).await else {
+        return Err("Thalvi is quitting.".to_owned());
+    };
     recorder.metric(
         Event::WakeLoad,
         if result.is_ok() { "ok" } else { "error" },
@@ -347,30 +349,35 @@ pub async fn download_chat(
             SpeechModelProgress::of("chat", progress),
         );
     };
-    let result = async {
-        chat::install(&store, &build.files(), |progress| {
-            if progress != SpeechProgress::Done {
-                emit(progress);
-            }
-        })
-        .await?;
-        let checked_store = store.clone();
-        let chosen = tauri::async_runtime::spawn_blocking(move || {
-            Build::installed(&checked_store, Some(build))
-        })
-        .await
-        .unwrap_or(Build::Cpu);
-        if chosen != build {
-            chat::install(&store, &chosen.files(), |progress| {
+    let Some(result) = state
+        .downloads
+        .run(async {
+            chat::install(&store, &build.files(), |progress| {
                 if progress != SpeechProgress::Done {
                     emit(progress);
                 }
             })
             .await?;
-        }
-        Ok::<(), ModelError>(())
-    }
-    .await;
+            let checked_store = store.clone();
+            let chosen = tauri::async_runtime::spawn_blocking(move || {
+                Build::installed(&checked_store, Some(build))
+            })
+            .await
+            .unwrap_or(Build::Cpu);
+            if chosen != build {
+                chat::install(&store, &chosen.files(), |progress| {
+                    if progress != SpeechProgress::Done {
+                        emit(progress);
+                    }
+                })
+                .await?;
+            }
+            Ok::<(), ModelError>(())
+        })
+        .await
+    else {
+        return Err(DownloadFailed::from("Thalvi is quitting.".to_owned()));
+    };
     recorder.metric(
         Event::ChatDownload,
         &result
@@ -583,31 +590,40 @@ pub async fn download_speech(
     let emit = |progress| {
         let _ = app.emit("thalvi://speech-model-progress", progress);
     };
-    match model {
-        ListedSpeech::Catalog(catalog) => {
-            let assets = catalog.assets_on(&state.speech_devices.plans().await(catalog));
-            Download {
-                name: catalog.name(),
-                assets: &assets,
-                store: &store,
-                downloads: &state.speech_downloads,
-                recorder: &recorder,
+    let Some(result) = state
+        .downloads
+        .run(async {
+            match model {
+                ListedSpeech::Catalog(catalog) => {
+                    let assets = catalog.assets_on(&state.speech_devices.plans().await(catalog));
+                    Download {
+                        name: catalog.name(),
+                        assets: &assets,
+                        store: &store,
+                        downloads: &state.speech_downloads,
+                        recorder: &recorder,
+                    }
+                    .run(emit)
+                    .await
+                }
+                ListedSpeech::Whisper(backend) => {
+                    Download {
+                        name: backend.name(),
+                        assets: &WHISPER_TURBO,
+                        store: &store,
+                        downloads: &state.speech_downloads,
+                        recorder: &recorder,
+                    }
+                    .run(emit)
+                    .await
+                }
             }
-            .run(emit)
-            .await?;
-        }
-        ListedSpeech::Whisper(backend) => {
-            Download {
-                name: backend.name(),
-                assets: &WHISPER_TURBO,
-                store: &store,
-                downloads: &state.speech_downloads,
-                recorder: &recorder,
-            }
-            .run(emit)
-            .await?;
-        }
-    }
+        })
+        .await
+    else {
+        return Err(DownloadFailed::from("Thalvi is quitting.".to_owned()));
+    };
+    result?;
     state.link.send(Control::ReloadSpeechModel(model));
     Ok(())
 }

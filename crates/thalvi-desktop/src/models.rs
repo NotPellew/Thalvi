@@ -25,16 +25,80 @@ const SLOWEST_BYTES_PER_SECOND: u64 = 500_000;
 static DOWNLOADS: AtomicU64 = AtomicU64::new(0);
 
 /// One download per stored path: the app's listener and its Settings window can ask for a file at once.
-static FETCHING: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+static FETCHING: LazyLock<Mutex<HashMap<PathBuf, Arc<InFlight>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn fetching(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+#[derive(Clone)]
+enum AttemptOutcome {
+    Finished(Result<(), ModelError>),
+    Cancelled,
+}
+
+struct InFlight {
+    progress: tokio::sync::watch::Sender<u64>,
+    outcome: tokio::sync::watch::Sender<Option<AttemptOutcome>>,
+}
+
+impl InFlight {
+    fn new() -> Self {
+        let (progress, _) = tokio::sync::watch::channel(0);
+        let (outcome, _) = tokio::sync::watch::channel(None);
+        Self { progress, outcome }
+    }
+}
+
+enum FetchRole {
+    Leader(Arc<InFlight>),
+    Follower(Arc<InFlight>),
+}
+
+fn join_fetch(path: &Path) -> FetchRole {
     let mut files = FETCHING.lock().unwrap_or_else(PoisonError::into_inner);
-    Arc::clone(
-        files
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-    )
+    if let Some(existing) = files.get(path) {
+        return FetchRole::Follower(Arc::clone(existing));
+    }
+    let active = Arc::new(InFlight::new());
+    files.insert(path.to_path_buf(), Arc::clone(&active));
+    FetchRole::Leader(active)
+}
+
+/// Removes an in-flight entry and wakes followers when a leader finishes or is cancelled.
+struct ActiveFetch {
+    path: PathBuf,
+    in_flight: Arc<InFlight>,
+    finished: bool,
+}
+
+impl ActiveFetch {
+    fn remove(&self) {
+        let mut files = FETCHING.lock().unwrap_or_else(PoisonError::into_inner);
+        if files
+            .get(&self.path)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.in_flight))
+        {
+            files.remove(&self.path);
+        }
+    }
+
+    fn finish(mut self, result: Result<(), ModelError>) -> Result<(), ModelError> {
+        self.finished = true;
+        self.remove();
+        self.in_flight
+            .outcome
+            .send_replace(Some(AttemptOutcome::Finished(result.clone())));
+        result
+    }
+}
+
+impl Drop for ActiveFetch {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.remove();
+            self.in_flight
+                .outcome
+                .send_replace(Some(AttemptOutcome::Cancelled));
+        }
+    }
 }
 
 /// What a model file is for; error messages name it.
@@ -638,7 +702,7 @@ impl ListedSpeech {
 }
 
 /// Why a model could not be provided. Messages are shown to the user as written.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ModelError {
     #[error("Thalvi could not find a folder to keep its models in.")]
     NoDataDir,
@@ -648,7 +712,7 @@ pub enum ModelError {
         file: String,
         failure: DownloadFailure,
         #[source]
-        source: reqwest::Error,
+        source: Arc<reqwest::Error>,
     },
     #[error(
         "The downloaded {} {file} did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening.",
@@ -673,7 +737,7 @@ pub enum ModelError {
         file: String,
         dir: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: Arc<std::io::Error>,
     },
 }
 
@@ -725,7 +789,7 @@ impl ModelError {
             file: file.to_owned(),
             failure: DownloadFailure::of(&source),
             // The signed CDN address in the error's text would reach the report.
-            source: source.without_url(),
+            source: Arc::new(source.without_url()),
         }
     }
 
@@ -823,28 +887,85 @@ impl ModelStore {
     pub async fn fetch_reporting(
         &self,
         asset: &Asset<'_>,
-        received: impl FnMut(u64),
+        mut received: impl FnMut(u64),
     ) -> Result<PathBuf, ModelError> {
         let path = self.dir.join(asset.file_name);
-        let lock = fetching(&path);
-        let _fetching = lock.lock().await;
-        let damaged = match stored(&path, asset).await {
-            Stored::Intact => return Ok(path),
+        loop {
+            match join_fetch(&path) {
+                FetchRole::Leader(in_flight) => {
+                    let guard = ActiveFetch {
+                        path: path.clone(),
+                        in_flight: Arc::clone(&in_flight),
+                        finished: false,
+                    };
+                    let result = self
+                        .fetch_as_leader(asset, &path, &in_flight, &mut received)
+                        .await;
+                    return guard.finish(result).map(|()| path);
+                }
+                FetchRole::Follower(in_flight) => {
+                    let mut outcome = in_flight.outcome.subscribe();
+                    let mut progress = in_flight.progress.subscribe();
+                    let seen = *progress.borrow_and_update();
+                    if seen > 0 {
+                        received(seen);
+                    }
+                    loop {
+                        if let Some(done) = outcome.borrow_and_update().clone() {
+                            match done {
+                                AttemptOutcome::Finished(result) => return result.map(|()| path),
+                                AttemptOutcome::Cancelled => break,
+                            }
+                        }
+                        tokio::select! {
+                            biased;
+                            changed = outcome.changed() => {
+                                if changed.is_err() {
+                                    break;
+                                }
+                            }
+                            changed = progress.changed() => {
+                                if changed.is_ok() {
+                                    received(*progress.borrow_and_update());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn fetch_as_leader(
+        &self,
+        asset: &Asset<'_>,
+        path: &Path,
+        in_flight: &InFlight,
+        received: &mut impl FnMut(u64),
+    ) -> Result<(), ModelError> {
+        let damaged = match stored(path, asset).await {
+            Stored::Intact => return Ok(()),
             Stored::Missing => false,
             Stored::Damaged => {
-                tokio::fs::remove_file(&path)
+                tokio::fs::remove_file(path)
                     .await
                     .map_err(|source| ModelError::Io {
                         kind: asset.kind,
                         file: asset.file_name.to_owned(),
                         dir: self.dir.clone(),
-                        source,
+                        source: Arc::new(source),
                     })?;
                 true
             }
         };
-        match self.download(asset, &path, received).await {
-            Ok(()) => Ok(path),
+        let result = self
+            .download(asset, path, |bytes| {
+                in_flight.progress.send_replace(bytes);
+                received(bytes);
+            })
+            .await;
+        match result {
+            Ok(()) => Ok(()),
             Err(cause) if damaged => Err(ModelError::Replaced {
                 kind: asset.kind,
                 file: asset.file_name.to_owned(),
@@ -864,7 +985,7 @@ impl ModelStore {
             kind: asset.kind,
             file: asset.file_name.to_owned(),
             dir: self.dir.clone(),
-            source,
+            source: Arc::new(source),
         };
         let net = |source| ModelError::download(asset.kind, asset.file_name, source);
         tokio::fs::create_dir_all(path.parent().unwrap_or(&self.dir))
@@ -1297,6 +1418,210 @@ mod tests {
         .expect("the next fetch downloaded the file");
         assert_eq!(connections.load(Ordering::SeqCst), 2);
         assert_eq!(std::fs::read(&path).expect("the stored file"), BODY);
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Waits until a second fetch of `path` has subscribed to the attempt in flight.
+    async fn follower_joined(path: &Path) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let joined = FETCHING
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(path)
+                    .is_some_and(|in_flight| in_flight.outcome.receiver_count() > 0);
+                if joined {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the second fetch joined the download in flight");
+    }
+
+    #[tokio::test]
+    async fn two_fetches_of_one_corrupt_file_share_one_download_and_a_later_retry_fetches_again() {
+        use std::net::Ipv4Addr;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::sync::Notify;
+
+        const GOOD: &[u8] = b"one pinned wake model";
+        const CORRUPT: &[u8] = b"one pinned wake modeX";
+
+        let dir = std::env::temp_dir().join(format!(
+            "thalvi-shared-corrupt-fetch-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let sha256 = hex(&Sha256::digest(GOOD));
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind a test server");
+        let url = format!(
+            "http://{}/wake.onnx",
+            listener.local_addr().expect("its address")
+        );
+        let connections = Arc::new(AtomicUsize::new(0));
+        let requested = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let server = tokio::spawn({
+            let connections = Arc::clone(&connections);
+            let requested = Arc::clone(&requested);
+            let release = Arc::clone(&release);
+            async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let first = connections.fetch_add(1, Ordering::SeqCst) == 0;
+                    let requested = Arc::clone(&requested);
+                    let release = Arc::clone(&release);
+                    tokio::spawn(async move {
+                        let mut head = [0; 1024];
+                        let _ = socket.read(&mut head).await;
+                        requested.notify_one();
+                        if first {
+                            release.notified().await;
+                        }
+                        let _ = socket.write_all(&response(CORRUPT)).await;
+                    });
+                }
+            }
+        });
+        let fetch = |store: ModelStore| {
+            let url = url.clone();
+            let sha256 = sha256.clone();
+            async move {
+                let asset = Asset {
+                    kind: ModelKind::Wake,
+                    file_name: "wake.onnx",
+                    url: &url,
+                    size: u64::try_from(GOOD.len()).expect("body size fits"),
+                    sha256: &sha256,
+                };
+                store.fetch(&asset).await
+            }
+        };
+        let first = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
+        tokio::time::timeout(Duration::from_secs(10), requested.notified())
+            .await
+            .expect("the first fetch asked the server for the file");
+        let second = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
+        let path = dir.join("wake.onnx");
+        follower_joined(&path).await;
+        release.notify_one();
+        for fetch in [first, second] {
+            let err = tokio::time::timeout(Duration::from_secs(10), fetch)
+                .await
+                .expect("a fetch returned")
+                .expect("the fetch ran")
+                .expect_err("corrupt file fails checksum");
+            assert!(matches!(err, ModelError::Checksum { .. }), "{err}");
+        }
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        assert!(!path.exists());
+
+        // An explicit retry after the failure starts a fresh attempt.
+        let err = tokio::time::timeout(Duration::from_secs(10), fetch(ModelStore::in_dir(&dir)))
+            .await
+            .expect("retry returned")
+            .expect_err("corrupt retry fails checksum");
+        assert!(matches!(err, ModelError::Checksum { .. }), "{err}");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_leading_fetch_lets_a_waiting_follower_finish() {
+        use std::net::Ipv4Addr;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::sync::Notify;
+
+        const BODY: &[u8] = b"recovered wake model";
+
+        let dir = std::env::temp_dir().join(format!(
+            "thalvi-cancel-handoff-fetch-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let sha256 = hex(&Sha256::digest(BODY));
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind a test server");
+        let url = format!(
+            "http://{}/wake.onnx",
+            listener.local_addr().expect("its address")
+        );
+        let connections = Arc::new(AtomicUsize::new(0));
+        let first_started = Arc::new(Notify::new());
+        let server = tokio::spawn({
+            let connections = Arc::clone(&connections);
+            let first_started = Arc::clone(&first_started);
+            async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let first = connections.fetch_add(1, Ordering::SeqCst) == 0;
+                    let first_started = Arc::clone(&first_started);
+                    tokio::spawn(async move {
+                        let mut head = [0; 1024];
+                        let _ = socket.read(&mut head).await;
+                        if first {
+                            first_started.notify_one();
+                            std::future::pending::<()>().await;
+                        } else {
+                            let _ = socket.write_all(&response(BODY)).await;
+                        }
+                    });
+                }
+            }
+        });
+        let fetch = |store: ModelStore| {
+            let url = url.clone();
+            let sha256 = sha256.clone();
+            async move {
+                let asset = Asset {
+                    kind: ModelKind::Wake,
+                    file_name: "wake.onnx",
+                    url: &url,
+                    size: u64::try_from(BODY.len()).expect("body size fits"),
+                    sha256: &sha256,
+                };
+                store.fetch(&asset).await
+            }
+        };
+        let leader = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
+        tokio::time::timeout(Duration::from_secs(10), first_started.notified())
+            .await
+            .expect("leader requested file");
+        let follower = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
+        let path = dir.join("wake.onnx");
+        follower_joined(&path).await;
+
+        leader.abort();
+        assert!(leader.await.expect_err("leader aborted").is_cancelled());
+        let got = tokio::time::timeout(Duration::from_secs(10), follower)
+            .await
+            .expect("follower completed")
+            .expect("follower ran")
+            .expect("follower downloaded the file");
+        assert_eq!(got, path);
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        assert_eq!(std::fs::read(&path).expect("saved"), BODY);
 
         server.abort();
         let _ = std::fs::remove_dir_all(&dir);
