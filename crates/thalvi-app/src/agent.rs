@@ -650,7 +650,6 @@ async fn hold_start(running: &impl Running, kind: HoldKind, wait: Duration) -> S
     let mut status = running.status();
     let refusal = match &*status.borrow() {
         Status::Paused => Some("Thalvi is paused. Resume it first."),
-        Status::Loading { .. } => Some("Thalvi is still starting. Try again in a moment."),
         current if capturing(current) => Some("A capture is already running."),
         Status::Working { .. } => Some("The last text is still being delivered."),
         _ => None,
@@ -661,11 +660,22 @@ async fn hold_start(running: &impl Running, kind: HoldKind, wait: Duration) -> S
     if let Some(refusal) = refusal {
         return no_effect(running, refusal);
     }
-    if reached(&mut status, wait, |status| {
-        capturing(status) || matches!(status, Status::Working { .. })
+    // While Thalvi loads, only the engine knows whether it takes the press: it starts the capture
+    // or refuses the press, which fails the status.
+    let started = tokio::time::timeout(wait, async {
+        while status.changed().await.is_ok() {
+            let current = status.borrow_and_update();
+            if capturing(&current) || matches!(*current, Status::Working { .. }) {
+                return true;
+            }
+            if matches!(*current, Status::Failed { .. }) {
+                return false;
+            }
+        }
+        false
     })
-    .await
-    {
+    .await;
+    if started == Ok(true) {
         took_effect(running)
     } else {
         no_effect(running, "Thalvi did not start a capture.")
@@ -957,6 +967,8 @@ mod tests {
         overlay: AtomicBool,
         copy_refused: AtomicBool,
         ignoring: AtomicBool,
+        /// Whether the engine takes a press while Thalvi is loading, rather than refusing it.
+        loading_takes_press: AtomicBool,
         keys: HoldInput,
         presses: Mutex<Presses>,
         folder: PathBuf,
@@ -999,6 +1011,7 @@ mod tests {
                 overlay: AtomicBool::new(true),
                 copy_refused: AtomicBool::new(false),
                 ignoring: AtomicBool::new(false),
+                loading_takes_press: AtomicBool::new(false),
                 keys,
                 presses: Mutex::new(Presses::new(state)),
                 folder,
@@ -1085,6 +1098,18 @@ mod tests {
                     committed: String::new(),
                     partial: None,
                     notice: None,
+                }),
+                (true, Status::Loading { .. }) if self.loading_takes_press.load(Ordering::SeqCst) => {
+                    self.set_status(Status::Starting {
+                        target: Some("kitty".to_owned()),
+                        loading: true,
+                    });
+                }
+                (true, Status::Loading { .. }) => self.set_status(Status::Failed {
+                    notice: "The microphone is closed.".to_owned(),
+                    headline: "Microphone closed",
+                    causes: Vec::new(),
+                    kind: FailureKind::Other,
                 }),
                 (false, Status::Capturing { .. }) => self.set_status(Status::Working {
                     target: None,
@@ -1898,6 +1923,31 @@ mod tests {
             reply,
             json!({"ok": true, "took_effect": true, "state": "listening"})
         );
+    }
+
+    #[test]
+    fn a_hold_while_loading_is_answered_by_what_the_engine_did_with_the_press() {
+        for (takes_press, expected) in [
+            (
+                true,
+                json!({"ok": true, "took_effect": true, "state": "loading"}),
+            ),
+            (
+                false,
+                json!({"ok": false, "took_effect": false, "state": "failed",
+                    "error": "Thalvi did not start a capture."}),
+            ),
+        ] {
+            let rig = Rig::new("hold-loading", "{}");
+            rig.fake.set_status(Status::Loading {
+                notice: String::new(),
+                downloading: false,
+            });
+            rig.fake
+                .loading_takes_press
+                .store(takes_press, Ordering::SeqCst);
+            assert_eq!(rig.ask(&Request::HoldStart), expected, "{takes_press}");
+        }
     }
 
     #[test]

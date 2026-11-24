@@ -172,6 +172,9 @@ Pause, resume and toggle replies in `agent.rs` (#668) now wait for the status as
 before answering. They only read watch channels; no writer, lock or `settings_set` change, so the model
 and its three invariants are unchanged.
 
+A hold request in `agent.rs` (#672) now waits for the engine's answer to the press rather than refusing
+up front while Loading. It reads the status only and changes nothing `settings_set` covers.
+
 | Code | Model action and boundary |
 | --- | --- |
 | `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window), `settings_patch` | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: `settings_patch` merges the window's patch (only what the user changed) over the config read under the lock, with `settings::merged`, which `plan_over` uses too; the Settings save sets its field (the look) and carries the others over. This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |
