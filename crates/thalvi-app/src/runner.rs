@@ -2998,6 +2998,9 @@ mod tests {
     fn desktop_only_settings_and_the_wake_switch_do_not_rebuild_the_engine() {
         let old = DesktopConfig::from_json_str("{}").unwrap();
         for (change, rebuilds) in [
+            ("{}", false),
+            // The runner reopens a newly chosen microphone itself.
+            (r#"{"microphone": "USB Mic"}"#, false),
             (r#"{"recordings": {"text": true}}"#, false),
             (r#"{"update_channel": "development"}"#, false),
             (r#"{"history": {"enabled": false}}"#, false),
@@ -3026,7 +3029,7 @@ mod tests {
             ),
         ] {
             let new = DesktopConfig::from_json_str(change).unwrap();
-            assert_eq!(!retunes_only(&old, &new), rebuilds, "{change}");
+            assert_eq!(needs_rebuild(&old, &new), rebuilds, "{change}");
         }
     }
 

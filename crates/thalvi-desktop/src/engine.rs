@@ -3767,10 +3767,10 @@ mod tests {
         feed.send([2_000; FRAME_SAMPLES]);
         feed.fail(AudioError::Closed);
 
-        assert!(matches!(
-            engine.listen(&mut frames).await,
-            Ok(WakeTrigger::Capture)
-        ));
+        let heard = tokio::time::timeout(Duration::from_secs(10), engine.listen(&mut frames))
+            .await
+            .expect("the queued frame is scored even while the hold key is idle");
+        assert!(matches!(heard, Ok(WakeTrigger::Capture)));
     }
 
     #[tokio::test]
