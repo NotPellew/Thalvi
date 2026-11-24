@@ -3682,6 +3682,67 @@ describe("live controls", () => {
     expect(root.querySelector(".msg")?.textContent).toBe("");
   });
 
+  it.each([
+    {
+      name: "moves focus to the active page when recovery clears the bar while Copied is focused",
+      query: "",
+      trigger: async (stub: Awaited<ReturnType<typeof open>>) => {
+        const copy = button("Copy");
+        copy.focus();
+        copy.click();
+        await settle();
+        expect(button("Copied")).toBe(copy);
+        expect(document.activeElement).toBe(copy);
+        stub.emit({ state: "listening" });
+      },
+      expected: () => root.querySelector<HTMLElement>('section[data-page="recognition"]'),
+    },
+    {
+      name: "moves focus to the active page when Dismiss error hides the bar",
+      query: "",
+      trigger: () => {
+        const dismiss = button("×");
+        dismiss.focus();
+        dismiss.click();
+        return Promise.resolve();
+      },
+      expected: () => root.querySelector<HTMLElement>('section[data-page="recognition"]'),
+    },
+    {
+      name: "moves focus to search when recovery clears the bar while no page matches the search",
+      query: "no-such-setting-xyz",
+      trigger: (stub: Awaited<ReturnType<typeof open>>) => {
+        button("Copy").focus();
+        stub.emit({ state: "listening" });
+        return Promise.resolve();
+      },
+      expected: () => root.querySelector<HTMLElement>('input[type="search"]'),
+    },
+    {
+      name: "leaves focus alone when recovery clears the bar while another control is focused",
+      query: "",
+      trigger: (stub: Awaited<ReturnType<typeof open>>) => {
+        const nav = root.querySelector<HTMLElement>('nav [data-page="app"]');
+        nav?.focus();
+        stub.emit({ state: "listening" });
+        return Promise.resolve();
+      },
+      expected: () => root.querySelector<HTMLElement>('nav [data-page="app"]'),
+    },
+  ])("$name", async ({ query, trigger, expected }) => {
+    const stub = await open();
+    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other" });
+    if (query !== "") {
+      const search = root.querySelector<HTMLInputElement>('input[type="search"]');
+      expect(search).not.toBeNull();
+      type(search as HTMLInputElement, query);
+    }
+    await trigger(stub);
+    await settle();
+    expect(root.querySelector<HTMLElement>("footer.bar")?.hidden).toBe(true);
+    expect(document.activeElement).toBe(expected());
+  });
+
   it("resets the microphone meter when listening pauses", async () => {
     const stub = await open();
     goTo("listening");
