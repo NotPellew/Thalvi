@@ -5167,6 +5167,95 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_rebuild_shows_loading_until_it_is_applied_unless_paused() {
+        let config = |paste: u32, microphone: Option<&str>| DesktopConfig {
+            microphone: microphone.map(str::to_owned),
+            ..DesktopConfig::from_json_str(&format!(
+                r#"{{"ending_pause":{{"paste":{paste}}},"history":{{"enabled":false}}}}"#
+            ))
+            .unwrap()
+        };
+        // An unannounced rebuild is one the runner finds itself, after an earlier one failed.
+        for (paused, announced, pastes, microphone) in [
+            (false, true, &[1, 2][..], None),
+            (true, true, &[1, 2][..], None),
+            (false, false, &[1][..], Some("USB Mic")),
+        ] {
+            let case = format!("paused {paused}, announced {announced}, microphone {microphone:?}");
+            LocalSet::new()
+                .run_until(async {
+                    let (load_entered_tx, load_entered) = oneshot::channel();
+                    let (load_release, load_release_rx) = oneshot::channel();
+                    let (replace_entered_tx, replace_entered) = oneshot::channel();
+                    let (replace_release, replace_release_rx) = oneshot::channel();
+                    let lab = SwitchLab {
+                        recognizers: RefCell::new(
+                            (0..3)
+                                .map(|_| thalvi_desktop::recognizer::FakeRecognizer::new().0)
+                                .collect(),
+                        ),
+                        load_gate: RefCell::new(Some((load_entered_tx, load_release_rx))),
+                        open_gate: RefCell::new(None),
+                        replace_gate: RefCell::new(Some((replace_entered_tx, replace_release_rx))),
+                        loads: Cell::new(0),
+                    };
+                    let (link, ends, _) = EngineLink::wire(&config(0, None), paused);
+                    let mut status = link.status_updates();
+                    let running = tokio::task::spawn_local(ends.run(
+                        config(0, None),
+                        paused,
+                        lab,
+                        Arc::new(Delivery::new(TestHost::default())),
+                        Arc::new(History::at("unused-rebuild-history")),
+                        Arc::new(Drafts::default()),
+                    ));
+                    let settled = if paused {
+                        Status::Paused
+                    } else {
+                        Status::Listening
+                    };
+                    wait_status(&mut status, &case, |s| *s == settled).await;
+
+                    for &paste in pastes {
+                        if announced {
+                            link.begin_rebuild();
+                        }
+                        link.send(Control::Apply(Box::new(config(paste, microphone))));
+                    }
+                    tokio::time::timeout(Duration::from_secs(5), load_entered)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        matches!(link.status(), Status::Loading { .. }),
+                        !paused,
+                        "{case}: while building"
+                    );
+                    load_release.send(()).unwrap();
+                    if microphone.is_some() {
+                        tokio::time::timeout(Duration::from_secs(5), replace_entered)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert!(
+                            matches!(link.status(), Status::Loading { .. }),
+                            "{case}: while the chosen microphone opens"
+                        );
+                        replace_release.send(()).unwrap();
+                    }
+                    pump_until(&format!("{case}: the rebuilds did not end"), || {
+                        link.status() == settled && !link.publisher.view().rebuilding
+                    })
+                    .await;
+
+                    link.send(Control::Quit);
+                    running.await.unwrap();
+                })
+                .await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn pausing_while_rebuilding_with_a_missing_microphone_keeps_the_key_refusal_visible() {
         LocalSet::new()
             .run_until(async {
@@ -5598,6 +5687,7 @@ mod tests {
         held: Option<thalvi_desktop::engine::fakes::FrameFeed>,
         entered: Option<oneshot::Sender<()>>,
         release: Option<oneshot::Receiver<()>>,
+        replacing: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
     }
 
     impl Input for SwitchMic {
@@ -5627,7 +5717,11 @@ mod tests {
             Ok((self, Ok(frames)))
         }
 
-        async fn replace(self) -> Result<(Self, Result<Self::Frames, Failure>), Failure> {
+        async fn replace(mut self) -> Result<(Self, Result<Self::Frames, Failure>), Failure> {
+            if let Some((entered, release)) = self.replacing.take() {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
             self.open().await
         }
     }
@@ -5637,6 +5731,7 @@ mod tests {
             RefCell<std::collections::VecDeque<thalvi_desktop::recognizer::FakeRecognizer>>,
         load_gate: RefCell<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
         open_gate: RefCell<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+        replace_gate: RefCell<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
         loads: Cell<u32>,
     }
 
@@ -5707,6 +5802,9 @@ mod tests {
                 held: None,
                 entered,
                 release,
+                replacing: (self.loads.get() == 2)
+                    .then(|| self.replace_gate.borrow_mut().take())
+                    .flatten(),
             }
         }
     }
@@ -5755,6 +5853,7 @@ mod tests {
                         recognizers: RefCell::new(VecDeque::from([first_rec, second_rec])),
                         load_gate: RefCell::new(Some((load_entered_tx, load_release_rx))),
                         open_gate: RefCell::new(Some((open_entered_tx, open_release_rx))),
+                        replace_gate: RefCell::new(None),
                         loads: Cell::new(0),
                     };
                     let (link, ends, _) = EngineLink::wire(&on_device, false);
