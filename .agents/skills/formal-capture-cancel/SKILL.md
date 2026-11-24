@@ -187,6 +187,12 @@ Keeping recognition running on a base-look change (#659) adds `look` to `retunes
 `runner.rs` beside `themes`. `Requests::take`, `drive`, `Runner::capture`, and `Settling::settle`
 are unchanged and `Apply` still has no cancellation effect, so the model actions are unchanged.
 
+Showing Loading through a live recognizer rebuild (#617) shares `Publisher` via `Arc<Mutex<_>>`
+between `EngineLink` and `Runner`, tracks rebuild sequence numbers in `Runner::apply`, and sets
+`Mode::Starting` at `Runner::rebuild` entry. `Requests::take`, `Requests::read_queued`, `drive`,
+`Runner::capture`, `Settling::settle`, and `Runner::apply_engine` keep the same cancellation
+writes, await boundaries, and delivery admission fence, so the model actions are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty

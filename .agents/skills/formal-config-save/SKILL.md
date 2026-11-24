@@ -162,6 +162,12 @@ The look preview (#518) adds the read-only `preview_overlay` command in `command
 Neither writes `desktop.json` or `AppState::config` or takes the save lock, so the model and its three
 invariants are unchanged.
 
+Showing Loading through a live recognizer rebuild (#617) calls `EngineLink::begin_rebuild` in
+`AppState::apply` right before `SyncedConfig::set` when `runner::needs_rebuild` is true. That only
+publishes `Status::Loading` on the status watch; it writes neither `desktop.json` nor
+`AppState::config` and takes no save lock, while `SyncedConfig::set` (`Apply`) and `Control::Apply`
+(`Send`) keep their exact order under the save lock, so the model and its three invariants are unchanged.
+
 | Code | Model action and boundary |
 | --- | --- |
 | `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window), `settings_patch` | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: `settings_patch` merges the window's patch (only what the user changed) over the config read under the lock, with `settings::merged`, which `plan_over` uses too; the Settings save sets its field (the look) and carries the others over. This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |

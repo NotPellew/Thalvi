@@ -1,6 +1,7 @@
 //! Explores runner controls across captures with a virtual clock and the engine's real fakes.
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proptest::prelude::*;
@@ -68,7 +69,7 @@ impl Rig for FakeRig {
         &self,
         _: &DesktopConfig,
         _: &InputGate,
-        _: &Rc<Publisher>,
+        _: &Arc<Publisher>,
     ) -> Result<Loaded<Self>, Failure> {
         let (recognizer, server) = FakeRecognizer::new();
         let (wake, control) = FakeWake::new();
@@ -702,7 +703,7 @@ fn rebuilding_after_an_unready_capture_publishes_the_new_engines_resting_state()
         .unwrap();
     LocalSet::new().block_on(&runtime, async {
         let (link, ends, _) = EngineLink::wire(&DesktopConfig::from_json_str("{}").unwrap(), false);
-        let publisher = Publisher::new(ends.status, EndingPauses::default());
+        let publisher = ends.publisher;
         publisher.update(|view| {
             view.mode = Mode::Idle;
             view.engine = EngineState::StartingCapture;

@@ -287,20 +287,41 @@ pub struct View {
     pub loading: Option<Step>,
     /// The wake word starts captures; off, listening is for the hold keys alone.
     pub wake_words: bool,
+    /// A settings change that rebuilds the engine is queued or running; holds status at Loading until listening resumes.
+    pub rebuilding: bool,
 }
 
 impl View {
-    #[must_use]
-    pub fn status(&self) -> Status {
-        let target = self.target.clone();
+    fn loading_status(&self) -> Option<Status> {
+        if self.rebuilding
+            && matches!(self.engine, EngineState::Listening)
+            && !matches!(
+                self.mode,
+                Mode::Paused | Mode::WakeDownload | Mode::SpotterDownload | Mode::Delivering(_)
+            )
+        {
+            return Some(Status::Loading {
+                notice: STARTING_NOTICE.to_owned(),
+                downloading: false,
+            });
+        }
         if let (Some(step), EngineState::Listening, Mode::Idle | Mode::Done { .. }) =
             (self.loading, &self.engine, &self.mode)
         {
-            return Status::Loading {
+            return Some(Status::Loading {
                 notice: load_notice(step),
                 downloading: matches!(step, Step::Fetching(_) | Step::Downloading(..)),
-            };
+            });
         }
+        None
+    }
+
+    #[must_use]
+    pub fn status(&self) -> Status {
+        if let Some(status) = self.loading_status() {
+            return status;
+        }
+        let target = self.target.clone();
         match (&self.mode, &self.engine) {
             (Mode::Starting, _) => Status::Loading {
                 notice: STARTING_NOTICE.to_owned(),
@@ -432,6 +453,7 @@ mod tests {
             pauses: EndingPauses::default(),
             loading: None,
             wake_words: true,
+            rebuilding: false,
         }
     }
 
@@ -822,6 +844,68 @@ mod tests {
                 loading: false
             }
         );
+    }
+
+    #[test]
+    fn rebuilding_shows_loading_until_done_without_hiding_pause_downloads_or_captures() {
+        let starting = Status::Loading {
+            notice: STARTING_NOTICE.to_owned(),
+            downloading: false,
+        };
+        let cases = [
+            (Mode::Idle, EngineState::Listening, starting.clone()),
+            (
+                Mode::Done {
+                    route: CaptureRoute::Paste,
+                    notice: "Pasted.".to_owned(),
+                },
+                EngineState::Listening,
+                starting.clone(),
+            ),
+            (
+                Mode::Failed(Failure {
+                    kind: FailureKind::Other,
+                    notice: "Old failure.".to_owned(),
+                    headline: "Failed",
+                    causes: Vec::new(),
+                }),
+                EngineState::Listening,
+                starting,
+            ),
+            (Mode::Paused, EngineState::Listening, Status::Paused),
+            (
+                Mode::WakeDownload,
+                EngineState::Listening,
+                Status::Loading {
+                    notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
+                    downloading: true,
+                },
+            ),
+            (
+                Mode::Delivering(CaptureRoute::Paste),
+                EngineState::Listening,
+                Status::Working {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Paste,
+                    cancellable: false,
+                },
+            ),
+            (
+                Mode::Idle,
+                capturing(),
+                Status::Capturing {
+                    target: Some(kitty()),
+                    committed: "hello".to_owned(),
+                    partial: Some("wor".to_owned()),
+                    notice: None,
+                },
+            ),
+        ];
+        for (mode, engine, expected) in cases {
+            let mut v = view(mode.clone(), engine.clone());
+            v.rebuilding = true;
+            assert_eq!(v.status(), expected, "{mode:?} {engine:?}");
+        }
     }
 
     fn capturing() -> EngineState {
