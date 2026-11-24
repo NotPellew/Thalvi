@@ -341,7 +341,7 @@ impl View {
                 self.label = Some(
                     match kind {
                         FailureKind::Delivery => "NOT SENT",
-                        FailureKind::Other => "FAILED",
+                        FailureKind::Recognizer | FailureKind::Other => "FAILED",
                     }
                     .to_owned(),
                 );

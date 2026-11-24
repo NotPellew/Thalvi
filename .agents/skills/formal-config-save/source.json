@@ -49,7 +49,7 @@
       ]
     },
     "crates/thalvi-app/src/agent.rs": {
-      "sha256": "0afe50783b8fa46e0be65bc8b41b29e304d7e19aa4db148c856721b60a40a62a",
+      "sha256": "d3001b8851546118ee8d21f6100f03fb5c05e2f2d1bb54e0ce5a3820e30900b8",
       "functions": [
         "plan",
         "plan_over",

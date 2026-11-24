@@ -136,6 +136,8 @@ impl Status {
 pub enum FailureKind {
     /// A capture's text was not delivered to its destination.
     Delivery,
+    /// The speech recognizer could not be loaded or could not take a capture.
+    Recognizer,
     /// Anything else: a model, the microphone, a refused key press.
     Other,
 }

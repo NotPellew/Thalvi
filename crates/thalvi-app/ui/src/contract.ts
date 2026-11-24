@@ -5,7 +5,7 @@ import type { SettingsPatch } from "./patch.ts";
 export type Route = "paste" | "write" | "submit" | "task";
 
 /** What a failure stopped: only `delivery` means a capture's text did not reach its destination. */
-export type FailureKind = "delivery" | "other";
+export type FailureKind = "delivery" | "recognizer" | "other";
 
 export type Status =
   | { state: "paused" }

@@ -18,8 +18,8 @@ use thalvi_desktop::delivery::{Bound, Delivery, Finished};
 use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
-    CaptureOutcome, CpalCuePlayer, CuePlayer, Engine, EngineHandle, EngineState, FrameSource,
-    Parts, StreamingExtra, WakeDetector, WakeTrigger,
+    CaptureError, CaptureOutcome, CpalCuePlayer, CuePlayer, Engine, EngineHandle, EngineState,
+    FrameSource, Parts, StreamingExtra, WakeDetector, WakeTrigger,
 };
 use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
@@ -636,7 +636,7 @@ async fn load_showing(local: &(impl Preload + ?Sized), publisher: &Publisher) {
             && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
         {
             let failure = Failure {
-                kind: FailureKind::Other,
+                kind: FailureKind::Recognizer,
                 notice: format!("{error} Dictation will try again when you start it."),
                 headline: error.headline(),
                 causes: causes(&error),
@@ -1618,7 +1618,7 @@ impl<S: Rig> Runner<S> {
         self.publisher
             .woke(bound.window(), self.delivery.copies_only());
         let mut requests = Requests::default();
-        let (finished, route, ignored, note) = {
+        let (finished, route, ignored, note, undelivered) = {
             let Self {
                 session,
                 control,
@@ -1661,7 +1661,7 @@ impl<S: Rig> Runner<S> {
                     // The control that ended it never reached the cancel callback.
                     gate.set_enabled(true);
                     feeder.cancel();
-                    (None, None, ignored, None)
+                    (None, None, ignored, None, FailureKind::Delivery)
                 }
                 Some(outcome) => {
                     let route = match &outcome {
@@ -1708,7 +1708,7 @@ impl<S: Rig> Runner<S> {
                         (Some(a), Some(b)) => Some(format!("{a} {b}")),
                         (a, b) => a.or(b),
                     };
-                    (finished, route, ignored, note)
+                    (finished, route, ignored, note, undelivered(&outcome))
                 }
             }
         };
@@ -1723,8 +1723,10 @@ impl<S: Rig> Runner<S> {
         if let Some(model) = requests.reload {
             self.reload_speech_model(model);
         }
-        self.publisher
-            .mode(told(noted(delivered(finished, route), note), &ignored));
+        self.publisher.mode(told(
+            noted(delivered(finished, route, undelivered), note),
+            &ignored,
+        ));
         if requests.listening_off {
             self.pause();
         }
@@ -1862,8 +1864,26 @@ fn noted(mode: Mode, note: Option<String>) -> Mode {
     }
 }
 
+/// What failed when `outcome` was not delivered: the recognizer, or the capture's delivery.
+fn undelivered(outcome: &CaptureOutcome) -> FailureKind {
+    match outcome {
+        CaptureOutcome::Failed {
+            error:
+                CaptureError::Recognizer(_)
+                | CaptureError::NotReady { .. }
+                | CaptureError::ModelDownloading { .. },
+            ..
+        } => FailureKind::Recognizer,
+        _ => FailureKind::Delivery,
+    }
+}
+
 /// What the status shows once a capture's delivery is over; nothing to show when it had none.
-fn delivered(finished: Option<Finished>, route: Option<CaptureRoute>) -> Mode {
+fn delivered(
+    finished: Option<Finished>,
+    route: Option<CaptureRoute>,
+    undelivered: FailureKind,
+) -> Mode {
     match (finished, route) {
         (Some(finished), Some(route)) if finished.delivered => {
             println!("{}", finished.notice);
@@ -1878,7 +1898,7 @@ fn delivered(finished: Option<Finished>, route: Option<CaptureRoute>) -> Mode {
                 notice: finished.notice,
                 headline: finished.headline,
                 causes: finished.causes,
-                kind: FailureKind::Delivery,
+                kind: undelivered,
             })
         }
         (None, _) => Mode::Idle,
@@ -2373,7 +2393,7 @@ mod tests {
                 true,
                 Mode::Idle,
                 Mode::Failed(Failure {
-                    kind: FailureKind::Other,
+                    kind: FailureKind::Recognizer,
                     notice: "Could not download the speech model. Dictation will try again when you start it."
                         .to_owned(),
                     headline: "Speech recognition failed — Settings",
@@ -3561,7 +3581,11 @@ mod tests {
             task_target: None,
         };
         assert_eq!(
-            delivered(Some(finished(false)), Some(CaptureRoute::Paste)),
+            delivered(
+                Some(finished(false)),
+                Some(CaptureRoute::Paste),
+                FailureKind::Delivery
+            ),
             Mode::Failed(Failure {
                 notice: "Done.".to_owned(),
                 headline: "Done",
@@ -3570,12 +3594,57 @@ mod tests {
             }),
         );
         assert_eq!(
-            delivered(Some(finished(true)), Some(CaptureRoute::Paste)),
+            delivered(
+                Some(finished(true)),
+                Some(CaptureRoute::Paste),
+                FailureKind::Delivery
+            ),
             Mode::Done {
                 route: CaptureRoute::Paste,
                 notice: "Done.".to_owned(),
             },
         );
+    }
+
+    #[test]
+    fn a_failed_capture_blames_the_recognizer_only_when_it_could_not_take_the_capture() {
+        use thalvi_desktop::recognizer::SpeechSource;
+
+        let speech = || SpeechSource::direct("Realtime", "ws://127.0.0.1:9".to_owned());
+        let failed = |error| CaptureOutcome::Failed {
+            error,
+            recoverable_text: None,
+        };
+        for (case, outcome, expected) in [
+            (
+                "not ready",
+                failed(CaptureError::NotReady {
+                    waited: Duration::from_secs(5),
+                    speech: speech(),
+                }),
+                FailureKind::Recognizer,
+            ),
+            (
+                "downloading",
+                failed(CaptureError::ModelDownloading {
+                    speech: speech(),
+                    percent: 40,
+                }),
+                FailureKind::Recognizer,
+            ),
+            (
+                "microphone",
+                failed(CaptureError::MicStopped),
+                FailureKind::Delivery,
+            ),
+            (
+                "accepted",
+                CaptureOutcome::Cancelled { dictated: None },
+                FailureKind::Delivery,
+            ),
+        ] {
+            assert_eq!(undelivered(&outcome), expected, "{case}");
+        }
     }
 
     #[test]
