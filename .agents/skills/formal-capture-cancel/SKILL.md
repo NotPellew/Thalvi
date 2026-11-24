@@ -199,6 +199,15 @@ Cancelling engine builds on quit (#671) adds `Runner::build_interruptible` and `
 strictly between captures and leaves the control queue untouched; `Requests::take`,
 `Requests::read_queued`, `drive`, `Runner::capture`, and `Settling::settle` are unchanged, so the model actions are unchanged.
 
+Live-recognizer Submit preview confirmation (#675) attaches a `SubmitPreview` to
+`EngineState::PendingEnding` for live Submit endings and gates `Step::Quiet` in `Engine::drive`
+on `Presentation::Shown` (with a 1 s timeout or failure returning `Done::Failed`). Both new
+branches sit below `self.cancel.changed()` in the biased select and can only wait or fail without
+admitting delivery, and `Engine::on_quiet` rechecks `Presentation::Shown` before accepting;
+`Requests::take`, `drive`, `Runner::capture`, `Settling::settle`, `Delivery`, and
+`confirm_final_submit` keep the same cancellation writes and delivery fence, so the model actions
+are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
