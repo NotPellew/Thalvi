@@ -561,16 +561,18 @@ fn no_effect(running: &impl Running, why: &str) -> String {
     )
 }
 
-/// Waits until both the audio flag and the status say whether listening is paused, so a reply
-/// never reports a state that lags the change it confirms.
+/// Waits until the audio flag says whether listening is paused and, on resume, until the status
+/// has left Paused, so a reply never reports a state that lags the change it confirms. A pause
+/// waits for the flag alone: a model still loading keeps the status at Loading.
 async fn paused_is(running: &impl Running, wait: Duration, paused: bool) -> bool {
     let mut audio = running.audio();
     let mut status = running.status();
     reached(&mut audio, wait, |audio| audio.paused == paused).await
-        && reached(&mut status, wait, |status| {
-            matches!(status, Status::Paused) == paused
-        })
-        .await
+        && (paused
+            || reached(&mut status, wait, |status| {
+                !matches!(status, Status::Paused)
+            })
+            .await)
 }
 
 async fn pause(running: &impl Running, wait: Duration) -> String {
@@ -1099,7 +1101,9 @@ mod tests {
                     partial: None,
                     notice: None,
                 }),
-                (true, Status::Loading { .. }) if self.loading_takes_press.load(Ordering::SeqCst) => {
+                (true, Status::Loading { .. })
+                    if self.loading_takes_press.load(Ordering::SeqCst) =>
+                {
                     self.set_status(Status::Starting {
                         target: Some("kitty".to_owned()),
                         loading: true,
@@ -1898,6 +1902,34 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_pause_while_a_model_loads_took_effect_once_listening_is_off() {
+        let fake = Fake::new("pause-loading", "{}");
+        fake.set_status(Status::Loading {
+            notice: String::new(),
+            downloading: false,
+        });
+        fake.ignoring.store(true, Ordering::SeqCst);
+        let reply = tokio::spawn({
+            let fake = Arc::clone(&fake);
+            async move { answer(&fake, Duration::from_secs(5), &Request::Pause.line()).await }
+        });
+
+        while !fake
+            .sent()
+            .contains(&format!("{:?}", Control::SetListening(false)))
+        {
+            tokio::task::yield_now().await;
+        }
+        fake.audio.send_modify(|audio| audio.paused = true);
+
+        let reply: Value = serde_json::from_str(&reply.await.unwrap()).unwrap();
+        assert_eq!(
+            reply,
+            json!({"ok": true, "took_effect": true, "state": "loading"})
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_resume_reports_the_state_listening_has_once_the_status_has_left_paused() {
         let fake = Fake::new("resume-lag", "{}");
         fake.pause_audio(true);
@@ -1907,7 +1939,10 @@ mod tests {
             async move { answer(&fake, Duration::from_secs(5), &Request::Resume.line()).await }
         });
 
-        while !fake.sent().contains(&format!("{:?}", Control::SetListening(true))) {
+        while !fake
+            .sent()
+            .contains(&format!("{:?}", Control::SetListening(true)))
+        {
             tokio::task::yield_now().await;
         }
         // The microphone reopens before the status is published.
