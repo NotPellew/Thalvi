@@ -4,6 +4,7 @@ import type { Look, LookProperty, LookStyles, LookSurface, OverlayPreviewState, 
 import { fakeBackend } from "./fake.ts";
 import { mountSettings } from "./settings.ts";
 import { LOOK_STYLES, previewBuffer, SETTINGS, settle, stubBackend } from "./testing.ts";
+import settingsLooksCss from "./settings-looks.css?raw";
 
 const STATES: readonly OverlayPreviewState[] = ["live", "quiet", "working", "pending", "done", "failed"];
 const ALL: readonly Look[] = ["gunmetal", "holo", "neon"];
@@ -280,11 +281,11 @@ describe("the look's Customize section", () => {
     ["suspended", { suspended: true }],
     ["unreadable", { unreadable: "the file is locked" }],
   ])("keeps the Customize group on screen with its %s banner and the preview", async (_kind, holo) => {
+    document.head.innerHTML = `<style>${settingsLooksCss}</style>`;
     await open({ config: { themes: { version: 1, holo } } });
-    const group = pick("[data-cust-banner]").closest(".grp");
-    expect(group?.querySelector("[data-cust-preview]")).not.toBeNull();
-    const shown = [pick("[data-cust-banner]"), pick("[data-cust-preview]")].map((node) => node.closest(".row"));
-    expect(shown.map((row) => row !== null && !row.hidden && group?.contains(row) === true)).toEqual([true, true]);
+    const group = pick("[data-cust-banner]").closest(".grp") as HTMLElement;
+    expect(getComputedStyle(group).display).not.toBe("none");
+    expect(group.querySelector("[data-cust-preview]")).not.toBeNull();
   });
 
   it("shows the reason when a banner action is refused", async () => {
