@@ -14,6 +14,13 @@ const SECTIONS: readonly (readonly [string, readonly string[]])[] = [
   ["Effects", ["glow", "decoration", "motion"]],
 ];
 
+type ReadonlyJson = string | number | boolean | null | readonly ReadonlyJson[] | { readonly [key: string]: ReadonlyJson };
+type ReadonlyJsonObject = { readonly [key: string]: ReadonlyJson };
+
+function isJsonObject(value: ReadonlyJson | undefined): value is ReadonlyJsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function filePath(id: string): string[] {
   const parts = id.split(".");
   if (parts[0] === "colors") {
@@ -22,18 +29,17 @@ function filePath(id: string): string[] {
   return parts;
 }
 
-function objectAt(root: JsonObject | undefined, path: readonly string[]): JsonObject | undefined {
-  let node: JsonObject | undefined = root;
+function objectAt(root: ReadonlyJsonObject | undefined, path: readonly string[]): ReadonlyJsonObject | undefined {
+  let node: ReadonlyJsonObject | undefined = root;
   for (const key of path) {
     if (node === undefined) return undefined;
     const next = node[key];
-    if (typeof next !== "object" || next === null || Array.isArray(next)) return undefined;
-    node = next;
+    node = isJsonObject(next) ? next : undefined;
   }
   return node;
 }
 
-function has(root: JsonObject | undefined, path: readonly string[]): boolean {
+function has(root: ReadonlyJsonObject | undefined, path: readonly string[]): boolean {
   const parent = objectAt(root, path.slice(0, -1));
   const leaf = path.at(-1);
   return parent !== undefined && leaf !== undefined && parent[leaf] !== undefined;
@@ -55,7 +61,7 @@ function setLeaf(root: JsonObject, path: readonly string[], value: LookValue): v
   if (leaf !== undefined) node[leaf] = value;
 }
 
-function deleteLeaf(root: JsonObject | undefined, path: readonly string[]): void {
+function deleteLeaf(root: ReadonlyJsonObject | undefined, path: readonly string[]): void {
   const parent = objectAt(root, path.slice(0, -1));
   const leaf = path.at(-1);
   if (parent !== undefined && leaf !== undefined) Reflect.deleteProperty(parent, leaf);
@@ -112,7 +118,6 @@ function overlayPreview(backend: Backend): Preview {
         canvas.width = width;
         canvas.height = height;
         canvas.style.width = `${String(width / scale)}px`;
-        canvas.style.height = `${String(height / scale)}px`;
         const context = canvas.getContext("2d");
         if (context === null) throw new Error("This window cannot draw the preview.");
         context.putImageData(new ImageData(new Uint8ClampedArray(buffer, 8), width, height), 0, 0);
@@ -130,29 +135,102 @@ function overlayPreview(backend: Backend): Preview {
   return { node, draw };
 }
 
+interface OpenedState {
+  seen: boolean;
+  draw(): void;
+}
+
+const openedStates = new WeakMap<PageContext["live"], OpenedState>();
+
+/** Draws once the overlay page opens, and keeps that state across page rebuilds. */
+function onPageOpened(live: PageContext["live"], draw: () => void): OpenedState {
+  const known = openedStates.get(live);
+  if (known) {
+    known.draw = draw;
+    return known;
+  }
+  const state: OpenedState = { seen: false, draw };
+  openedStates.set(live, state);
+  let external = live.opened;
+  const opened = (id: string): void => {
+    external(id);
+    if (id === "overlay") {
+      state.seen = true;
+      state.draw();
+    }
+  };
+  // Other pages assign `opened` after this one is built, so compose with those hooks too.
+  Object.defineProperty(live, "opened", {
+    configurable: true,
+    enumerable: true,
+    get: () => opened,
+    set: (next: (id: string) => void) => { external = next; },
+  });
+  return state;
+}
+
+interface FieldRow {
+  id: string;
+  path: string[];
+  field: HTMLElement;
+  swatch: HTMLElement | null;
+  reset: HTMLButtonElement;
+  problem: HTMLElement;
+  shown: LookValue;
+  last: LookValue;
+}
+
 /** The Customize section for the look saved in Settings, plus its preview and banners. */
 export function customize(context: PageContext): HTMLElement[] {
   const { settings, controls, backend, apply, live } = context;
   let look: Look = settings.look;
   let styles: LookStyles | null = context.lookStyles;
-  let resets: { path: string[]; button: HTMLButtonElement }[] = [];
-  const banner = el("div", { class: "cust-banner", "data-cust-banner": "" });
+  let rows: FieldRow[] = [];
+  let builtLook: Look | null = null;
+  let bannerKey = "";
+  const banner = el("div", { class: "cust-banner", "data-cust-banner": "", hidden: true });
   const fields = el("div", { class: "cust-fields", "data-cust-fields": "" });
   const actions = el("div", { class: "cust-actions", "data-cust-actions": "" });
   const preview = overlayPreview(backend);
   const holder = el("div", { class: "cust", "data-customize": "" }, banner, fields, actions, preview.node);
+  const openedState = onPageOpened(live, () => { void preview.draw(); });
 
   const title = (): string => LOOKS.find(([name]) => name === look)?.[1] ?? look;
-  const editable = settings as Settings;
-  const changes = (): JsonObject | undefined => editable.themes?.[look];
+  const changes = (): ReadonlyJsonObject | undefined => settings.themes?.[look];
+
+  function showValue(entry: FieldRow, value: LookValue): void {
+    entry.shown = value;
+    if (entry.field instanceof HTMLInputElement) {
+      if (entry.field.type === "checkbox") entry.field.checked = value === true;
+      else entry.field.value = String(value);
+    }
+    if (entry.swatch !== null && typeof value === "string") entry.swatch.style.backgroundColor = value;
+  }
 
   function refreshResets(): void {
-    for (const { path, button } of resets) button.disabled = !has(changes(), path);
+    for (const entry of rows) {
+      const disabled = !has(changes(), entry.path);
+      if (entry.reset.disabled === disabled) continue;
+      entry.reset.disabled = disabled;
+      if (disabled && document.activeElement === entry.reset) entry.field.focus();
+    }
+  }
+
+  function syncRows(): void {
+    const values = styles?.values[look];
+    for (const entry of rows) {
+      const value = values?.[entry.id];
+      if (value !== undefined && value !== entry.shown) {
+        showValue(entry, value);
+        entry.last = value;
+      }
+    }
+    refreshResets();
   }
 
   function afterChange(): void {
     refreshResets();
-    void preview.draw();
+    if (openedState.seen) void preview.draw();
   }
 
   function set(id: string, value: LookValue): Promise<void> {
@@ -166,10 +244,11 @@ export function customize(context: PageContext): HTMLElement[] {
     }).then(afterChange);
   }
 
-  function reset(id: string): void {
+  function reset(entry: FieldRow): void {
+    say(entry.problem, "");
     void apply((draft) => {
-      deleteLeaf(draft.themes?.[look], filePath(id));
-    }).then(afterChange);
+      deleteLeaf(draft.themes?.[look], entry.path);
+    }).then(afterChange, (error: unknown) => { say(entry.problem, errorText(error)); });
   }
 
   function control(property: LookProperty): HTMLElement | null {
@@ -177,23 +256,30 @@ export function customize(context: PageContext): HTMLElement[] {
     if (value === undefined) return null;
     const path = filePath(property.id);
     let field: Field;
+    const holderRow: { current?: FieldRow } = {};
     const commit = (wanted: LookValue): Promise<void> =>
-      set(property.id, wanted).catch((error: unknown) => {
-        const input = field.field;
-        if (input instanceof HTMLInputElement) {
-          if (input.type === "checkbox") input.checked = value === true;
-          else input.value = String(value);
-        }
-        throw error;
-      });
+      set(property.id, wanted).then(
+        () => {
+          const current = holderRow.current;
+          if (current !== undefined) {
+            current.last = wanted;
+            current.shown = wanted;
+          }
+        },
+        (error: unknown) => {
+          const current = holderRow.current;
+          if (current !== undefined) showValue(current, current.last);
+          throw error;
+        },
+      );
 
+    let swatch: HTMLElement | null = null;
     if (property.unit === "color" || property.unit === "text") {
       if (typeof value !== "string") return null;
       field = controls.text(value, commit, property.unit === "text" ? { placeholder: "System font" } : {});
       if (property.unit === "color") {
-        const swatch = el("span", { class: "swatch", "data-swatch": "" });
+        swatch = el("span", { class: "swatch", "data-swatch": "" });
         swatch.style.backgroundColor = value;
-        field = { node: el("span", { class: "swatch-field" }, swatch, field.node), field: field.field };
       }
     } else if (property.unit === "number") {
       if (typeof value !== "number" || property.min === null || property.max === null || property.step === null) return null;
@@ -203,25 +289,30 @@ export function customize(context: PageContext): HTMLElement[] {
       field = controls.toggle(value, commit);
     }
 
-    const resetButton = button("↺", "data-reset", () => { reset(property.id); });
+    const controlNode = swatch === null ? field.node : el("span", { class: "swatch-field" }, swatch, field.node);
+    const problem = el("p", { class: "note", role: "alert", hidden: true });
+    const resetButton = button("↺", "data-reset", () => { reset(entry); });
     resetButton.setAttribute("data-reset", property.id);
     resetButton.setAttribute("aria-label", `Reset ${property.label}`);
     resetButton.disabled = !has(changes(), path);
-    resets.push({ path, button: resetButton });
-    return row(property.label, null, { node: el("span", { class: "cust-control" }, field.node, resetButton), field: field.field });
+    const entry: FieldRow = { id: property.id, path, field: field.field, swatch, reset: resetButton, problem, shown: value, last: value };
+    holderRow.current = entry;
+    rows.push(entry);
+    return row(property.label, null, { node: el("span", { class: "cust-control" }, controlNode, resetButton, problem), field: field.field });
   }
 
   function renderFields(): void {
-    resets = [];
+    rows = [];
     const properties = styles?.properties ?? [];
     const sections = SECTIONS.flatMap(([heading, categories]) => {
-      const rows = properties
+      const rowNodes = properties
         .filter((property) => categories.includes(property.category) && property.looks.includes(look))
         .map(control)
         .filter((node): node is HTMLElement => node !== null);
-      return rows.length === 0 ? [] : [el("section", { class: "cust-cat", "data-category": heading }, el("h5", {}, heading), ...rows)];
+      return rowNodes.length === 0 ? [] : [el("section", { class: "cust-cat", "data-category": heading }, el("h5", {}, heading), ...rowNodes)];
     });
     fields.replaceChildren(...sections);
+    builtLook = look;
   }
 
   function act(edit: (draft: Settings) => void, problem: HTMLElement): void {
@@ -232,21 +323,15 @@ export function customize(context: PageContext): HTMLElement[] {
     );
   }
 
-  function renderBanner(): void {
-    const entry = changes();
-    const suspended = entry?.suspended === true;
-    const unreadable = entry?.unreadable;
-    const reason = typeof unreadable === "string" ? unreadable : null;
-    if (!suspended && reason === null) {
+  function renderBanner(suspended: boolean, reason: string | null): boolean {
+    const key = suspended ? `s:${title()}` : reason !== null ? `u:${title()}:${reason}` : "";
+    if (key === bannerKey) return key !== "";
+    bannerKey = key;
+    if (key === "") {
       banner.hidden = true;
       banner.replaceChildren();
-      fields.hidden = false;
-      actions.hidden = false;
-      return;
+      return false;
     }
-    banner.hidden = false;
-    fields.hidden = true;
-    actions.hidden = true;
     const problem = el("p", { class: "note", role: "alert", hidden: true });
     const parts: HTMLElement[] = [
       el("span", {}, suspended
@@ -264,6 +349,8 @@ export function customize(context: PageContext): HTMLElement[] {
     }, problem); }));
     parts.push(problem);
     banner.replaceChildren(...parts);
+    banner.hidden = false;
+    return true;
   }
 
   function renderActions(): void {
@@ -275,12 +362,22 @@ export function customize(context: PageContext): HTMLElement[] {
   }
 
   function render(): void {
-    renderBanner();
-    if (banner.hidden) {
+    const entry = changes();
+    const suspended = entry?.suspended === true;
+    const unreadable = entry?.unreadable;
+    const reason = typeof unreadable === "string" ? unreadable : null;
+    const showing = renderBanner(suspended, reason);
+    fields.hidden = showing;
+    actions.hidden = showing;
+    if (showing) {
+      builtLook = null;
+    } else if (builtLook !== look) {
       renderFields();
       renderActions();
+    } else {
+      syncRows();
     }
-    void preview.draw();
+    if (openedState.seen) void preview.draw();
   }
 
   live.look = (next: Look) => {

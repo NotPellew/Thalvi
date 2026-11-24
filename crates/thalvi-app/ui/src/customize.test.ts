@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createControls } from "./controls.ts";
 import type { Look, LookProperty, LookStyles, LookSurface, OverlayPreviewState, Settings } from "./contract.ts";
+import { fakeBackend } from "./fake.ts";
 import { mountSettings } from "./settings.ts";
 import { LOOK_STYLES, SETTINGS, settle, stubBackend } from "./testing.ts";
 
@@ -78,17 +80,20 @@ describe("the look's Customize section", () => {
     look?: Look;
     config?: Partial<Settings>;
     styles?: LookStyles;
+    visit?: boolean;
   }
 
-  async function open({ look = "holo", config = {}, styles = STYLES }: OpenOptions = {}) {
+  async function open({ look = "holo", config = {}, styles = STYLES, visit = true }: OpenOptions = {}) {
     root = document.createElement("div");
     root.id = "settings";
     document.body.replaceChildren(root);
     const stub = stubBackend({ ...SETTINGS, themes: { version: 1 }, ...config, look }, undefined, styles);
     mountSettings(root, stub.backend);
     await settle();
-    stub.openPage("overlay");
-    await settle();
+    if (visit) {
+      stub.openPage("overlay");
+      await settle();
+    }
     return stub;
   }
 
@@ -184,6 +189,72 @@ describe("the look's Customize section", () => {
     },
   );
 
+  it.each([
+    { label: "Font scale", selector: 'input[type="range"]', value: "1.2", key: "font.scale", resolved: 1.2 },
+    { label: "Accent", selector: "input", value: "#ff0000", key: "colors.accent", resolved: "#ff0000" },
+  ])("keeps $label's focus and applied note when its value changes", async ({ label, selector, value, key, resolved }) => {
+    const stub = await open();
+    const target = row(label);
+    const input = target.querySelector(selector) as HTMLInputElement;
+    input.focus();
+    stub.backend.getLookStyles.mockImplementation(() => Promise.resolve({
+      ...STYLES,
+      values: { ...STYLES.values, holo: { ...STYLES.values.holo, [key]: resolved } },
+    }));
+    change(input, value);
+    await settle();
+    expect(document.activeElement).toBe(input);
+    expect(row(label)).toBe(target);
+    expect(target.querySelector("small.applied")?.textContent).toBe("Applied.");
+  });
+
+  it("moves focus from a reset button to its field when the reset disables it", async () => {
+    await open({ config: { themes: { version: 1, holo: { colors: { dark: { accent: "#ff0000" } } } } } });
+    const target = row("Accent");
+    const reset = target.querySelector("[data-reset]") as HTMLButtonElement;
+    reset.focus();
+    reset.click();
+    await settle();
+    expect(reset.disabled).toBe(true);
+    expect(document.activeElement).toBe(target.querySelector("input"));
+    expect((target.querySelector("input") as HTMLInputElement).value).toBe("#6bf8ff");
+  });
+
+  it("shows the reason beside the row when a per-property reset is refused", async () => {
+    const stub = await open({ config: { themes: { version: 1, holo: { colors: { dark: { accent: "#ff0000" } } } } } });
+    stub.backend.saveSettings.mockRejectedValueOnce("Read-only file system (os error 30)");
+    const target = row("Accent");
+    (target.querySelector("[data-reset]") as HTMLButtonElement).click();
+    await settle();
+    expect(target.querySelector('[role="alert"]:not([hidden])')?.textContent).toBe("Read-only file system (os error 30)");
+  });
+
+  it("puts the last applied value back when a later change is refused", async () => {
+    const stub = await open();
+    const input = row("Text").querySelector("input") as HTMLInputElement;
+    stub.backend.getLookStyles.mockImplementation(() => Promise.resolve({
+      ...STYLES,
+      values: { ...STYLES.values, holo: { ...STYLES.values.holo, "colors.text": "#123456" } },
+    }));
+    change(input, "#123456");
+    await settle();
+    expect(input.value).toBe("#123456");
+    stub.backend.saveSettings.mockRejectedValueOnce("too little contrast");
+    change(input, "#abcdef");
+    await settle();
+    expect(input.value).toBe("#123456");
+  });
+
+  it.each([
+    { step: 100, value: 700, shown: "700" },
+    { step: 0.05, value: 1.1, shown: "1.10" },
+    { step: 0.01, value: 0.18, shown: "0.18" },
+  ])("shows slider value $value with step $step as $shown", ({ step, value, shown }) => {
+    const controls = createControls(() => "Applied.");
+    const field = controls.slider(value, { min: 0, max: 1000, step }, () => Promise.resolve());
+    expect((field.node.querySelector("output") as HTMLOutputElement).textContent).toBe(shown);
+  });
+
   it("shows the suspended banner, hides Customize, and turns styling back on", async () => {
     const stub = await open({ config: { themes: { version: 1, holo: { suspended: true, colors: { dark: { accent: "#ff0000" } } } } } });
     expect(pick("[data-cust-banner]").textContent).toContain("Custom styling is off for Holo");
@@ -213,6 +284,14 @@ describe("the look's Customize section", () => {
     expect(pick("[data-cust-banner] p.note:not([hidden])").textContent).toBe("Read-only file system (os error 30)");
   });
 
+  it("waits for the overlay page to open before drawing the preview", async () => {
+    const stub = await open({ visit: false });
+    expect(stub.backend.previewOverlay).not.toHaveBeenCalled();
+    stub.openPage("overlay");
+    await settle();
+    expect(stub.backend.previewOverlay).toHaveBeenCalledTimes(6);
+  });
+
   it("draws the bytes each state's preview returns into its canvas", async () => {
     const stub = await open();
     const buffers = new Map(STATES.map((state, index) => [state, buffer(state, index + 1)]));
@@ -225,7 +304,7 @@ describe("the look's Customize section", () => {
       const image = imageOf(canvas);
       const expected = new Uint8Array(buffers.get(state) as ArrayBuffer, 8);
       expect(new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength)).toEqual(expected);
-      expect([canvas.width, canvas.height, canvas.style.width, canvas.style.height]).toEqual([2, 2, "2px", "2px"]);
+      expect([canvas.width, canvas.height, canvas.style.width, canvas.style.height]).toEqual([2, 2, "2px", ""]);
     }
   });
 
@@ -257,5 +336,17 @@ describe("the look's Customize section", () => {
     const canvas = pick('canvas[data-preview-state="live"]') as HTMLCanvasElement;
     const image = imageOf(canvas);
     expect(new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength)).toEqual(new Uint8Array(recent, 8));
+  });
+
+  it("gives the fake preview a layout-sized image with a different fill per state", async () => {
+    const fake = fakeBackend(new URLSearchParams());
+    const images = await Promise.all(STATES.map((state) => fake.previewOverlay(state, 2)));
+    const sizes = images.map((buffer) => {
+      const view = new DataView(buffer);
+      return [view.getUint32(0, true), view.getUint32(4, true)];
+    });
+    expect(sizes).toEqual(STATES.map(() => [920, 400]));
+    const firstPixels = images.map((buffer) => new Uint8ClampedArray(buffer, 8)[0]);
+    expect(new Set(firstPixels).size).toBe(STATES.length);
   });
 });
