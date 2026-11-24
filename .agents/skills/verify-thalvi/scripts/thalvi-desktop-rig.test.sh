@@ -58,17 +58,19 @@ test_prune() {
   local base=$THALVI_RIG_BASE
   local gone
   gone=$(dead_pid)
-  mkdir -p "$base/models" "$base/bin/old" "$base/bin/new" "$base/bin/held" "$base/run-old" "$base/run-live"
+  mkdir -p "$base/models" "$base/bin/old" "$base/bin/new" "$base/bin/held" "$base/run-old" "$base/run-live" "$base/run-app"
   printf x > "$base/models/x.onnx"
   printf x > "$base/vt-dictation.wav"
   printf '%s\n' "$gone" > "$base/run-old/compositor.pid"
   printf '%s\n' "$$" > "$base/run-live/compositor.pid"
+  printf '%s\n' "$gone" > "$base/run-app/compositor.pid"
+  printf '%s\n' "$$" > "$base/run-app/app.pid"
   printf '%s\n' "$base/bin/held/thalvi-desktop" > "$base/run-live/app.bin"
   printf bin > "$base/bin/old/build"
   printf bin > "$base/bin/new/build"
   printf bin > "$base/bin/held/build"
   touch -d '2 days ago' "$base/bin/old/build" "$base/bin/held/build"
-  touch -d '2 days ago' "$base/bin/old" "$base/bin/held" "$base/run-old" "$base/run-live"
+  touch -d '2 days ago' "$base/bin/old" "$base/bin/held" "$base/run-old" "$base/run-live" "$base/run-app"
 
   if "$rig" up --models nosuch >"$base/stdout" 2>"$base/stderr"; then
     fail 'prune: up with a missing model is expected to stop after pruning'
@@ -80,6 +82,10 @@ test_prune() {
   fi
   if [ ! -d "$base/run-live" ]; then
     fail 'prune: a backdated run with a live compositor is removed'
+    return
+  fi
+  if [ ! -d "$base/run-app" ]; then
+    fail 'prune: a backdated run with a live app is removed'
     return
   fi
   if [ ! -f "$base/models/x.onnx" ] || [ ! -f "$base/vt-dictation.wav" ]; then
@@ -105,7 +111,7 @@ test_prune() {
     fail "prune: stderr lists the wrong removals (got $(printf %q "$actual"), want $(printf %q "$expected"))"
     return
   fi
-  pass 'prune: removes a stopped old run and an unused old bin, keeps a live run, a used bin, the cache and fixtures, and reports exactly those removals'
+  pass 'prune: removes a stopped old run and an unused old bin, keeps a run with a live compositor or app, a used bin, the cache and fixtures, and reports exactly those removals'
 }
 
 test_models_are_hardlinked() {
