@@ -4,8 +4,7 @@
 # shellcheck disable=SC2016  # scripts for the sandbox are single-quoted on purpose
 set -euo pipefail
 
-# Canonical, so the paths app.bin records match the ones prune finds.
-BASE=$(readlink -m -- "${THALVI_RIG_BASE:-/var/tmp/thalvi-rig}")
+BASE=${THALVI_RIG_BASE:-/var/tmp/thalvi-rig}
 UID_NUM=$(id -u)
 GNOME_HELPER=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/thalvi-gnome-rig.py
 
@@ -246,7 +245,7 @@ cmd_bind() {
 }
 
 prune() {
-  local base=$1 d f pid app used live
+  local base=$1 d f pid app used live real
   while IFS= read -r -d '' d; do
     live=0
     for f in "$d/compositor.pid" "$d/app.pid"; do
@@ -260,9 +259,10 @@ prune() {
   [ -d "$base/bin" ] || return 0
   while IFS= read -r -d '' d; do
     used=0
+    real=$(readlink -f -- "$d")
     for app in "$base"/run-*/app.bin; do
       [ -s "$app" ] || continue
-      case $(cat "$app") in "$d"/*) used=1; break ;; esac
+      case $(readlink -m -- "$(cat "$app")") in "$real"/*) used=1; break ;; esac
     done
     [ "$used" = 0 ] || continue
     [ -z "$(find "$d" \( -mmin -1440 -o -amin -1440 \) -print -quit)" ] || continue
