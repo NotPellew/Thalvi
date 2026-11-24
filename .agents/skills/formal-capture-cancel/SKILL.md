@@ -183,6 +183,12 @@ reads once whether the live entry is Parakeet, and `idle_error` passes that to t
 steps in `Engine::drive` and `Engine::feed` still fail the capture with no new await, queue step or
 delivery path, so the model actions are unchanged.
 
+Showing Loading through a live recognizer rebuild (#617) shares `Publisher` via `Arc<Mutex<_>>`
+between `EngineLink` and `Runner`, tracks rebuild sequence numbers in `Runner::apply`, and sets
+`Mode::Starting` at `Runner::rebuild` entry. `Requests::take`, `Requests::read_queued`, `drive`,
+`Runner::capture`, `Settling::settle`, and `Runner::apply_engine` keep the same cancellation
+writes, await boundaries, and delivery admission fence, so the model actions are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
