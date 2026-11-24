@@ -159,7 +159,7 @@ export function customize(context: PageContext): HTMLElement[] {
   const banner = el("div", { class: "cust-banner wide", "data-cust-banner": "" });
   // A group with no visible row is hidden, so the banner and the preview are rows of their own.
   const bannerRow = row("Custom styling", null, banner);
-  bannerRow.hidden = true;
+  bannerRow.classList.add("off");
   const fields = el("div", { class: "cust-fields", "data-cust-fields": "" });
   const actions = el("div", { class: "cust-actions", "data-cust-actions": "" });
   const preview = overlayPreview(backend);
@@ -301,7 +301,7 @@ export function customize(context: PageContext): HTMLElement[] {
     if (key === bannerKey) return key !== "";
     bannerKey = key;
     if (key === "") {
-      bannerRow.hidden = true;
+      bannerRow.classList.add("off");
       banner.replaceChildren();
       return false;
     }
@@ -322,7 +322,7 @@ export function customize(context: PageContext): HTMLElement[] {
     }, problem); }));
     parts.push(problem);
     banner.replaceChildren(...parts);
-    bannerRow.hidden = false;
+    bannerRow.classList.remove("off");
     return true;
   }
 

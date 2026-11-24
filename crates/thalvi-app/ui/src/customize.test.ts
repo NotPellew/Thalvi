@@ -4,6 +4,7 @@ import type { Look, LookProperty, LookStyles, LookSurface, OverlayPreviewState, 
 import { fakeBackend } from "./fake.ts";
 import { mountSettings } from "./settings.ts";
 import { LOOK_STYLES, previewBuffer, SETTINGS, settle, stubBackend } from "./testing.ts";
+import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
 
 const STATES: readonly OverlayPreviewState[] = ["live", "quiet", "working", "pending", "done", "failed"];
@@ -286,6 +287,16 @@ describe("the look's Customize section", () => {
     const group = pick("[data-cust-banner]").closest(".grp") as HTMLElement;
     expect(getComputedStyle(group).display).not.toBe("none");
     expect(group.querySelector("[data-cust-preview]")).not.toBeNull();
+  });
+
+  it("shows no banner for a look with usable changes, also after the view is filtered again", async () => {
+    await open({ config: { themes: { version: 1, holo: { colors: { dark: { accent: "#ff0000" } } } } } });
+    const search = pick('input[type="search"], input[placeholder="Search settings"]') as HTMLInputElement;
+    search.value = "";
+    search.dispatchEvent(new Event("input"));
+    await settle();
+    document.head.innerHTML = `<style>${settingsCss}</style>`;
+    expect(getComputedStyle(pick("[data-cust-banner]").closest(".row") as HTMLElement).display).toBe("none");
   });
 
   it("shows the reason when a banner action is refused", async () => {
