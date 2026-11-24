@@ -143,6 +143,10 @@ fn recognition() -> Cases {
             }),
             "No ending heard",
         ),
+        (
+            Box::new(CaptureError::HeldSilence(seconds)),
+            "Stopped after silence",
+        ),
         (Box::new(CaptureError::NoWords(seconds)), "No words heard"),
         (
             Box::new(CaptureError::HoldTooShort),
