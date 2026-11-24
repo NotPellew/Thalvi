@@ -11,6 +11,7 @@ stubs=()
 pass() { printf 'PASS %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1" >&2; status=1; }
 
+# shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() {
   local d
   for d in "${stubs[@]}"; do rm -rf -- "$d"; done
@@ -29,9 +30,8 @@ fresh_base() {
 # A PID that is already gone, without leaving a sleeper behind.
 dead_pid() {
   local pid
-  sleep 300 & pid=$!
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  sleep 0.01 & pid=$!
+  wait "$pid"
   printf '%s\n' "$pid"
 }
 
