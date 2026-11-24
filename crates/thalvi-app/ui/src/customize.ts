@@ -88,8 +88,8 @@ interface Preview {
 /** Inert sample controls in the window's look, and the real overlay for each state. */
 function overlayPreview(backend: Backend): Preview {
   const sample = el("div", { class: "preview-sample", "aria-hidden": "true", inert: true },
-    el("input", { type: "checkbox", role: "switch" }),
-    el("select", {}, el("option", {}, "Choose one")),
+    el("input", { type: "checkbox", role: "switch", "aria-label": "Sample switch" }),
+    el("select", { "aria-label": "Sample choice" }, el("option", {}, "Choose one")),
     el("button", { type: "button", class: "primary" }, "Primary"),
     el("span", { class: "badge" }, "Badge"),
     el("p", { class: "note" }, "Something needs your attention."),
