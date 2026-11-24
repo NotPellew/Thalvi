@@ -809,7 +809,7 @@ function commands(context: PageContext): HTMLElement[] {
   return [
     group("Endings"),
     ...(parakeet
-      ? [el("p", { class: "note" }, "Parakeet may not hear an English ending after speech in another language. Add endings in the language you dictate, like “text einfügen”.")]
+      ? [el("p", { class: "note ok" }, "Parakeet may not hear an English ending after speech in another language. Add endings in the language you dictate, like “text einfügen”.")]
       : []),
     row("Ending phrases", "Say one to finish. Every action needs one.", endingsTable(context)),
     group("Quiet before acting"),

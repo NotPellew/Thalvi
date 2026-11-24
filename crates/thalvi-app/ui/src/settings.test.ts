@@ -552,6 +552,7 @@ describe("the ending hint", () => {
     expect(note?.textContent ?? "").toBe(hint);
     if (note !== null) {
       expect(note.hasAttribute("role")).toBe(false);
+      expect(note.classList.contains("ok")).toBe(true);
       expect(note.hidden).toBe(false);
     }
   });
