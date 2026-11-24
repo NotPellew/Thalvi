@@ -8643,11 +8643,11 @@ async fn the_native_cue_player_reports_the_latest_calls_first_sample_timing() {
         let player = CpalCuePlayer::new(Cues::default(), InputGate::default());
         let called = Instant::now();
         assert_eq!(player.timing_since(called), None);
-        let played = player.play(Cue::Wake, Mic::Open).await;
+        let outcome = player.play(Cue::Wake, Mic::Open).await;
         let timing = player
             .timing_since(called)
             .expect("the output callback reported the first sample");
-        match played {
+        match outcome {
             Ok(returned) => assert_eq!(returned, Some(timing)),
             // ALSA's null output may reject pausing after the sample has arrived.
             Err(CueError::Failed(error)) if error.to_string().contains("snd_pcm_pause") => {}
