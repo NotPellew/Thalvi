@@ -299,6 +299,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     audio = loadedAudio;
     settings = loaded;
     showLook(loaded.look);
+    live.opened = () => undefined;
     pages = buildPages({
       settings: loaded, backend, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply, showLook, lookStyles,
     });
@@ -315,6 +316,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     feedback();
     applyView();
     if (typing) typeAgain(typing);
+    live.opened(current);
   }
 
   /** Applies one change on top of what the desktop holds; rejects with the plain reason it was refused, and then nothing changed. */

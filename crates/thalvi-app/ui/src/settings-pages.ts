@@ -81,7 +81,7 @@ export interface PageContext {
     audio: (audio: AudioStatus) => void;
     speechModel: (progress: SpeechModelProgress) => void;
     status: (status: Status) => void;
-    /** The page with this id was opened. */
+    /** The page with this id was opened, or is shown again after a rebuild. */
     opened: (id: string) => void;
     /** The look shown on this window changed. */
     look: (look: Look) => void;
@@ -2880,7 +2880,9 @@ function history(context: PageContext): HTMLElement[] {
       say(problem, errorText(error));
     });
   }
+  const before = live.opened;
   live.opened = (id) => {
+    before(id);
     if (id === "history") {
       refresh();
       last.refresh();

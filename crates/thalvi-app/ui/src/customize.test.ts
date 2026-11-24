@@ -3,7 +3,7 @@ import { createControls } from "./controls.ts";
 import type { Look, LookProperty, LookStyles, LookSurface, OverlayPreviewState, Settings } from "./contract.ts";
 import { fakeBackend } from "./fake.ts";
 import { mountSettings } from "./settings.ts";
-import { LOOK_STYLES, SETTINGS, settle, stubBackend } from "./testing.ts";
+import { LOOK_STYLES, previewBuffer, SETTINGS, settle, stubBackend } from "./testing.ts";
 
 const STATES: readonly OverlayPreviewState[] = ["live", "quiet", "working", "pending", "done", "failed"];
 const ALL: readonly Look[] = ["gunmetal", "holo", "neon"];
@@ -290,6 +290,28 @@ describe("the look's Customize section", () => {
     stub.openPage("overlay");
     await settle();
     expect(stub.backend.previewOverlay).toHaveBeenCalledTimes(6);
+  });
+
+  it("draws the preview again after a rebuild while the overlay page is current, without reopening it", async () => {
+    const stub = await open();
+    const later = buffer("live", 5);
+    stub.backend.previewOverlay.mockImplementation((state: OverlayPreviewState) => Promise.resolve(state === "live" ? later : previewBuffer(state)));
+    stub.changedElsewhere();
+    await settle();
+    const image = imageOf(pick('canvas[data-preview-state="live"]') as HTMLCanvasElement);
+    expect(new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength)).toEqual(new Uint8Array(later, 8));
+  });
+
+  it("does not draw a rebuilt page's preview while another page is current", async () => {
+    const stub = await open();
+    stub.openPage("history");
+    await settle();
+    const before = pick('canvas[data-preview-state="live"]') as HTMLCanvasElement;
+    stub.changedElsewhere();
+    await settle();
+    const after = pick('canvas[data-preview-state="live"]') as HTMLCanvasElement;
+    expect(after).not.toBe(before);
+    expect(drawn.has(after)).toBe(false);
   });
 
   it("draws the bytes each state's preview returns into its canvas", async () => {

@@ -29,6 +29,8 @@ function filePath(id: string): string[] {
   return parts;
 }
 
+function objectAt(root: JsonObject | undefined, path: readonly string[]): JsonObject | undefined;
+function objectAt(root: ReadonlyJsonObject | undefined, path: readonly string[]): ReadonlyJsonObject | undefined;
 function objectAt(root: ReadonlyJsonObject | undefined, path: readonly string[]): ReadonlyJsonObject | undefined {
   let node: ReadonlyJsonObject | undefined = root;
   for (const key of path) {
@@ -61,7 +63,7 @@ function setLeaf(root: JsonObject, path: readonly string[], value: LookValue): v
   if (leaf !== undefined) node[leaf] = value;
 }
 
-function deleteLeaf(root: ReadonlyJsonObject | undefined, path: readonly string[]): void {
+function deleteLeaf(root: JsonObject | undefined, path: readonly string[]): void {
   const parent = objectAt(root, path.slice(0, -1));
   const leaf = path.at(-1);
   if (parent !== undefined && leaf !== undefined) Reflect.deleteProperty(parent, leaf);
@@ -135,40 +137,6 @@ function overlayPreview(backend: Backend): Preview {
   return { node, draw };
 }
 
-interface OpenedState {
-  seen: boolean;
-  draw(): void;
-}
-
-const openedStates = new WeakMap<PageContext["live"], OpenedState>();
-
-/** Draws once the overlay page opens, and keeps that state across page rebuilds. */
-function onPageOpened(live: PageContext["live"], draw: () => void): OpenedState {
-  const known = openedStates.get(live);
-  if (known) {
-    known.draw = draw;
-    return known;
-  }
-  const state: OpenedState = { seen: false, draw };
-  openedStates.set(live, state);
-  let external = live.opened;
-  const opened = (id: string): void => {
-    external(id);
-    if (id === "overlay") {
-      state.seen = true;
-      state.draw();
-    }
-  };
-  // Other pages assign `opened` after this one is built, so compose with those hooks too.
-  Object.defineProperty(live, "opened", {
-    configurable: true,
-    enumerable: true,
-    get: () => opened,
-    set: (next: (id: string) => void) => { external = next; },
-  });
-  return state;
-}
-
 interface FieldRow {
   id: string;
   path: string[];
@@ -193,7 +161,15 @@ export function customize(context: PageContext): HTMLElement[] {
   const actions = el("div", { class: "cust-actions", "data-cust-actions": "" });
   const preview = overlayPreview(backend);
   const holder = el("div", { class: "cust", "data-customize": "" }, banner, fields, actions, preview.node);
-  const openedState = onPageOpened(live, () => { void preview.draw(); });
+  let seen = false;
+  const before = live.opened;
+  live.opened = (id) => {
+    before(id);
+    if (id === "overlay") {
+      seen = true;
+      void preview.draw();
+    }
+  };
 
   const title = (): string => LOOKS.find(([name]) => name === look)?.[1] ?? look;
   const changes = (): ReadonlyJsonObject | undefined => settings.themes?.[look];
@@ -230,7 +206,7 @@ export function customize(context: PageContext): HTMLElement[] {
 
   function afterChange(): void {
     refreshResets();
-    if (openedState.seen) void preview.draw();
+    if (seen) void preview.draw();
   }
 
   function set(id: string, value: LookValue): Promise<void> {
@@ -256,19 +232,14 @@ export function customize(context: PageContext): HTMLElement[] {
     if (value === undefined) return null;
     const path = filePath(property.id);
     let field: Field;
-    const holderRow: { current?: FieldRow } = {};
     const commit = (wanted: LookValue): Promise<void> =>
       set(property.id, wanted).then(
         () => {
-          const current = holderRow.current;
-          if (current !== undefined) {
-            current.last = wanted;
-            current.shown = wanted;
-          }
+          entry.last = wanted;
+          entry.shown = wanted;
         },
         (error: unknown) => {
-          const current = holderRow.current;
-          if (current !== undefined) showValue(current, current.last);
+          showValue(entry, entry.last);
           throw error;
         },
       );
@@ -296,7 +267,6 @@ export function customize(context: PageContext): HTMLElement[] {
     resetButton.setAttribute("aria-label", `Reset ${property.label}`);
     resetButton.disabled = !has(changes(), path);
     const entry: FieldRow = { id: property.id, path, field: field.field, swatch, reset: resetButton, problem, shown: value, last: value };
-    holderRow.current = entry;
     rows.push(entry);
     return row(property.label, null, { node: el("span", { class: "cust-control" }, controlNode, resetButton, problem), field: field.field });
   }
@@ -377,7 +347,7 @@ export function customize(context: PageContext): HTMLElement[] {
     } else {
       syncRows();
     }
-    if (openedState.seen) void preview.draw();
+    if (seen) void preview.draw();
   }
 
   live.look = (next: Look) => {
