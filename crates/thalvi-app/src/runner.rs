@@ -1823,6 +1823,7 @@ fn hold_failure(notice: String) -> Failure {
 /// Whether `new` differs from `old` only in settings a running engine takes without a rebuild.
 fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
     *old == DesktopConfig {
+        look: old.look,
         recordings: old.recordings,
         history: old.history,
         update_channel: old.update_channel,
@@ -2841,6 +2842,7 @@ mod tests {
             (r#"{"recordings": {"text": true}}"#, false),
             (r#"{"update_channel": "development"}"#, false),
             (r#"{"history": {"enabled": false}}"#, false),
+            (r#"{"look": "neon"}"#, false),
             (
                 r#"{"themes":{"version":1,"gunmetal":{"font":{"scale":1.25}}}}"#,
                 false,
@@ -2849,12 +2851,20 @@ mod tests {
                 r#"{"history": {"limit": 5}, "recordings": {"audio": true}}"#,
                 false,
             ),
+            (r#"{"history": {"limit": 5}, "look": "neon"}"#, false),
             // The wake switch is a retune: the model stays loaded and the microphone open.
             (r#"{"wake": {"enabled": false}}"#, false),
-            (r#"{"wake": {"enabled": false}, "look": "neon"}"#, true),
+            (r#"{"wake": {"enabled": false}, "look": "neon"}"#, false),
             (r#"{"wake": {"capture": {"model": "hey_jarvis"}}}"#, true),
-            (r#"{"look": "neon"}"#, true),
-            (r#"{"history": {"limit": 5}, "look": "neon"}"#, true),
+            (r#"{"ending_pause": {"paste": 1.0}}"#, true),
+            (
+                r#"{"wake": {"enabled": false}, "ending_pause": {"paste": 1.0}}"#,
+                true,
+            ),
+            (
+                r#"{"history": {"limit": 5}, "ending_pause": {"paste": 1.0}}"#,
+                true,
+            ),
         ] {
             let new = DesktopConfig::from_json_str(change).unwrap();
             assert_eq!(!retunes_only(&old, &new), rebuilds, "{change}");
