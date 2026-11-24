@@ -276,6 +276,17 @@ describe("the look's Customize section", () => {
     expect(stub.backend.saveSettings).toHaveBeenCalledWith({ themes: { holo: null } });
   });
 
+  it.each([
+    ["suspended", { suspended: true }],
+    ["unreadable", { unreadable: "the file is locked" }],
+  ])("keeps the Customize group on screen with its %s banner and the preview", async (_kind, holo) => {
+    await open({ config: { themes: { version: 1, holo } } });
+    const group = pick("[data-cust-banner]").closest(".grp");
+    expect(group?.querySelector("[data-cust-preview]")).not.toBeNull();
+    const shown = [pick("[data-cust-banner]"), pick("[data-cust-preview]")].map((node) => node.closest(".row"));
+    expect(shown.map((row) => row !== null && !row.hidden && group?.contains(row) === true)).toEqual([true, true]);
+  });
+
   it("shows the reason when a banner action is refused", async () => {
     const stub = await open({ config: { themes: { version: 1, holo: { unreadable: "the file is locked" } } } });
     stub.backend.saveSettings.mockRejectedValueOnce("Read-only file system (os error 30)");

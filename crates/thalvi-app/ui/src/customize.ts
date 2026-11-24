@@ -101,7 +101,7 @@ function overlayPreview(backend: Backend): Preview {
     return canvas;
   });
   const note = el("p", { class: "note", role: "alert", hidden: true });
-  const node = el("div", { class: "preview", "data-cust-preview": "" }, el("h5", { class: "preview-title" }, "Preview"), sample, strip, note);
+  const node = el("div", { class: "preview wide", "data-cust-preview": "" }, sample, strip, note);
   let generation = 0;
 
   async function draw(): Promise<void> {
@@ -156,11 +156,14 @@ export function customize(context: PageContext): HTMLElement[] {
   let rows: FieldRow[] = [];
   let builtLook: Look | null = null;
   let bannerKey = "";
-  const banner = el("div", { class: "cust-banner", "data-cust-banner": "", hidden: true });
+  const banner = el("div", { class: "cust-banner wide", "data-cust-banner": "" });
+  // A group with no visible row is hidden, so the banner and the preview are rows of their own.
+  const bannerRow = row("Custom styling", null, banner);
+  bannerRow.hidden = true;
   const fields = el("div", { class: "cust-fields", "data-cust-fields": "" });
   const actions = el("div", { class: "cust-actions", "data-cust-actions": "" });
   const preview = overlayPreview(backend);
-  const holder = el("div", { class: "cust", "data-customize": "" }, banner, fields, actions, preview.node);
+  const holder = el("div", { class: "cust", "data-customize": "" }, fields, actions);
   let seen = false;
   const before = live.opened;
   live.opened = (id) => {
@@ -298,7 +301,7 @@ export function customize(context: PageContext): HTMLElement[] {
     if (key === bannerKey) return key !== "";
     bannerKey = key;
     if (key === "") {
-      banner.hidden = true;
+      bannerRow.hidden = true;
       banner.replaceChildren();
       return false;
     }
@@ -319,7 +322,7 @@ export function customize(context: PageContext): HTMLElement[] {
     }, problem); }));
     parts.push(problem);
     banner.replaceChildren(...parts);
-    banner.hidden = false;
+    bannerRow.hidden = false;
     return true;
   }
 
@@ -360,5 +363,5 @@ export function customize(context: PageContext): HTMLElement[] {
   };
   render();
 
-  return [el("h4", { "data-group": "" }, "Customize"), holder];
+  return [el("h4", { "data-group": "" }, "Customize"), bannerRow, holder, row("Preview", null, preview.node)];
 }
