@@ -193,6 +193,15 @@ between `EngineLink` and `Runner`, tracks rebuild sequence numbers in `Runner::a
 `Runner::capture`, `Settling::settle`, and `Runner::apply_engine` keep the same cancellation
 writes, await boundaries, and delivery admission fence, so the model actions are unchanged.
 
+Live-recognizer Submit preview confirmation (#675) attaches a `SubmitPreview` to
+`EngineState::PendingEnding` for live Submit endings and gates `Step::Quiet` in `Engine::drive`
+on `Presentation::Shown` (with a 1 s timeout or failure returning `Done::Failed`). Both new
+branches sit below `self.cancel.changed()` in the biased select and can only wait or fail without
+admitting delivery, and `Engine::on_quiet` rechecks `Presentation::Shown` before accepting;
+`Requests::take`, `drive`, `Runner::capture`, `Settling::settle`, `Delivery`, and
+`confirm_final_submit` keep the same cancellation writes and delivery fence, so the model actions
+are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
