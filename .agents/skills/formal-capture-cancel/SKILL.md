@@ -183,6 +183,10 @@ reads once whether the live entry is Parakeet, and `idle_error` passes that to t
 steps in `Engine::drive` and `Engine::feed` still fail the capture with no new await, queue step or
 delivery path, so the model actions are unchanged.
 
+Keeping recognition running on a base-look change (#659) adds `look` to `retunes_only` in
+`runner.rs` beside `themes`. `Requests::take`, `drive`, `Runner::capture`, and `Settling::settle`
+are unchanged and `Apply` still has no cancellation effect, so the model actions are unchanged.
+
 Showing Loading through a live recognizer rebuild (#617) shares `Publisher` via `Arc<Mutex<_>>`
 between `EngineLink` and `Runner`, tracks rebuild sequence numbers in `Runner::apply`, and sets
 `Mode::Starting` at `Runner::rebuild` entry. `Requests::take`, `Requests::read_queued`, `drive`,
