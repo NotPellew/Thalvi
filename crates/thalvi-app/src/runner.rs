@@ -4373,7 +4373,7 @@ mod tests {
                 opens: Rc::clone(&self.opens),
                 missing: Rc::new(Cell::new(false)),
                 opened: false,
-                held: None,
+                feed: Rc::new(RefCell::new(None)),
             }
         }
     }
