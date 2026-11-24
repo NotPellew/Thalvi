@@ -152,6 +152,12 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       copyNote = "";
     }
     failure.textContent = shownFailure;
+    if (shownFailure === "" && bar.contains(document.activeElement)) {
+      const target = pages.find((page) => page.id === current && !page.node.hidden)?.node
+        ?? pages.find((page) => !page.node.hidden)?.node
+        ?? search;
+      target.focus({ preventScroll: true });
+    }
     copy.hidden = shownFailure === "";
     dismiss.hidden = shownFailure === "";
     message.textContent = copyNote;
