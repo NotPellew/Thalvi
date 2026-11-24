@@ -29,7 +29,7 @@ Preconditions:
 - **Start clean.** The app reaches `listening` with recognizer `ready` and its log has no `Downloading` line.
 - **Choose a model, and fail.** `$H ctl $R show listening`, focus Settings, 12 Tabs to **Wake model (dictation)**, `Down`. The row shows **Hey Mycroft — Downloading…**, **Downloading…** and **Applied.**, with no **Download**; the overlay shows **LOADING / Downloading the wake word model.** 2 s later the row returns to **Not downloaded** with **Download** and `Could not download the wake model hey_mycroft_v0.1.onnx: could not connect to github.com. Check the internet connection and try again.` under it and in the error bar; focus moves from the drop-down to **Download**, with its focus ring. `$MET` has `desktop_wake_load` `model: hey_mycroft`, `source: settings_download`, `outcome: error`.
 - **Download, and fail.** `Return` on **Download**: **Downloading…** with focus on the drop-down, then the same failure with focus back on **Download**.
-- **Download again.** Stop the proxy by its PID, start `throttle-proxy.py 18081 250000` on the same port, `Return`. **Downloading…** with no message under the row, then **Hey Mycroft — Ready** and **Ready** (3.7 s at that rate).
+- **Download again.** Stop the proxy by its PID, start `throttle-proxy.py 18081 250000` on the same port, `Return`. **Downloading…** with no message under the row, then **Hey Mycroft — Ready** and **Ready** (3.7 s at that rate). The error bar goes, `ctl state` returns to `listening`, and Hey Mycroft wakes Thalvi while Hey Thalvi no longer does.
 - **Choose a model, and succeed.** With the proxy still at `250000`, `Down` to **Hey Jarvis**. **Hey Jarvis — Downloading…** and **Downloading…** with no **Download**; the models folder holds a single `hey_jarvis*.part`, one download for the app and Settings together. Then **Hey Jarvis — Ready** and **Ready** (about 4 s).
 - **Proof.** `ctl models` shows both `downloaded: true`; `$MET` has `desktop_wake_load` `outcome: ok`, `source: settings_download`.
 
@@ -55,7 +55,6 @@ All three sizes pass for the Listening page.
 ## Gotchas
 
 - `ctl model-download` downloads and replies but shows no notice; use the Settings path to see what the user sees.
-- After the app's own download failed, a successful **Download** leaves Thalvi failed with the error bar until the next pick or start (#640).
 - Cached files are accepted by their pinned size, not rehashed; a damaged file of the right size passes the check.
 - A refused tunnel (rate `0`) fails after 2 s, long enough to see **Downloading…**.
 - The proxy setting is fixed when the app starts; change what listens on the port, not the app's environment.

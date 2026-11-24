@@ -53,6 +53,9 @@ changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the m
 The scripted-feed wait fix (#612) changes only `pump_until` in `runner.rs`'s tests module. No mapped
 function changed, so the model actions are unchanged.
 
+Retrying a wake model after its download (#616) changes only `runner.rs`'s tests module, for a rig whose
+wake head loads once cached. No mapped function changed, so the model actions are unchanged.
+
 Holding unconfirmed lines back from a terminal adds a branch to `Delivery::paste_in` after admission: when the
 route is not Submit, the text has a line break and `Host::is_terminal` (a synchronous read of the bound target) says
 the window is a terminal, it keeps the text on the clipboard through `keep` instead of calling `deliver`. Both are

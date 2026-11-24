@@ -265,7 +265,13 @@ pub async fn download_wake(state: &AppState, name: &str) -> Result<(), String> {
         Some(started.elapsed()),
         json!({"model": head.name(), "source": "settings_download"}),
     );
-    result.map(|_| ()).map_err(|error| error.to_string())
+    match result {
+        Ok(_) => {
+            state.wake_head_downloaded(head);
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// The local chat download and the runtime selected on this computer.

@@ -22,8 +22,9 @@ use thalvi_desktop::host::{
     Desktop, HoldSource, HoldWatch, Host, HostError, RequestServer, refusal,
 };
 use thalvi_desktop::metrics::{Event, Recorder};
-use thalvi_desktop::models::SpeechDownloads;
+use thalvi_desktop::models::{CatalogHead, SpeechDownloads};
 use thalvi_desktop::speech_device::SpeechDevices;
+use thalvi_desktop::wake::HeadModel;
 use tokio::sync::watch;
 
 use crate::agent::{self, Catalog, ModelRow, Running, Switch};
@@ -117,6 +118,16 @@ impl SyncedConfig {
         self.store.save_switches(&config)?;
         self.set(&config);
         Ok(())
+    }
+
+    /// Runs `act` on the config saved now, under the save lock, when it selects catalog `head`
+    /// for the dictation wake word; a download of a head it does not select acts on nothing.
+    pub(crate) fn wake_head_downloaded(&self, head: CatalogHead, act: impl FnOnce(&DesktopConfig)) {
+        let _save = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let config = self.config();
+        if config.wake.capture().model == HeadModel::Catalog(head) {
+            act(&config);
+        }
     }
 }
 
@@ -266,6 +277,15 @@ impl AppState {
         self.saves.save_form(form, |current, config, write| {
             self.take_effect(current, config, write)
         })
+    }
+
+    /// Re-applies the config saved now to the engine after `head` was downloaded, when it selects
+    /// that head, so a wake load that failed before the file was cached is retried and clears its
+    /// failure. A download of a head the saved config does not select sends nothing.
+    pub(crate) fn wake_head_downloaded(&self, head: CatalogHead) {
+        self.saves.wake_head_downloaded(head, |config| {
+            self.link.send(Control::Apply(Box::new(config.clone())));
+        });
     }
 
     /// Writes `config` and takes it into effect. Changed hold keys are watched before the file is
@@ -1349,6 +1369,70 @@ mod tests {
             file.look
         );
         assert_eq!(leftovers, ["desktop.json"], "no temporary file is left");
+    }
+
+    #[test]
+    fn only_a_download_of_the_saved_wake_head_reapplies_the_saved_config_under_the_save_lock() {
+        use thalvi_desktop::models::CatalogHead;
+        // (what the saved config selects, the head that was downloaded, whether the engine hears it)
+        type Case = (&'static str, &'static str, CatalogHead, bool);
+        let cases: [Case; 4] = [
+            (
+                "the selected head",
+                r#"{"wake":{"capture":{"model":"hey_mycroft"}}}"#,
+                CatalogHead::HeyMycroft,
+                true,
+            ),
+            (
+                "another head",
+                r#"{"wake":{"capture":{"model":"hey_mycroft"}}}"#,
+                CatalogHead::HeyJarvis,
+                false,
+            ),
+            (
+                "the default head",
+                r#"{"microphone":"USB Mic"}"#,
+                CatalogHead::HeyThalvi,
+                true,
+            ),
+            (
+                "a head from a file",
+                r#"{"wake":{"capture":{"model":"/models/me.onnx"}}}"#,
+                CatalogHead::HeyMycroft,
+                false,
+            ),
+        ];
+        for (at, (case, json, downloaded, reapplied)) in cases.into_iter().enumerate() {
+            let dir =
+                std::env::temp_dir().join(format!("thalvi-app-wake-{}-{at}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let saved = DesktopConfig::from_json_str(json).unwrap();
+            let synced = SyncedConfig::new(
+                Store::new(Some(dir.join("desktop.json"))).unwrap(),
+                saved.clone(),
+            );
+            let applied = Mutex::new(Vec::new());
+
+            synced.wake_head_downloaded(downloaded, |config| {
+                assert!(
+                    synced.lock.try_lock().is_err(),
+                    "{case}: the config is read and sent under the save lock"
+                );
+                applied
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(config.clone());
+            });
+            let applied = applied.into_inner().unwrap_or_else(PoisonError::into_inner);
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert_eq!(
+                applied,
+                if reapplied { vec![saved] } else { Vec::new() },
+                "{case}"
+            );
+        }
     }
 
     #[test]
