@@ -2242,6 +2242,7 @@ mod tests {
                     route: CaptureRoute::Submit,
                     text: "hi".to_owned(),
                     waiting_for_quiet: false,
+                    preview: None,
                 };
             });
             publisher.woke(Some("kitty".to_owned()), copies);
