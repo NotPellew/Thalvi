@@ -1427,6 +1427,8 @@ where
         let metrics = self.recorder.kinds().metrics;
         let mut key_open = true;
         loop {
+            // The biased key branch is polled first; spending budget lets frames and timers run even if it stays ready.
+            tokio::task::consume_budget().await;
             let frame = tokio::select! {
                 biased;
                 changed = self.key.changed(), if key_open => {
@@ -2317,7 +2319,7 @@ where
                 };
                 if pending.route == CaptureRoute::Submit && !settled && self.number_rules.as_digits
                 {
-                    pending.text = self.text_with_numbers(pending.route, &pending.text);
+                    pending.text = self.text_with_numbers(&pending.text);
                     if let Some(stored) = live.text.pending_mut() {
                         stored.text.clone_from(&pending.text);
                     }
@@ -3290,7 +3292,7 @@ where
     fn delivered_with_numbers(&self, request: &CaptureRequest) -> CaptureRequest {
         CaptureRequest {
             route: request.route,
-            text: self.text_with_numbers(request.route, &request.text),
+            text: self.text_with_numbers(&request.text),
         }
     }
 
@@ -3302,10 +3304,8 @@ where
                 && self.submit_confirmation == SubmitConfirmation::Settled)
     }
 
-    fn text_with_numbers(&self, route: CaptureRoute, text: &str) -> String {
-        if !self.number_rules.as_digits || route == CaptureRoute::Task {
-            return text.to_owned();
-        }
+    /// `text` with its number words as digits; callers only pass formatted routes with digits on.
+    fn text_with_numbers(&self, text: &str) -> String {
         let formatted = numbers::format(text, self.language, &self.number_rules.words);
         if formatted.rewritten > 0 {
             self.recorder.metric(
