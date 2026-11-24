@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock, PoisonError, mpsc};
 use thalvi_desktop::theme::Style;
 use tokio::sync::oneshot;
 
-use crate::overlay::{self, View};
+use crate::overlay::{Renderer, View};
 
 const FAILED: &str = "The overlay preview could not be drawn.";
 
@@ -61,8 +61,10 @@ pub async fn draw(
 }
 
 fn run(jobs: mpsc::Receiver<Job>) {
+    let mut renderer = Renderer::default();
     for job in jobs {
-        let bytes = overlay::render_rgba(&job.view, job.style, job.dark, job.scale)
+        let bytes = renderer
+            .draw(&job.view, job.style, job.dark, job.scale)
             .map(|(width, height, rgba)| frame_bytes(width, height, &rgba));
         let _ = job.reply.send(bytes);
     }
