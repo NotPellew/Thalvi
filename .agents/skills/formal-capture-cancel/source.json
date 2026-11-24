@@ -1,8 +1,8 @@
 {
-  "sync_commit": "3cb79f74f82acdb083a3db835405b26967ac33f3",
+  "sync_commit": "47c84c3fc9b2f52c96a2cf5e4db883921db1d0c7",
   "files": {
     "crates/thalvi-app/src/runner.rs": {
-      "sha256": "4d0f6227092c4edf808f1970c2ce64d97f3bb1216d039432a81d98adf7123b7d",
+      "sha256": "3caaea3989bb6799f654f8c1906dec71ae50c0aa1fbec8d4ca1b1a7a936cb315",
       "functions": [
         "Requests::take",
         "Requests::read_queued",
@@ -12,7 +12,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "b2a62e4d23b8e529105301969b4e04b8d668bca2372f2ee23cd5ebbab1f37f90",
+      "sha256": "bd635627f96e3c8a862ee7daba47e6dc1943becfa0d65269608401c308cb43ef",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",
@@ -29,17 +29,20 @@
         "Engine::ask_merge",
         "Engine::drop_streams",
         "Engine::confirm_final_submit",
+        "Engine::on_final",
+        "Engine::cleans_before_confirm",
+        "Engine::formats_on_delivery",
         "Engine::finish_transcript"
       ]
     },
     "crates/thalvi-desktop/src/recognizer.rs": {
-      "sha256": "5e65ec763e629bbbd65a2d0892d4a28b5fb0ae34d6251bcd62db04cafd25ccd1",
+      "sha256": "0a8038dfa0742f3536ff81a266e714f679ddd5b3b137ad70483452b063ba7fb7",
       "functions": [
         "RecognizerSession"
       ]
     },
     "crates/thalvi-desktop/src/delivery.rs": {
-      "sha256": "3be2d03571c6dbf2e418a3fa728b6c3b46b54b32daf85e956962351d0431d670",
+      "sha256": "b3d3c492c6d73c8723f3c6915cfc57349fe997806dca3c44a5188ae3bf66edf8",
       "functions": [
         "Delivery::finish",
         "Delivery::paste_in",
@@ -53,14 +56,15 @@
       ]
     },
     "crates/thalvi-desktop/src/openai_live.rs": {
-      "sha256": "d6a2b8932d67510a3a77883bd3d66e50f9059b55505fafaa6f6f54bb06610f72",
+      "sha256": "b6a2eb085672d27577ea78c2e9d0cde809747f7d29d19c78b27921720bca3903",
       "functions": [
         "OpenAiSession::cancel",
-        "OpenAiSession::close"
+        "OpenAiSession::close",
+        "OpenAiSession::language"
       ]
     },
     "crates/thalvi-desktop/src/engine/streaming.rs": {
-      "sha256": "a151b3148973c9a3d1bfedb1b6bfda76173eef60ea63b93dcc5c99b8d9d09a5c",
+      "sha256": "d7cdeb2d28c6087470236a900832bd4fb5cd35e57dbe3357ab927d21bd288600",
       "functions": [
         "Streams::start",
         "Streams::finish",
@@ -80,7 +84,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine/final_pass.rs": {
-      "sha256": "d1c2ce457fc6394d82e29fb08c7fac5a58c7dd073e7d4419679f78c3c4f2958f",
+      "sha256": "f9191329eb06273da2952399b9051c0fe611b51b69dab4fd18fb518164093a44",
       "functions": [
         "Engine::start_final_pass",
         "Engine::wait_final_pass",

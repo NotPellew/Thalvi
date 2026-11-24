@@ -2,9 +2,10 @@
 # Layout check of one Settings page in Chromium (the UI's fake backend), at each window size:
 # every listed element, scrolled into view vertically, is visible, wholly inside the window and unoccluded,
 # and no two listed elements overlap. Exit 1 on a failed check.
-# Usage: settings-boxes PAGE WxH[,WxH...] OUT.json ROLE=NAME...   (PAGE is the sidebar button's name)
+# Usage: settings-boxes PAGE WxH[,WxH...] OUT.json ROLE=NAME...   (PAGE is the sidebar button's name;
+# PAGE>BUTTON>... then clicks those buttons in order, such as Recognition>Add a streaming server). LOOK=holo or neon picks the look.
 set -euo pipefail
-[ $# -ge 4 ] || { sed -n 2,5p "$0" >&2; exit 2; }
+[ $# -ge 4 ] || { sed -n 2,6p "$0" >&2; exit 2; }
 root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 ui=$root/crates/thalvi-app/ui
 [ -d "$ui/node_modules/playwright-core" ] || { echo "settings-boxes: run npm ci in $ui first" >&2; exit 2; }
@@ -15,7 +16,8 @@ import { createServer } from "vite";
 import { chromium } from "playwright-core";
 import { writeFileSync } from "node:fs";
 
-const [page, sizes, out, ...specs] = process.argv.slice(2);
+const [path, sizes, out, ...specs] = process.argv.slice(2);
+const [page, ...clicks] = path.split(">");
 const wanted = specs.map((s) => {
   const at = s.indexOf("=");
   if (at < 1) throw new Error(`expected ROLE=NAME, got ${s}`);
@@ -30,8 +32,9 @@ try {
   for (const size of sizes.split(",")) {
     const [width, height] = size.split("x").map(Number);
     const tab = await browser.newPage({ viewport: { width, height } });
-    await tab.goto(`${server.resolvedUrls.local[0]}settings.html?fake&at=0`);
+    await tab.goto(`${server.resolvedUrls.local[0]}settings.html?fake&at=0&look=${process.env.LOOK ?? "gunmetal"}`);
     await tab.getByRole("navigation", { name: "Settings pages" }).getByRole("button", { name: page, exact: true }).click();
+    for (const name of clicks) await tab.getByRole("button", { name, exact: true }).click();
     const locators = wanted.map((w) => tab.getByRole(w.role, { name: w.name, exact: true }).first());
     await locators.at(-1).waitFor({ state: "attached", timeout: 10_000 });
     const boxes = [];

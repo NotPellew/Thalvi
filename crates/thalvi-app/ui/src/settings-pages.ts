@@ -15,6 +15,7 @@ import type {
   AppSettings,
   LiveEntry,
   Look,
+  LookStyles,
   OnDeviceEntry,
   OpenAiRequest,
   SecondaryApi,
@@ -32,6 +33,7 @@ import type {
   WritingSettings,
 } from "./contract.ts";
 import { DownloadFailure, errorText } from "./contract.ts";
+import { customize } from "./customize.ts";
 import type { Controls, Field } from "./controls.ts";
 import { uid } from "./controls.ts";
 import { disclosureMemory, el, focusAfterRemoval, setChildren } from "./dom.ts";
@@ -68,6 +70,8 @@ export interface PageContext {
   menuEntry: SwitchRead;
   /** Shows a look on this window at once, before the desktop has saved it. */
   showLook: (look: Look) => void;
+  /** The resolved look model, refreshed when a look or its changes are saved. */
+  lookStyles: LookStyles | null;
   /** Shows the page with this id. */
   open: (id: string) => void;
   /** Hooks the shell calls on live events; a page assigns the ones it shows. */
@@ -77,8 +81,12 @@ export interface PageContext {
     audio: (audio: AudioStatus) => void;
     speechModel: (progress: SpeechModelProgress) => void;
     status: (status: Status) => void;
-    /** The page with this id was opened. */
+    /** The page with this id was opened, or is shown again after a rebuild. */
     opened: (id: string) => void;
+    /** The look shown on this window changed. */
+    look: (look: Look) => void;
+    /** The resolved look model was read again. */
+    lookStyles: (styles: LookStyles) => void;
     /** The app's state changed, so what a page shows from disk may be out of date. */
     refresh: () => void;
     /** The update's state changed. */
@@ -318,9 +326,11 @@ function wakeHeads(context: PageContext): HTMLElement[] {
       },
     };
     if (state.custom) state.customPath = model();
-    const download = button("Download", () => {
-      const wanted = model();
+    function startDownload(wanted: string): void {
+      state.sayProblem("");
       downloading.add(wanted);
+      // Hiding a focused Download would drop focus to the page.
+      if (document.activeElement === download) picker.focus();
       state.render();
       backend.downloadWakeModel(wanted).then(
         () => {
@@ -332,9 +342,14 @@ function wakeHeads(context: PageContext): HTMLElement[] {
         (error: unknown) => {
           downloading.delete(wanted);
           state.sayProblem(errorText(error));
+          const onRow = field.node.contains(document.activeElement);
           state.render();
+          if (onRow) download.focus();
         },
       );
+    }
+    const download = button("Download", () => {
+      startDownload(model());
     });
 
     /** Applies a model, and the threshold it starts at when it has one; says why not, and keeps the model in use. */
@@ -418,13 +433,15 @@ function wakeHeads(context: PageContext): HTMLElement[] {
         else useFile(state.customPath, wasCustom);
       } else {
         state.custom = false;
-        const start = infos.get(picker.value)?.threshold;
+        const wanted = picker.value;
+        if (infos.get(wanted)?.cached === false && !downloading.has(wanted)) startDownload(wanted);
+        const start = infos.get(wanted)?.threshold;
         if (start !== undefined) {
           const slider = threshold.field as HTMLInputElement;
           slider.value = String(start);
           slider.dispatchEvent(new Event("input"));
         }
-        use(picker.value, start, wasCustom).then((used) => {
+        use(wanted, start, wasCustom).then((used) => {
           if (!used) {
             const slider = threshold.field as HTMLInputElement;
             slider.value = String(settings.wake.capture.threshold);
@@ -787,8 +804,13 @@ function commands(context: PageContext): HTMLElement[] {
     pause("task", "Quiet before running a task"),
   ];
   const pauses = settings.ending_pause;
+  const active = settings.stt.entries.filter(isLive).find((entry) => entry.active);
+  const parakeet = active?.kind === "on_device" && active.model === "parakeet_tdt_v3";
   return [
     group("Endings"),
+    ...(parakeet
+      ? [el("p", { class: "note ok" }, "Parakeet may not hear an English ending after speech in another language. Add endings in the language you dictate, like “text einfügen”.")]
+      : []),
     row("Ending phrases", "Say one to finish. Every action needs one.", endingsTable(context)),
     group("Quiet before acting"),
     details(
@@ -1216,8 +1238,8 @@ function speech(context: PageContext): SpeechRows {
   let focusOnClose: () => HTMLElement | null = () => null;
   /** Keeps the open form in step with the entries, such as Remove on the entry that just became Live. */
   let syncEditor: () => void = () => undefined;
-  /** The "Applied." of the last saved form, shown on that entry's row until the next change. */
-  let rowNote: { id: string; text: string } | null = null;
+  /** The "Applied." of the last change to one entry, on its row after a saved form or beside the switch flipped, until the next change. */
+  let rowNote: { id: string; text: string; by: "form" | "extra" | "final" } | null = null;
   const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
   const retryProblem = note();
   const useServer = button("Use a speech server instead", () => {
@@ -1240,6 +1262,7 @@ function speech(context: PageContext): SpeechRows {
   );
   backend.onStatus((status) => {
     currentStatus = status;
+    if (rowNote?.text === APPLIED_LATER_TEXT && !DURING_CAPTURE.includes(status.state)) rowNote = { ...rowNote, text: APPLIED_TEXT };
     updateSummary();
   });
   backend.getStatus().then(
@@ -1446,18 +1469,27 @@ function speech(context: PageContext): SpeechRows {
     for (const { node } of groups) for (const note of node.querySelectorAll(".applied")) note.textContent = "";
   }
 
-  function extraSwitch(entry: SpeechEntry): HTMLElement {
-    const ticked = controls.toggle(isExtraOn(entry), (on) => {
+  /** A switch on an entry's row whose "Applied." outlives a rebuild of the rows. */
+  function rowSwitch(entry: SpeechEntry, by: "extra" | "final", value: boolean, commit: (on: boolean) => Promise<void>): Field {
+    const switched = controls.toggle(value, (on) => {
       forgetNotes();
-      return tick(entry.id, on);
+      return commit(on).then(() => {
+        rowNote = { id: entry.id, text: controls.confirmation(), by };
+      });
     });
+    if (rowNote?.id === entry.id && rowNote.by === by) switched.node.querySelector(".applied")?.replaceChildren(rowNote.text);
+    return switched;
+  }
+
+  function extraSwitch(entry: SpeechEntry): HTMLElement {
+    const ticked = rowSwitch(entry, "extra", isExtraOn(entry), (on) => tick(entry.id, on));
     const input = ticked.field as HTMLInputElement;
     input.setAttribute("aria-label", `Extra: ${entry.name}`);
     return el("span", { class: "extra" }, el("label", { for: input.id }, "Extra"), ticked.node);
   }
 
   function finalPassSwitch(entry: SpeechEntry): HTMLElement {
-    const switched = controls.toggle(entry.final_pass === true, (on) => apply((next) => {
+    const switched = rowSwitch(entry, "final", entry.final_pass === true, (on) => apply((next) => {
       for (const candidate of next.stt.entries) {
         if (on && candidate.id === entry.id) candidate.final_pass = true;
         else delete candidate.final_pass;
@@ -1487,7 +1519,7 @@ function speech(context: PageContext): SpeechRows {
       whereLine(entry),
       el("span", { class: "tail" }, ...role, edit),
       ...deviceLine(entry),
-      ...(rowNote?.id === entry.id ? [el("small", { class: "applied", role: "status" }, rowNote.text)] : []),
+      ...(rowNote?.id === entry.id && rowNote.by === "form" ? [el("small", { class: "applied", role: "status" }, rowNote.text)] : []),
     );
   }
 
@@ -1505,24 +1537,49 @@ function speech(context: PageContext): SpeechRows {
     }, "quiet"),
   );
 
-  /** An extra can be switched on only while there is a writing endpoint; one already on can always be switched off. */
-  function lockTick(input: HTMLInputElement): void {
-    const locked = !input.checked && settings.writing === null;
+  /** The merge switch: on, the chat model merges the extras' texts; off, the live text is delivered at once and they are only recorded. */
+  const mergeTick = controls.toggle(settings.stt.merge, (on) => {
+    if (on && !hasEndpoint()) {
+      needsEndpoint.hidden = false;
+      return Promise.reject(new Error("Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."));
+    }
+    return apply((next) => {
+      next.stt.merge = on;
+    }).then(syncExtras);
+  });
+  const mergeInput = mergeTick.field as HTMLInputElement;
+  mergeInput.setAttribute("aria-label", "Merge with the chat model");
+  const mergeState = el("small", { class: "merge-state", role: "status" });
+  const mergeRow = el(
+    "div",
+    { class: "row" },
+    el("div", { class: "what" }, el("label", { for: mergeInput.id }, "Merge with the chat model"), mergeState),
+    el("div", { class: "ctl" }, mergeTick.node),
+  );
+  mergeRow.dataset["label"] = "merge with the chat model";
+
+  /** A switch that is off is locked while turning it on needs something it has not; one already on can always be switched off. */
+  function lockTick(input: HTMLInputElement, needed: boolean): void {
+    const locked = needed && !input.checked;
     input.disabled = locked;
     if (locked) input.setAttribute("aria-describedby", needsEndpoint.id);
     else input.removeAttribute("aria-describedby");
   }
 
-  /** What the page says follows the settings: the endpoint, and which extras are on. */
+  /** What the page says follows the settings: the endpoint, which extras are on, and whether they are merged. */
   function syncExtras(): void {
     const finalPass = entries().find((entry) => entry.final_pass === true);
+    const merge = settings.stt.merge;
     for (const { list } of groups) {
-      for (const input of list.querySelectorAll<HTMLInputElement>(".extra:not(.final-pass) input[type=checkbox]")) lockTick(input);
+      for (const input of list.querySelectorAll<HTMLInputElement>(".extra:not(.final-pass) input[type=checkbox]")) lockTick(input, merge && !hasEndpoint());
       for (const row of list.querySelectorAll<HTMLElement>(".trow.server")) {
         const input = row.querySelector<HTMLInputElement>(".final-pass input[type=checkbox]");
         if (input) input.checked = finalPass?.id === row.dataset["id"];
       }
     }
+    mergeInput.checked = merge && finalPass === undefined;
+    mergeInput.disabled = finalPass !== undefined;
+    mergeState.textContent = finalPass === undefined ? "" : "A final pass is set";
     const on = entries().filter(isExtraOn);
     const merged = `The chat model merges ${on.length === 1 ? "its text" : "their texts"} with the live text.`;
     const loads = on.some((entry) => entry.kind === "on_device") ? " Each on-device extra loads its own model, which adds memory and processing." : "";
@@ -1530,8 +1587,10 @@ function speech(context: PageContext): SpeechRows {
     finalPassState.textContent = finalPass === undefined ? "" : `Final pass: ${finalPass.name}. Its text is used after you stop.`;
     extraState.textContent = finalPass !== undefined
       ? "Paused while a final pass is set"
-      : on.length === 0 ? "Extra: none" : `Extra: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`;
-    needsEndpoint.hidden = settings.writing !== null;
+      : merge
+        ? on.length === 0 ? "Extra: none" : `Extra: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`
+        : "Merge off: dictation pastes the live text at once; extras are only recorded.";
+    needsEndpoint.hidden = hasEndpoint() || !merge;
     syncCleanup();
   }
 
@@ -1543,7 +1602,18 @@ function speech(context: PageContext): SpeechRows {
     return null;
   }
 
-  const hasEndpoint = (): boolean => settings.writing !== null;
+  const hasWritingEndpoint = (candidate: { readonly url?: string; readonly model?: string; readonly local?: boolean } | null): boolean =>
+    candidate !== null && (candidate.local === true || ((candidate.url ?? "").trim() !== "" && (candidate.model ?? "").trim() !== ""));
+  const hasEndpoint = (): boolean => hasWritingEndpoint(settings.writing);
+  const numbers = controls.toggle(settings.writing?.numbers_as_digits !== false, (on) => apply((next) => {
+    if (on) {
+      if (next.writing === null) return;
+      delete next.writing.numbers_as_digits;
+      if (!hasWritingEndpoint(next.writing) && Object.keys(next.writing).length === 0) next.writing = null;
+    } else {
+      next.writing = { ...next.writing, numbers_as_digits: false };
+    }
+  }));
   const cleanup = controls.toggle(settings.writing?.clean_dictation === true, (on) => {
     if (!hasEndpoint()) return Promise.reject(new Error("Set a writing endpoint first"));
     return apply((next) => {
@@ -1722,7 +1792,7 @@ function speech(context: PageContext): SpeechRows {
         )
         .then(() => {
           forgetNotes();
-          rowNote = { id: entry.id, text: controls.confirmation() };
+          rowNote = { id: entry.id, text: controls.confirmation(), by: "form" };
           closeEditor();
           checkWordList();
         })
@@ -1790,7 +1860,7 @@ function speech(context: PageContext): SpeechRows {
     return apply((next) => {
       if (value === "local") next.writing = { ...next.writing, local: true };
       else if (next.writing?.url && next.writing.model) next.writing.local = false;
-      else next.writing = null;
+      else next.writing = next.writing?.numbers_as_digits === false ? { numbers_as_digits: false } : null;
     }).then(() => { syncChatSource(); syncExtras(); });
   });
   let chosenBuild: ChatBuild = writing?.chat_build ?? "vulkan";
@@ -1897,7 +1967,7 @@ function speech(context: PageContext): SpeechRows {
         return Promise.reject(new Error("Set the address and the model of the writing endpoint first."));
       }
       return apply((next) => {
-        next.writing = null;
+        next.writing = next.writing?.numbers_as_digits === false ? { numbers_as_digits: false } : null;
       }).then(syncExtras);
     }
     if (!local && (url.trim() === "" || model.trim() === "")) {
@@ -2087,10 +2157,16 @@ function speech(context: PageContext): SpeechRows {
     const request = (wordListRequest += 1);
     const active = activeLive();
     const finalPass = entries().find((entry) => entry.final_pass === true);
-    const uploadUsesWords = finalPass?.kind === "open_ai" || (finalPass?.kind === "extra" && finalPass.api === "openai");
+    const uploadUsesWords = finalPass?.kind === "open_ai" || finalPass?.kind === "extra";
     say(wordProblem, "");
     if (uploadUsesWords) {
       if (wordHint) wordHint.textContent = "The final pass uses this word list.";
+      words.enable(true);
+      return;
+    }
+    if (active?.kind === "open_ai") {
+      const named = `${active.name} uses this word list.`;
+      if (wordHint) wordHint.textContent = named.length <= HINT_BUDGET ? named : "This recognizer uses this word list.";
       words.enable(true);
       return;
     }
@@ -2131,7 +2207,7 @@ function speech(context: PageContext): SpeechRows {
   syncChatSource();
   return {
     recognition: [
-      el("div", { class: "grp" }, liveRow, nextDictation, summaryActions, finalPassState, extraState, needsEndpoint),
+      el("div", { class: "grp" }, liveRow, nextDictation, summaryActions, finalPassState, mergeRow, extraState, needsEndpoint),
       ...groups.map(({ node }) => node),
       el("div", { class: "grp" }, wordRow),
     ],
@@ -2140,6 +2216,11 @@ function speech(context: PageContext): SpeechRows {
       row("Chat model source", "Writing and extras use this.", source),
       ...localRows,
       ...manualRows,
+      row(
+        "Write numbers as digits",
+        "“fifteen” becomes “15”.",
+        numbers,
+      ),
       row(
         "Clean up dictation",
         "Tidies each dictation before it is pasted.",
@@ -2256,7 +2337,8 @@ function overlay({ settings, controls, apply }: PageContext): HTMLElement[] {
   ];
 }
 
-function look({ settings, controls, apply, showLook }: PageContext): HTMLElement[] {
+function look(context: PageContext): HTMLElement[] {
+  const { settings, controls, apply, showLook } = context;
   const applied = el("small", { class: "applied", role: "status" });
   const problem = note();
   const picker = lookPicker(settings.look, (next) => {
@@ -2280,6 +2362,7 @@ function look({ settings, controls, apply, showLook }: PageContext): HTMLElement
     group("Look"),
     row("Look", "How the overlay and this window look.",
       el("div", { class: "stack wide" }, picker, applied, problem)),
+    ...customize(context),
   ];
 }
 
@@ -2802,7 +2885,9 @@ function history(context: PageContext): HTMLElement[] {
       say(problem, errorText(error));
     });
   }
+  const before = live.opened;
   live.opened = (id) => {
+    before(id);
     if (id === "history") {
       refresh();
       last.refresh();
@@ -2997,7 +3082,7 @@ function grouped(nodes: HTMLElement[]): HTMLElement[] {
 export function buildPages(context: PageContext): Page[] {
   const rows = speech(context);
   return PAGES.map(([id, title, build]) => {
-    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}` }, el("h3", { id: `page-${id}` }, title), ...grouped(build(context, rows)));
+    const node = el("section", { "data-page": id, "aria-labelledby": `page-${id}`, tabindex: "-1" }, el("h3", { id: `page-${id}` }, title), ...grouped(build(context, rows)));
     return { id, title, node };
   });
 }

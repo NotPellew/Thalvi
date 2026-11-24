@@ -42,12 +42,10 @@ Layout checks) and a real-window screenshot at 400×680.
 | Recognition page (See the page) | `heading=Recognition`, `combobox=Live recognizer`, `button=Add a streaming server`, `button=Edit Realtime transcription (WebSocket)`, `switch=Extra: Realtime transcription (WebSocket)`, `button=Add an on-device model`, `button=Edit On this computer`, `button=Add an extra-only server` (names from the fake backend) | none: the page is already loaded when Settings is | none |
 | Error overlay (Capture) | the overlay lies wholly inside the screen at top centre, by screenshot, at 1920×1080 only | `ctl hold-start` → red **NOT SENT** in the overlay (more than 30 pixels with red > 180, green and blue < 120 in x 760–1160, y 0–110), 0.16 s, 0.65 s | none: this is itself the failure path; a capture that stays `capturing` instead is the defect |
 
-Measured 2026-11-20: error overlay 0.16, 0.10, 0.08 s. Layout: 780×680 and
-1280×900 pass; **400×680 fails**: `combobox=Live recognizer: outside the
-window` (its right edge at 403 px), and the real window shows the same row with
-about 180 px of empty space above the drop-down (the row is 274 px tall up to
-at least 560 px wide, 95 px at 780). This is a product defect; the journey's
-layout check stays failing until it is fixed.
+Measured 2026-11-20: error overlay 0.16, 0.10, 0.08 s. Layout, 2026-11-23:
+400×680, 560×680, 780×680 and 1280×900 pass. Below 561 px the Live recognizer
+row is 87 px tall in Gunmetal and Holo and 92 px in Neon, with the drop-down
+under its description; at 780 px it is 95 px.
 
 ## Gotchas
 

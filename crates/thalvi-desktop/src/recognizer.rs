@@ -16,6 +16,7 @@ use crate::device::Step;
 use crate::frame::{FRAME_SAMPLES, Frame};
 use crate::models::ModelError;
 use crate::report::UserError;
+use crate::secondary::Language;
 
 /// Samples in one frame after upsampling to 24 kHz.
 pub const UPSAMPLED_SAMPLES: usize = FRAME_SAMPLES / 2 * 3;
@@ -283,6 +284,12 @@ pub trait RecognizerSession: Send {
         &mut self,
     ) -> impl Future<Output = Result<RecognizerEvent, RecognizerError>> + Send;
 
+    /// The language the recognizer detected for this capture, once it reports one; none when its
+    /// API carries no language.
+    fn language(&self) -> Option<Language> {
+        None
+    }
+
     /// Abandons the capture and releases the stream; best effort.
     fn cancel(self) -> impl Future<Output = ()> + Send;
 
@@ -401,6 +408,7 @@ pub struct FakeRecognizer {
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
     final_wait_ms: Arc<AtomicU64>,
+    language: Arc<Mutex<Option<Language>>>,
     load: Option<watch::Receiver<Step>>,
 }
 
@@ -413,6 +421,7 @@ pub struct FakeControl {
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
     final_wait_ms: Arc<AtomicU64>,
+    language: Arc<Mutex<Option<Language>>>,
     load: Option<watch::Sender<Step>>,
 }
 
@@ -423,6 +432,7 @@ pub struct FakeSession {
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
     final_wait_ms: Arc<AtomicU64>,
+    language: Arc<Mutex<Option<Language>>>,
 }
 
 impl FakeRecognizer {
@@ -453,6 +463,7 @@ impl FakeRecognizer {
         ));
         let ready = Arc::new(Mutex::new(Some(ready_rx)));
         let events = Arc::new(Mutex::new(Some(events_rx)));
+        let language = Arc::new(Mutex::new(None));
         (
             Self {
                 ready: Arc::clone(&ready),
@@ -461,6 +472,7 @@ impl FakeRecognizer {
                 stalled: Arc::clone(&stalled),
                 buffers: Arc::clone(&buffers),
                 final_wait_ms: Arc::clone(&final_wait_ms),
+                language: Arc::clone(&language),
                 load: load_rx,
             },
             FakeControl {
@@ -471,6 +483,7 @@ impl FakeRecognizer {
                 stalled,
                 buffers,
                 final_wait_ms,
+                language,
                 load: load_tx,
             },
         )
@@ -499,6 +512,7 @@ impl Recognizer for FakeRecognizer {
             stalled: Arc::clone(&self.stalled),
             buffers: Arc::clone(&self.buffers),
             final_wait_ms: Arc::clone(&self.final_wait_ms),
+            language: Arc::clone(&self.language),
         })
     }
 
@@ -542,6 +556,11 @@ impl FakeControl {
         let _ = self.events.send(event);
     }
 
+    /// The language the session reports for the capture, as a recognizer that detects one does.
+    pub fn heard_language(&self, language: Option<Language>) {
+        *self.language.lock().unwrap_or_else(PoisonError::into_inner) = language;
+    }
+
     /// From now on frames are accepted but never finish sending, as when the server stops reading.
     pub fn stall_sends(&self) {
         self.stalled.store(true, Ordering::Relaxed);
@@ -582,6 +601,10 @@ impl RecognizerSession for FakeSession {
 
     fn final_wait(&self) -> Duration {
         Duration::from_millis(self.final_wait_ms.load(Ordering::Relaxed))
+    }
+
+    fn language(&self) -> Option<Language> {
+        *self.language.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     #[expect(

@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{frame::Frame, recognizer::Upsampler};
+use crate::{frame::Frame, phrases::WordList, recognizer::Upsampler};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const SAMPLE_RATE: u32 = 24_000;
@@ -162,6 +162,108 @@ impl TryFrom<RawSecondaryStt> for SecondaryStt {
 /// Every assigned ISO 639-1 code.
 const ISO_639_1: &str = "aa ab ae af ak am an ar as av ay az ba be bg bi bm bn bo br bs ca ce ch co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa wo xh yi yo za zh zu";
 
+/// The English names transcription APIs report for the languages they detect.
+const LANGUAGE_NAMES: &[(&str, &str)] = &[
+    ("afrikaans", "af"),
+    ("albanian", "sq"),
+    ("amharic", "am"),
+    ("arabic", "ar"),
+    ("armenian", "hy"),
+    ("assamese", "as"),
+    ("azerbaijani", "az"),
+    ("bashkir", "ba"),
+    ("basque", "eu"),
+    ("belarusian", "be"),
+    ("bengali", "bn"),
+    ("bosnian", "bs"),
+    ("breton", "br"),
+    ("bulgarian", "bg"),
+    ("burmese", "my"),
+    ("catalan", "ca"),
+    ("chinese", "zh"),
+    ("croatian", "hr"),
+    ("czech", "cs"),
+    ("danish", "da"),
+    ("dutch", "nl"),
+    ("english", "en"),
+    ("estonian", "et"),
+    ("faroese", "fo"),
+    ("finnish", "fi"),
+    ("french", "fr"),
+    ("galician", "gl"),
+    ("georgian", "ka"),
+    ("german", "de"),
+    ("greek", "el"),
+    ("gujarati", "gu"),
+    ("haitian creole", "ht"),
+    ("hausa", "ha"),
+    ("hebrew", "he"),
+    ("hindi", "hi"),
+    ("hungarian", "hu"),
+    ("icelandic", "is"),
+    ("indonesian", "id"),
+    ("italian", "it"),
+    ("japanese", "ja"),
+    ("javanese", "jv"),
+    ("kannada", "kn"),
+    ("kazakh", "kk"),
+    ("khmer", "km"),
+    ("korean", "ko"),
+    ("lao", "lo"),
+    ("latin", "la"),
+    ("latvian", "lv"),
+    ("lingala", "ln"),
+    ("lithuanian", "lt"),
+    ("luxembourgish", "lb"),
+    ("macedonian", "mk"),
+    ("malagasy", "mg"),
+    ("malay", "ms"),
+    ("malayalam", "ml"),
+    ("maltese", "mt"),
+    ("maori", "mi"),
+    ("marathi", "mr"),
+    ("mongolian", "mn"),
+    ("nepali", "ne"),
+    ("norwegian", "no"),
+    ("nynorsk", "nn"),
+    ("occitan", "oc"),
+    ("pashto", "ps"),
+    ("persian", "fa"),
+    ("polish", "pl"),
+    ("portuguese", "pt"),
+    ("punjabi", "pa"),
+    ("romanian", "ro"),
+    ("russian", "ru"),
+    ("sanskrit", "sa"),
+    ("serbian", "sr"),
+    ("shona", "sn"),
+    ("sindhi", "sd"),
+    ("sinhala", "si"),
+    ("slovak", "sk"),
+    ("slovenian", "sl"),
+    ("somali", "so"),
+    ("spanish", "es"),
+    ("sundanese", "su"),
+    ("swahili", "sw"),
+    ("swedish", "sv"),
+    ("tagalog", "tl"),
+    ("tajik", "tg"),
+    ("tamil", "ta"),
+    ("tatar", "tt"),
+    ("telugu", "te"),
+    ("thai", "th"),
+    ("tibetan", "bo"),
+    ("turkish", "tr"),
+    ("turkmen", "tk"),
+    ("ukrainian", "uk"),
+    ("urdu", "ur"),
+    ("uzbek", "uz"),
+    ("vietnamese", "vi"),
+    ("welsh", "cy"),
+    ("yiddish", "yi"),
+    ("yoruba", "yo"),
+];
+
 /// An assigned two-letter ISO 639-1 language code, kept lower-case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Language(&'static str);
@@ -172,6 +274,12 @@ pub struct Language(&'static str);
 pub struct LanguageError;
 
 impl Language {
+    /// The lower-case ISO 639-1 code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        self.0
+    }
+
     /// `text` as a language code, or none when it is blank.
     ///
     /// # Errors
@@ -187,12 +295,36 @@ impl Language {
             .map(|code| Some(Self(code)))
             .ok_or(LanguageError)
     }
+
+    /// The language a transcription endpoint reported: an ISO 639-1 code or the English name
+    /// its API writes, in any case; none when it is blank or unknown.
+    #[must_use]
+    pub fn detected(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        if let Ok(code) = Self::parse(text) {
+            return code;
+        }
+        LANGUAGE_NAMES
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(text))
+            .map(|(_, code)| Self(code))
+    }
 }
 
 impl fmt::Display for Language {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0)
     }
+}
+
+/// A transcription's text, and the language the endpoint reported for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Transcript {
+    pub text: String,
+    pub language: Option<Language>,
 }
 
 /// How a live OpenAI-compatible entry sends the capture.
@@ -281,29 +413,48 @@ pub async fn transcribe(
     client: &reqwest::Client,
     settings: &SecondaryStt,
     frames: &[Frame],
-) -> Result<String, SecondaryError> {
-    let (endpoint, header, file_field, text_field) = match settings.api {
+    words: &WordList,
+) -> Result<Transcript, SecondaryError> {
+    let (endpoint, header, hint, file_field, text_field) = match settings.api {
         SecondaryApi::OpenAi => (
             "/audio/transcriptions",
             format!(
                 "Content-Disposition: form-data; name=\"model\"\r\n\r\n{}",
                 settings.model
             ),
+            if words.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n{}\r\n",
+                    words.hint()
+                )
+            },
             "file",
             "text",
         ),
-        SecondaryApi::Meta => (
-            "/asr/transcribe",
-            format!(
-                "Content-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n{}",
-                json!({"mode": "PUSH_TO_TALK", "model": settings.model, "audioEncoding": "WAV"})
-            ),
-            "audio",
-            "transcript",
-        ),
+        SecondaryApi::Meta => {
+            let mut request = json!({
+                "mode": "PUSH_TO_TALK",
+                "model": settings.model,
+                "audioEncoding": "WAV",
+            });
+            if !words.is_empty() {
+                request["keywords"] = json!(words.phrases());
+            }
+            (
+                "/asr/transcribe",
+                format!(
+                    "Content-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n{request}"
+                ),
+                String::new(),
+                "audio",
+                "transcript",
+            )
+        }
     };
     let mut body = format!(
-        "--{BOUNDARY}\r\n{header}\r\n--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+        "--{BOUNDARY}\r\n{header}\r\n{hint}--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
     )
     .into_bytes();
     body.extend_from_slice(&wav(frames));
@@ -338,9 +489,20 @@ pub async fn transcribe(
         .await
         .map_err(|_| SecondaryError::Timeout)??;
     match answer.get(text_field) {
-        Some(Value::String(text)) => Ok(text.clone()),
+        Some(Value::String(text)) => Ok(Transcript {
+            text: text.clone(),
+            language: detected_language(&answer),
+        }),
         _ => Err(SecondaryError::BadResponse),
     }
+}
+
+/// The language an answer names, as a code or as an API's English name.
+fn detected_language(answer: &Value) -> Option<Language> {
+    answer
+        .get("language")
+        .and_then(Value::as_str)
+        .and_then(Language::detected)
 }
 
 /// Sends the capture as the entry's request kind. A transcriptions request streams: it emits
@@ -354,9 +516,10 @@ pub async fn transcribe_events(
     client: &reqwest::Client,
     entry: &OpenAiLive,
     frames: &[Frame],
+    prompt: &str,
     emit: impl FnMut(crate::recognizer::RecognizerEvent),
-) -> Result<String, SecondaryError> {
-    request_audio(client, entry, frames, "", emit).await
+) -> Result<Transcript, SecondaryError> {
+    request_audio(client, entry, frames, prompt, emit).await
 }
 
 pub(crate) async fn transcribe_finished(
@@ -364,7 +527,7 @@ pub(crate) async fn transcribe_finished(
     entry: &OpenAiLive,
     frames: &[Frame],
     prompt: &str,
-) -> Result<String, SecondaryError> {
+) -> Result<Transcript, SecondaryError> {
     request_audio(client, entry, frames, prompt, |_| {}).await
 }
 
@@ -374,7 +537,7 @@ async fn request_audio(
     frames: &[Frame],
     prompt: &str,
     emit: impl FnMut(crate::recognizer::RecognizerEvent),
-) -> Result<String, SecondaryError> {
+) -> Result<Transcript, SecondaryError> {
     match entry.request {
         LiveRequest::Transcriptions => transcribe_stream(client, entry, frames, prompt, emit).await,
         LiveRequest::Chat => transcribe_chat(client, entry, frames, prompt).await,
@@ -387,7 +550,7 @@ async fn transcribe_stream(
     frames: &[Frame],
     prompt: &str,
     emit: impl FnMut(crate::recognizer::RecognizerEvent),
-) -> Result<String, SecondaryError> {
+) -> Result<Transcript, SecondaryError> {
     let settings = &entry.settings;
     let language = entry.language.map_or_else(String::new, |language| {
         format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n{language}\r\n")
@@ -431,7 +594,7 @@ async fn transcribe_stream(
 async fn read_transcription(
     response: reqwest::Response,
     mut emit: impl FnMut(crate::recognizer::RecognizerEvent),
-) -> Result<String, SecondaryError> {
+) -> Result<Transcript, SecondaryError> {
     if !response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -447,11 +610,15 @@ async fn read_transcription(
             .and_then(Value::as_str)
             .ok_or(SecondaryError::BadResponse)?
             .to_owned();
-        return Ok(text);
+        return Ok(Transcript {
+            text,
+            language: detected_language(&answer),
+        });
     }
     let mut stream = response.bytes_stream();
     let mut pending = Vec::new();
     let mut transcript = String::new();
+    let mut language = None;
     while let Some(chunk) = stream.next().await {
         pending.extend_from_slice(&chunk.map_err(|error| SecondaryError::connection(&error))?);
         while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
@@ -459,10 +626,16 @@ async fn read_transcription(
             let line = String::from_utf8_lossy(&line);
             if let Some(data) = line.trim().strip_prefix("data: ") {
                 if data == "[DONE]" {
-                    return Ok(transcript);
+                    return Ok(Transcript {
+                        text: transcript,
+                        language,
+                    });
                 }
                 let value: Value =
                     serde_json::from_str(data).map_err(|_| SecondaryError::BadResponse)?;
+                if let Some(detected) = detected_language(&value) {
+                    language = Some(detected);
+                }
                 match value.get("type").and_then(Value::as_str) {
                     Some("transcript.text.delta") => {
                         if let Some(delta) = value.get("delta").and_then(Value::as_str) {
@@ -474,7 +647,10 @@ async fn read_transcription(
                     }
                     Some("transcript.text.done") => {
                         if let Some(text) = value.get("text").and_then(Value::as_str) {
-                            return Ok(text.to_owned());
+                            return Ok(Transcript {
+                                text: text.to_owned(),
+                                language,
+                            });
                         }
                     }
                     None => {
@@ -496,7 +672,10 @@ async fn read_transcription(
             }
         }
     }
-    Ok(transcript)
+    Ok(Transcript {
+        text: transcript,
+        language,
+    })
 }
 
 /// One non-streaming chat completion that carries the WAV as `input_audio`.
@@ -505,7 +684,7 @@ async fn transcribe_chat(
     entry: &OpenAiLive,
     frames: &[Frame],
     prompt: &str,
-) -> Result<String, SecondaryError> {
+) -> Result<Transcript, SecondaryError> {
     let settings = &entry.settings;
     let mut messages = Vec::new();
     if !prompt.is_empty() {
@@ -539,11 +718,15 @@ async fn transcribe_chat(
             .json()
             .await
             .map_err(|_| SecondaryError::BadResponse)?;
-        answer
+        let text = answer
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or(SecondaryError::BadResponse)
+            .ok_or(SecondaryError::BadResponse)?
+            .to_owned();
+        Ok(Transcript {
+            text,
+            language: detected_language(&answer),
+        })
     };
     tokio::time::timeout(TIMEOUT, exchange)
         .await

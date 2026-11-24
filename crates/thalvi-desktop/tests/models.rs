@@ -943,12 +943,13 @@ async fn a_speech_download_with_a_bad_checksum_says_so_and_is_not_cached() {
 #[tokio::test]
 async fn a_speech_model_is_downloaded_once_at_a_time() {
     let (address, _server) = serve().await;
-    let dir = dir("speech-twice");
     let stalls = format!("http://{address}/stalls.onnx");
     let good = format!("http://{address}/good.onnx");
     let sha = sha256(GOOD);
     let downloads = Arc::new(SpeechDownloads::default());
-    let store = ModelStore::in_dir(&dir);
+    let store = ModelStore::in_dir(dir("speech-twice"));
+    // Its own folder: models that share a stored file wait for each other's download of it.
+    let elsewhere = ModelStore::in_dir(dir("speech-twice-other"));
     let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
     let first = {
         let (downloads, store, stalls, sha) = (
@@ -982,7 +983,7 @@ async fn a_speech_model_is_downloaded_once_at_a_time() {
         "The speech model m is already being downloaded."
     );
     downloads
-        .run("other", &store, &assets, |_| {})
+        .run("other", &elsewhere, &assets, |_| {})
         .await
         .expect("a different model is not held up");
 
@@ -1038,7 +1039,7 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
         );
         assert!(
             model.description.contains("Experimental")
-                && model.description.contains("word list is ignored"),
+                && !model.description.contains("word list is ignored"),
             "{}",
             model.description
         );
@@ -1058,7 +1059,7 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
             .iter()
             .map(|model| model.word_list)
             .collect::<Vec<_>>(),
-        [false, false]
+        [true, true]
     );
 
     for asset in [WHISPER_TURBO.model, WHISPER_TURBO.vad] {

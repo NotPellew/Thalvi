@@ -267,11 +267,20 @@ fn build(
     if write_key == hold_key {
         return Err("The write key must differ from the dictate key.".to_owned());
     }
+    let requested_merge = raw.stt.merge;
     let (entries, phrases) = raw
         .stt
         .entries(raw.server)
         .map_err(|error: EntryError| error.to_string())?;
-    if entries.any_extra() && raw.writing.is_none() {
+    // A form from before the switch loads as an upgrade does: merge on exactly when an extra is on.
+    let merge = requested_merge.unwrap_or_else(|| entries.any_extra());
+    if merge
+        && entries.any_extra()
+        && raw
+            .writing
+            .as_ref()
+            .is_none_or(|writing| !writing.has_endpoint())
+    {
         return Err(EntryError::ExtrasNeedWriting.to_string());
     }
     Ok(DesktopConfig {
@@ -280,7 +289,11 @@ fn build(
         ending_pause: raw.ending_pause,
         capture_limits: raw.capture_limits,
         endings: raw.endings,
-        stt: SttConfig { entries, phrases },
+        stt: SttConfig {
+            entries,
+            merge,
+            phrases,
+        },
         apps,
         scripts,
         overlay: raw.overlay,
@@ -297,7 +310,10 @@ fn build(
         show_in_menu: raw.show_in_menu,
         hold_key,
         write_key,
-        writing: raw.writing,
+        // Numbers as digits with no endpoint is the default, so it is not kept.
+        writing: raw
+            .writing
+            .filter(|writing| writing.has_endpoint() || !writing.numbers_as_digits()),
     })
 }
 
@@ -478,8 +494,11 @@ fn nonempty(value: &str, label: &str) -> Result<String, String> {
 /// Speech-to-text settings.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SttConfig {
-    /// The speech servers: the live one dictation uses, and the extras whose texts are merged with it.
+    /// The speech servers: the live one dictation uses, and the extras that run on each capture.
     pub entries: Entries,
+    /// Whether the chat model merges the extras' texts with the live text before delivery; off, the
+    /// live text is delivered at once and the extras are only recorded.
+    pub merge: bool,
     /// Spellings recognition favours, on this computer and on a recognizer that boosts phrases.
     pub phrases: WordList,
 }
@@ -488,11 +507,13 @@ impl Serialize for SttConfig {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         struct FileStt<'a> {
+            merge: bool,
             entries: &'a Entries,
             #[serde(skip_serializing_if = "WordList::is_empty")]
             phrases: &'a WordList,
         }
         FileStt {
+            merge: self.merge,
             entries: &self.entries,
             phrases: &self.phrases,
         }
@@ -893,6 +914,17 @@ mod tests {
     fn the_writing_endpoint_is_absent_by_default_and_refused_when_it_cannot_be_used() {
         let writing = |json: &str| parse(json).map(|config| config.writing);
         assert_eq!(writing(r#"{"writing": null}"#).unwrap(), None);
+        assert_eq!(
+            writing(r#"{"writing": {"numbers_as_digits": true}}"#).unwrap(),
+            None,
+            "on with no endpoint is the default and is not kept"
+        );
+        assert_eq!(writing(r#"{"writing": {}}"#).unwrap(), None);
+        let off = writing(r#"{"writing": {"numbers_as_digits": false}}"#)
+            .unwrap()
+            .unwrap();
+        assert!(!off.numbers_as_digits());
+        assert!(!off.has_endpoint(), "the switch needs no endpoint");
         let endpoint = writing(r#"{"writing": {"url": "http://127.0.0.1:9/v1/", "model": " m "}}"#)
             .unwrap()
             .unwrap();
@@ -946,6 +978,26 @@ mod tests {
             (
                 r#"{"writing": {"clean_dictation": true}}"#,
                 "writing.clean_dictation needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"prompt": "Be brief."}}"#,
+                "writing.prompt needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"openings": [{"phrase": "a b", "prompt": "p"}]}}"#,
+                "writing.openings needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"apps": [{"app": "kitty", "prompt": "p"}]}}"#,
+                "writing.apps needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"chat_build": "cpu"}}"#,
+                "writing.chat_build needs a writing endpoint",
+            ),
+            (
+                r#"{"writing": {"api_key": "k"}}"#,
+                "writing.api_key needs a writing endpoint",
             ),
         ] {
             let error = writing(json).unwrap_err().to_string();
@@ -1174,6 +1226,62 @@ mod tests {
             let written = serde_json::to_value(&config).unwrap();
             assert_eq!(written["stt"]["entries"][1]["kind"], "extra", "{name}");
         }
+    }
+
+    #[test]
+    fn the_merge_switch_keeps_merging_for_an_upgrade_and_is_off_for_a_new_install() {
+        let writing = r#""writing": {"url": "http://c/v1", "model": "c"}"#;
+        let entries = |on: bool| {
+            format!(
+                r#""entries": [{{"kind": "on_device", "id": "d", "name": "D", "active": true}}, {{"kind": "extra", "id": "x", "name": "X", "active": {on}, "address": "http://x/v1", "model": "m"}}]"#
+            )
+        };
+        let refused = "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off.";
+        for (name, json, merge) in [
+            ("a new install", "{}".to_owned(), false),
+            (
+                "an upgrade with an extra on",
+                format!("{{{writing}, \"stt\": {{{}}}}}", entries(true)),
+                true,
+            ),
+            (
+                "an upgrade with every extra off",
+                format!("{{{writing}, \"stt\": {{{}}}}}", entries(false)),
+                false,
+            ),
+            (
+                "merge off with an extra on and no endpoint",
+                format!(r#"{{"stt": {{"merge": false, {}}}}}"#, entries(true)),
+                false,
+            ),
+            (
+                "merge on with no extra and no endpoint",
+                format!(r#"{{"stt": {{"merge": true, {}}}}}"#, entries(false)),
+                true,
+            ),
+            (
+                "merge on with an extra on and an endpoint",
+                format!(
+                    r#"{{{writing}, "stt": {{"merge": true, {}}}}}"#,
+                    entries(true)
+                ),
+                true,
+            ),
+        ] {
+            let config = parse(&json).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(config.stt.merge, merge, "{name}");
+            let written = serde_json::to_value(&config).unwrap();
+            assert_eq!(written["stt"]["merge"], merge, "{name}");
+            let again = parse(&written.to_string()).unwrap();
+            assert_eq!(again.stt, config.stt, "{name}: round trip");
+        }
+        let error = parse(&format!(
+            r#"{{"stt": {{"merge": true, {}}}}}"#,
+            entries(true)
+        ))
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, format!("The desktop config is not valid: {refused}"));
     }
 
     #[test]

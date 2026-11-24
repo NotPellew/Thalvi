@@ -7,6 +7,14 @@ another account's app. From SSH, an interactive task with that account's
 `InteractiveToken` can launch the GUI driver. A task running in session 0
 cannot establish desktop use. Retain and remove only this run's task names.
 
+## Driver scripts
+
+Windows PowerShell 5.1 reads a script without a BOM in the ANSI code page, so
+one em dash or curly quote can break the parse before any window opens. Keep
+driver and helper `.ps1` files ASCII. One that needs other characters is saved
+as UTF-8 with a BOM (`Set-Content -Encoding UTF8` in 5.1 writes one) and run
+with `powershell -NoProfile -File <path>`, never piped or passed to `-Command`.
+
 ## Build identity and isolation
 
 Record the executable's SHA256 and version. An existing installed release
@@ -31,6 +39,34 @@ Get-FileHash $exe -Algorithm SHA256
 (Get-Item $exe).VersionInfo.ProductVersion
 & $exe state
 Get-FileHash (Join-Path $env:APPDATA 'thalvi\desktop.json') -Algorithm SHA256
+```
+
+### Installing a candidate build
+
+Run the installer as one process with a stated bound, and keep its receipt.
+Set `$installer`, `$bound` in seconds, `$evidence` (the run's evidence
+directory) and `$expected`: the candidate's `Version` and the `Sha256` of its
+`thalvi-desktop.exe`, from its build output or `7z e <installer>
+thalvi-desktop.exe`. A timeout, a non-zero exit code or a mismatch stops the
+run with that fact as its cause, never as an unknown receipt.
+
+```powershell
+$receipt = [ordered]@{ installer = $installer; started = (Get-Date).ToString('o')
+  installer_sha256 = (Get-FileHash $installer -Algorithm SHA256).Hash }
+$p = Start-Process $installer -ArgumentList '/S' -PassThru
+$null = $p.Handle  # without it, ExitCode stays empty after the wait
+if ($p.WaitForExit($bound * 1000)) { $receipt.exit_code = $p.ExitCode }
+else { taskkill.exe /PID $p.Id /T /F | Out-Null; $receipt.error = "install timed out after $bound s" }
+$receipt.ended = (Get-Date).ToString('o')
+if ($receipt.exit_code -eq 0) {
+  $receipt.exe_sha256 = (Get-FileHash $exe -Algorithm SHA256).Hash
+  $receipt.exe_version = (Get-Item $exe).VersionInfo.ProductVersion
+}
+$receipt | ConvertTo-Json | Set-Content (Join-Path $evidence 'install-receipt.json')
+if ($receipt.error) { throw $receipt.error }
+if ($receipt.exit_code -ne 0) { throw "installer exited with $($receipt.exit_code)" }
+if ($receipt.exe_sha256 -ne $expected.Sha256) { throw "installed $exe is not the candidate's build" }
+if ($receipt.exe_version -ne $expected.Version) { throw "installed version $($receipt.exe_version) is not $($expected.Version)" }
 ```
 
 Use an existing cached on-device model, no writing endpoint or external

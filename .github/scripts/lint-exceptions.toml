@@ -13,7 +13,7 @@
 "clippy::too_many_arguments" = 1
 "clippy::too_many_lines" = 8
 "clippy::trivially_copy_pass_by_ref" = 1
-"clippy::unnecessary_wraps" = 5
+"clippy::unnecessary_wraps" = 6
 "clippy::unused_async_trait_impl" = 10
 "clippy::unused_self" = 1
 "clippy::unwrap_used" = 3

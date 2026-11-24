@@ -1556,6 +1556,76 @@ mod tests {
     }
 
     #[test]
+    fn numbers_as_digits_round_trips_off_without_a_writing_endpoint_and_on_stores_nothing() {
+        let rig = Rig::new("numbers", "{}");
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["writing"],
+            Value::Null,
+            "on by default"
+        );
+        let set = rig.set(json!({"writing": {"numbers_as_digits": false}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        let writing = rig.fake.config().writing.unwrap();
+        assert!(!writing.numbers_as_digits());
+        assert!(!writing.has_endpoint(), "the switch needs no endpoint");
+        let shown = rig.ask(&Request::SettingsGet);
+        assert_eq!(shown["settings"]["writing"]["numbers_as_digits"], false);
+        assert!(shown["settings"]["writing"].get("url").is_none());
+        assert_eq!(rig.fake.saves.store.load().unwrap(), rig.fake.config());
+
+        let set = rig.set(json!({"writing": {"numbers_as_digits": true}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        assert!(rig.fake.config().writing.is_none(), "on is the default");
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["writing"],
+            Value::Null
+        );
+
+        // Removing an endpoint that had a key keeps the explicit off without carrying the key.
+        let rig = Rig::new(
+            "numbers-key",
+            r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "secret-value"}}"#,
+        );
+        let set = rig.set(json!({
+            "writing": {"url": null, "model": null, "numbers_as_digits": false}
+        }));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        let writing = rig.fake.config().writing.unwrap();
+        assert!(!writing.numbers_as_digits());
+        assert!(!writing.has_endpoint());
+        assert_eq!(writing.key(), "", "the removed endpoint's key goes with it");
+        let shown = rig.ask(&Request::SettingsGet);
+        assert!(!shown.to_string().contains("secret-value"), "{shown}");
+        assert_eq!(shown["settings"]["writing"]["numbers_as_digits"], false);
+    }
+
+    #[test]
+    fn the_merge_switch_round_trips_through_settings_get_and_set() {
+        let config = r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}, "stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "extra", "id": "x", "name": "X", "active": true, "address": "http://127.0.0.1:9/v1", "model": "m"}]}}"#;
+        let rig = Rig::new("merge", config);
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["stt"]["merge"],
+            true,
+            "a config from before the switch keeps merging"
+        );
+        let set = rig.set(json!({"stt": {"merge": false}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        assert!(!rig.fake.config().stt.merge);
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["stt"]["merge"],
+            false
+        );
+        let set = rig.set(json!({"stt": {"merge": true}}));
+        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
+        assert!(rig.fake.config().stt.merge);
+        assert_eq!(
+            rig.ask(&Request::SettingsGet)["settings"]["stt"]["merge"],
+            true
+        );
+        assert_eq!(rig.fake.saves.store.load().unwrap(), rig.fake.config());
+    }
+
+    #[test]
     fn writing_apps_are_checked_and_set_like_settings() {
         let rig = Rig::new(
             "writing-apps",

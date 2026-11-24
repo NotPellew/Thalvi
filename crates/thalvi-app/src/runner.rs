@@ -4304,17 +4304,167 @@ mod tests {
         panic!("{what}");
     }
 
+    /// Lets the paused clock run until `done`, failing after 6.4 s of it; the clock holds still
+    /// while a host call runs on the blocking pool, so a slow thread cannot use up the budget.
     async fn pump_until(what: &str, mut done: impl FnMut() -> bool) {
-        for _ in 0..80 {
-            if done() {
-                return;
+        tokio::time::timeout(Duration::from_millis(6_400), async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(80)).await;
             }
-            tokio::time::advance(Duration::from_millis(80)).await;
-            for _ in 0..16 {
-                tokio::task::yield_now().await;
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
+    }
+
+    /// A rig whose wake model loads only once `cached` says its file is there, recording every
+    /// model a build was asked to load.
+    struct WakeLab {
+        opens: Rc<Cell<u32>>,
+        cached: Rc<Cell<bool>>,
+        loaded: Rc<RefCell<Vec<thalvi_desktop::wake::HeadModel>>>,
+    }
+
+    impl Rig for WakeLab {
+        type Recognizer = thalvi_desktop::recognizer::FakeRecognizer;
+        type Wake = thalvi_desktop::engine::fakes::FakeWake;
+        type Cues = thalvi_desktop::engine::fakes::FakeCuePlayer;
+        type Input = LabMic;
+        type Host = TestHost;
+
+        fn load(
+            &self,
+            config: &DesktopConfig,
+            _: &InputGate,
+            _: &Rc<Publisher>,
+        ) -> impl Future<Output = Result<Loaded<Self>, Failure>> {
+            use thalvi_desktop::wake::HeadModel;
+
+            let head = config.wake.capture().model.clone();
+            self.loaded.borrow_mut().push(head.clone());
+            if head == HeadModel::Catalog(CatalogHead::HeyMycroft) && !self.cached.get() {
+                return std::future::ready(Err(Failure::of(
+                    &thalvi_desktop::wake::WakeError::Load {
+                        model: "Hey Mycroft".to_owned(),
+                        reason: "the model is not downloaded".to_owned(),
+                    },
+                )));
+            }
+            let (wake, _) = thalvi_desktop::engine::fakes::FakeWake::new();
+            let (recognizer, _) = thalvi_desktop::recognizer::FakeRecognizer::new();
+            let (cues, _) = thalvi_desktop::engine::fakes::FakeCuePlayer::new();
+            std::future::ready(Ok(Loaded {
+                recognizer,
+                wake,
+                cues,
+                recorder: Recorder::disabled(),
+                http: reqwest::Client::new(),
+                chat: None,
+                spotter: None,
+                spotter_off: None,
+                extras: Vec::new(),
+                local: None,
+                extra_locals: Vec::new(),
+            }))
+        }
+
+        fn input(&self, gate: InputGate, _: Option<String>, _: Metrics) -> LabMic {
+            LabMic {
+                gate,
+                opens: Rc::clone(&self.opens),
+                missing: Rc::new(Cell::new(false)),
+                opened: false,
+                held: None,
             }
         }
-        panic!("{what}");
+    }
+
+    async fn status_until(
+        status: &mut watch::Receiver<Status>,
+        what: &str,
+        mut wanted: impl FnMut(&Status) -> bool,
+    ) {
+        tokio::time::timeout(WAIT, status.wait_for(|shown| wanted(shown)))
+            .await
+            .unwrap_or_else(|_| panic!("{what}"))
+            .unwrap_or_else(|_| panic!("the runner stopped before {what}"));
+    }
+
+    #[tokio::test]
+    async fn a_wake_head_downloaded_after_a_failed_load_takes_over_without_a_restart() {
+        use thalvi_desktop::wake::HeadModel;
+
+        LocalSet::new()
+            .run_until(async {
+                let dir = std::env::temp_dir()
+                    .join(format!("thalvi-wake-retry-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                let running = DesktopConfig::from_json_str(
+                    r#"{"wake":{"capture":{"model":"hey_thalvi"},"conversation":{"model":"hey_thalvi"}},"history":{"enabled":false}}"#,
+                )
+                .unwrap();
+                let selected = DesktopConfig::from_json_str(
+                    r#"{"wake":{"capture":{"model":"hey_mycroft"},"conversation":{"model":"hey_thalvi"}},"history":{"enabled":false}}"#,
+                )
+                .unwrap();
+                let cached = Rc::new(Cell::new(false));
+                let loaded = Rc::new(RefCell::new(Vec::new()));
+                let lab = WakeLab {
+                    opens: Rc::new(Cell::new(0)),
+                    cached: Rc::clone(&cached),
+                    loaded: Rc::clone(&loaded),
+                };
+                let (link, ends, _) = EngineLink::wire(&running, false);
+                let mut status = link.status_updates();
+                let saves = crate::app::SyncedConfig::new(
+                    crate::settings::Store::new(Some(dir.join("desktop.json"))).unwrap(),
+                    selected.clone(),
+                );
+                let engine = tokio::task::spawn_local(ends.run(
+                    running,
+                    false,
+                    lab,
+                    Arc::new(Delivery::new(TestHost::default())),
+                    Arc::new(History::at("unused-wake-retry")),
+                    Arc::new(Drafts::default()),
+                ));
+                status_until(&mut status, "listening starts", |shown| {
+                    matches!(shown, Status::Listening)
+                })
+                .await;
+
+                link.send(Control::Apply(Box::new(selected)));
+                status_until(&mut status, "the wake load fails", |shown| {
+                    matches!(
+                        shown,
+                        Status::Failed { headline, .. } if *headline == "Wake model can't be loaded"
+                    )
+                })
+                .await;
+
+                cached.set(true);
+                saves.wake_head_downloaded(CatalogHead::HeyMycroft, |config| {
+                    link.send(Control::Apply(Box::new(config.clone())));
+                });
+                status_until(&mut status, "the retried wake load listens", |shown| {
+                    matches!(shown, Status::Listening)
+                })
+                .await;
+
+                let used = loaded.borrow().last().cloned();
+                let shown = link.status();
+                link.send(Control::Quit);
+                engine.await.unwrap();
+                let _ = std::fs::remove_dir_all(&dir);
+
+                assert_eq!(
+                    used,
+                    Some(HeadModel::Catalog(CatalogHead::HeyMycroft)),
+                    "the downloaded head is in use"
+                );
+                assert_eq!(shown, Status::Listening, "the failed load is cleared");
+            })
+            .await;
     }
 
     async fn feed_result(mut ended: oneshot::Receiver<FeedEnd>) -> FeedEnd {

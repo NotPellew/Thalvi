@@ -89,7 +89,7 @@ records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 The notes below say why each covered change since the model was written added no writer.
 
-Covers: crates/thalvi-app/src/settings.rs crates/thalvi-app/src/commands.rs crates/thalvi-app/src/app.rs crates/thalvi-app/src/agent.rs crates/thalvi-desktop/src/host/channel.rs crates/thalvi-desktop/src/host/windows/pipe.rs '.agents/skills/formal-config-save/**'
+Covers: crates/thalvi-app/src/settings.rs crates/thalvi-desktop/src/private.rs crates/thalvi-app/src/commands.rs crates/thalvi-app/src/app.rs crates/thalvi-app/src/agent.rs crates/thalvi-desktop/src/host/channel.rs crates/thalvi-desktop/src/host/windows/pipe.rs '.agents/skills/formal-config-save/**'
 
 The app styles change (#464) registers
 two read-only Settings commands in `start` (the current app and why app styles
@@ -118,6 +118,12 @@ change it.
 
 An unreadable look, and a built-in-look save that fails, are recorded on `LastError` for the tray and Settings. Neither writes `desktop.json` or takes the save lock.
 
+The numbers-as-digits setting (#588) shapes the form in `settings_json` and narrows the writing
+key restore in `unmask_keys`: a writing object with no endpoint keeps no key. Saves still go
+through `Store::check`/`Store::save` and `settings_set`'s existing lock and temporary name; no
+new writer, lock or temporary file is added, and the model and its three invariants are
+unchanged.
+
 The opt-in dictation cleanup (#465) adds one agent test in `agent.rs`. `settings_set` is unchanged: the new field is refused by the same config load as every other writing field. No writer of `desktop.json` or `AppState::config` is added, so the model and its three invariants are unchanged.
 
 The experimental Whisper entry (#481) adds no writer:
@@ -125,10 +131,10 @@ The experimental Whisper entry (#481) adds no writer:
 store, `app.rs` passes the packaged helper folder into `AppState::start`, and `agent.rs` names the model in
 `recognizer`. None writes `desktop.json` or `AppState::config` or takes the save lock.
 
-`AppState::apply` in `app.rs` also sends the overlay the recordings choice, on the channel it uses
-for the look, and `start_overlay` keeps the recorder that choice switches. Neither writes
-`desktop.json` or `AppState::config` or takes the save lock, so the model and its three invariants
-are unchanged.
+`AppState::apply` in `app.rs` also sends the overlay the recordings choice and the Show the
+overlay setting (#619), on the channel it uses for the look, and `start_overlay` keeps the recorder
+that choice switches and sends the setting at start. None of it writes `desktop.json` or
+`AppState::config` or takes the save lock, so the model and its three invariants are unchanged.
 
 Hold-key recovery (#566) changes only `held` in `app.rs`: a desktop that refuses the keys at start
 keeps a watch that binds them at a later config reload, and a refused key change in Settings still
@@ -139,15 +145,33 @@ The final-pass switch (#586) uses the existing Settings patch and validation pat
 the final pass as a cancellable capture state, so a config saved while it waits is applied at the
 same boundary as other changes during capture. No writer, lock or temporary file changes.
 
+The merge switch (#589) adds `stt.merge` and reads it in `check_endpoint_kept`: removing the writing
+endpoint is refused only while an extra is on and the merge is on, and a form without the switch reads
+it as `any_extra`, as the loader does. That is the refusal `Store::check` already returns before
+`write_atomically`, under the save lock. `agent.rs` changes only in its tests module. No writer, lock
+or temporary file changes, so the model and its three invariants are unchanged.
+
+The shared private-file module (#528) moves `settings.rs`'s `write_private` and the rename into
+`thalvi_desktop::private::write_atomically`, which history also uses for its own file. The steps,
+their order, the shared `desktop.json.tmp` name and the cleanup on error are unchanged, and
+`settings.rs` still creates the folder first; `app.rs` only drops a `cfg` before `prepare_toolkit`.
+No writer, lock or temporary file changes, so the model and its three invariants are unchanged.
+
+The look preview (#518) adds the read-only `preview_overlay` command in `commands.rs` and, in
+`app.rs`, an `AppState` flag holding the system theme for it, set where the overlay is told the theme.
+Neither writes `desktop.json` or `AppState::config` or takes the save lock, so the model and its three
+invariants are unchanged.
+
 | Code | Model action and boundary |
 | --- | --- |
 | `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window), `settings_patch` | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: `settings_patch` merges the window's patch (only what the user changed) over the config read under the lock, with `settings::merged`, which `plan_over` uses too; the Settings save sets its field (the look) and carries the others over. This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |
 | `crates/thalvi-app/src/agent.rs`: `settings_set`, `plan_over`, via `Live::save` in `app.rs` | Writer `A` on a request thread; the same `commands::save` path. `Snap` is `plan_over` on the config `SyncedConfig::save_form` read under the lock: the patch merged over the whole form, so it sets its own field (the microphone) and carries the others over. `settings check` (`plan`) writes nothing and is not modeled. |
 | `crates/thalvi-app/src/app.rs`: `SyncedConfig::remember` (from `AppState::remember`, reached by `remember_login`, `remember_menu_entry` and `Live::set_switch`) | Writer `L` on a request thread. `Lock` before `Snap`: reads the whole config and sets the switch under the lock; `Store::save_switches` writes it; the running config is set before `Unlock`. |
 | `crates/thalvi-app/src/settings.rs`: `Store::check` (form saves), `Store::save` (switches), `prepare` | The content each writer validates: a form save keeps `current`'s switches; a switch keeps the form it read. |
-| Same file: `write_private` | `RmTmp` (`remove_file` of the shared name), `Create` (`create_new`; fails if the name exists), `Write` (`write_all` into the opened file). Under the save lock these steps cannot interleave with another writer's. |
+| `crates/thalvi-desktop/src/private.rs`: `write_new` (from `write_atomically`, which `settings.rs`'s `write_atomically` calls after creating the folder) | `RmTmp` (`remove_file` of the shared name), `Create` (`create_new`; fails if the name exists), `Write` (`write_all` into the opened file). Under the save lock these steps cannot interleave with another writer's. |
 | Same file: `write_atomically` | `Rename` (moves whatever `desktop.json.tmp` names now; fails if it names nothing). On any error it removes the shared name and returns Err. |
 | `crates/thalvi-app/src/app.rs`: `AppState::apply` | `Apply`: `SyncedConfig::set` updates `current` under its mutex while the separate save lock remains held. `Send`: `Control::Apply` to the runner, which takes them in order. |
+| `crates/thalvi-app/src/app.rs`: `SyncedConfig::wake_head_downloaded` (from `AppState::wake_head_downloaded`, which `commands::download_wake` calls after a wake download, #616) | Not a writer: under the save lock it reads `current` and, when it selects the downloaded head, sends it as `Control::Apply`. That is the `Send` of a save that changed nothing; it writes neither the file nor `current`, and what it sends is what both already hold, so it cannot reorder behind a save. |
 | `crates/thalvi-app/src/settings.rs`: `Store::start` (from `AppState::start` in `app.rs`'s `setup`) | Not modeled: a first start writes the defaults, and a load that drops a saved Thalvi server entry writes the normalized config, both through `Store::write` before `setup` registers the state, serves requests or opens Settings, so no other writer exists yet. |
 | `crates/thalvi-app/src/update.rs`: `Marker::write` and update-channel reads | Not a config writer: the updater's atomic write targets the separate `update.json` marker. The channel is read from `AppState::config`; changing it is covered by the Settings form writer above. |
 | `crates/thalvi-desktop/src/host/channel.rs`: `accept`; `windows/pipe.rs`: `accept`, `answer` | Why `A` and `L` run concurrently: one `thalvi-request` thread per connection, up to `MAX_CONNECTIONS`. |

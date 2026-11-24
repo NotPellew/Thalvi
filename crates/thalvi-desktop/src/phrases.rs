@@ -56,6 +56,12 @@ impl WordList {
         &self.0
     }
 
+    /// The list as one hint, entries separated by a comma and a space.
+    #[must_use]
+    pub fn hint(&self) -> String {
+        self.0.join(", ")
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

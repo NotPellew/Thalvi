@@ -4,19 +4,79 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 use thalvi_desktop::config::{DesktopConfig, Look};
-use thalvi_desktop::theme::{self, Color, Scheme, Style};
+use thalvi_desktop::theme::{self, Color, Descriptor, Scheme, Style};
 
-/// The property descriptors and every look's resolved custom properties.
+/// The property descriptors, every look's resolved custom properties and each look's resolved
+/// value for every descriptor that applies to it.
 #[must_use]
 pub fn response(config: &DesktopConfig) -> Value {
     let mut looks = Map::new();
+    let mut values = Map::new();
     for look in [Look::Neon, Look::Holo, Look::Gunmetal] {
+        let style = Style::resolve(look, config.themes.of(look));
         looks.insert(
             look.name().to_owned(),
-            Value::Object(tokens(look, config).into_iter().collect()),
+            Value::Object(tokens(look, &style).into_iter().collect()),
+        );
+        values.insert(
+            look.name().to_owned(),
+            Value::Object(
+                theme::descriptors()
+                    .iter()
+                    .filter(|property| property.looks.contains(&look))
+                    .map(|property| (property.id.to_owned(), resolved(property, &style.dark)))
+                    .collect(),
+            ),
         );
     }
-    json!({ "properties": properties(), "looks": looks })
+    json!({ "properties": properties(), "looks": looks, "values": values })
+}
+
+/// One descriptor's resolved value in a look's dark scheme.
+fn resolved(property: &Descriptor, scheme: &Scheme) -> Value {
+    match property.id {
+        "colors.background" => scheme.background.to_hex().into(),
+        "colors.surface" => scheme.surface.to_hex().into(),
+        "colors.raised" => scheme.raised.to_hex().into(),
+        "colors.text" => scheme.text.to_hex().into(),
+        "colors.muted" => scheme.muted.to_hex().into(),
+        "colors.border" => scheme.border.to_hex().into(),
+        "colors.accent" => scheme.accent.to_hex().into(),
+        "colors.on_accent" => scheme.on_accent.to_hex().into(),
+        "colors.secondary" => scheme.secondary.to_hex().into(),
+        "colors.state.pending" => scheme.pending.to_hex().into(),
+        "colors.state.done" => scheme.done.to_hex().into(),
+        "colors.state.failed" => scheme.failed.to_hex().into(),
+        "colors.state.live" => scheme.live.to_hex().into(),
+        "colors.state.working" => scheme.working.to_hex().into(),
+        "colors.state.quiet" => scheme.quiet.to_hex().into(),
+        "font.family" => scheme.font_family.clone().into(),
+        "font.mono_family" => scheme.mono_family.clone().into(),
+        "font.scale" => decimal(scheme.font_scale),
+        "font.weight" => scheme.font_weight.into(),
+        "font.tracking" => decimal(scheme.tracking),
+        "spacing.scale" => decimal(scheme.spacing),
+        "shape.radius" => scheme.radius.into(),
+        "shape.chamfer" => scheme.chamfer.into(),
+        "border.width" => scheme.border_width.into(),
+        "surface.opacity" => decimal(scheme.opacity),
+        "glow.strength" => decimal(scheme.glow),
+        "decoration.mesh" => decimal(scheme.mesh),
+        "decoration.scanlines" => scheme.scanlines.into(),
+        "decoration.corners" => scheme.corners.into(),
+        "motion.shine" => scheme.shine.into(),
+        "motion.pulse" => scheme.pulse.into(),
+        _ => Value::Null,
+    }
+}
+
+/// The shortest decimal that reads back as `value`: widening an `f32` shows binary noise
+/// (0.05 becomes 0.05000000074505806) that Settings would print.
+fn decimal(value: f32) -> Value {
+    value
+        .to_string()
+        .parse::<f64>()
+        .map_or(Value::Null, Value::from)
 }
 
 fn properties() -> Vec<Value> {
@@ -28,9 +88,9 @@ fn properties() -> Vec<Value> {
                 "label": property.label,
                 "category": property.category,
                 "unit": property.unit,
-                "min": property.min,
-                "max": property.max,
-                "step": property.step,
+                "min": property.min.map(decimal),
+                "max": property.max.map(decimal),
+                "step": property.step.map(decimal),
                 "looks": property.looks.iter().map(|look| look.name()).collect::<Vec<_>>(),
                 "surfaces": property.surfaces,
             })
@@ -48,10 +108,10 @@ fn pick<T>(look: Look, neon: T, holo: T, gunmetal: T) -> T {
 }
 
 /// Every custom property the settings stylesheets read, resolved for one look.
-fn tokens(look: Look, config: &DesktopConfig) -> BTreeMap<String, Value> {
+fn tokens(look: Look, style: &Style) -> BTreeMap<String, Value> {
     let theme = SettingsStyle {
         look,
-        style: Style::resolve(look, config.themes.of(look)),
+        style: style.clone(),
         defaults: theme::defaults_of(look),
     };
     let mut tokens = Tokens::default();
@@ -1564,5 +1624,87 @@ mod tests {
                 "{look} {overrides} changed nothing the settings window reads"
             );
         }
+    }
+
+    #[test]
+    fn each_look_reports_exactly_its_descriptors_with_the_right_value_type() {
+        let value = response(&config("{}"));
+        assert!(value["values"].is_object(), "the response has no values");
+        for look in [Look::Neon, Look::Holo, Look::Gunmetal] {
+            let values = &value["values"][look.name()];
+            assert!(values.is_object(), "{} has no values", look.name());
+            let mut expected: Vec<&str> = theme::descriptors()
+                .iter()
+                .filter(|property| property.looks.contains(&look))
+                .map(|property| property.id)
+                .collect();
+            expected.sort_unstable();
+            let mut got: Vec<&str> = values
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            got.sort_unstable();
+            assert_eq!(got, expected, "{}", look.name());
+            for property in theme::descriptors()
+                .iter()
+                .filter(|property| property.looks.contains(&look))
+            {
+                let resolved = &values[property.id];
+                let right_type = match property.unit {
+                    "color" | "text" => resolved.is_string(),
+                    "number" => resolved.is_number(),
+                    "toggle" => resolved.is_boolean(),
+                    _ => false,
+                };
+                assert!(
+                    right_type,
+                    "{}.{} is {resolved}, not a {}",
+                    look.name(),
+                    property.id,
+                    property.unit
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn numbers_reach_settings_as_the_decimals_they_were_written_as() {
+        let value = response(&config(
+            r#"{"themes":{"version":1,"holo":{"font":{"scale":1.1},"decoration":{"mesh":0.07}}}}"#,
+        ));
+        let scale = value["properties"]
+            .as_array()
+            .and_then(|properties| {
+                properties
+                    .iter()
+                    .find(|property| property["id"] == "font.scale")
+            })
+            .expect("font.scale is offered");
+        assert_eq!(
+            (&scale["min"], &scale["max"], &scale["step"]),
+            (&json!(0.85), &json!(1.25), &json!(0.05))
+        );
+        assert_eq!(value["values"]["holo"]["font.scale"], json!(1.1));
+        assert_eq!(value["values"]["holo"]["decoration.mesh"], json!(0.07));
+    }
+
+    #[test]
+    fn values_show_a_looks_override_and_keep_other_and_suspended_looks_at_defaults() {
+        let changed = response(&config(
+            r##"{"themes":{"version":1,"holo":{"colors":{"dark":{"accent":"#ff0000"}},"font":{"scale":1.1}}}}"##,
+        ));
+        assert_eq!(changed["values"]["holo"]["colors.accent"], "#ff0000");
+        assert_eq!(changed["values"]["holo"]["font.scale"], json!(1.1));
+        assert_ne!(changed["values"]["neon"]["colors.accent"], "#ff0000");
+        assert_ne!(changed["values"]["gunmetal"]["colors.accent"], "#ff0000");
+        assert_eq!(changed["values"]["neon"]["font.scale"], json!(1.0));
+
+        let suspended = response(&config(
+            r##"{"themes":{"version":1,"holo":{"suspended":true,"colors":{"dark":{"accent":"#ff0000"}},"font":{"scale":1.1}}}}"##,
+        ));
+        assert_eq!(suspended["values"]["holo"]["colors.accent"], "#6bf8ff");
+        assert_eq!(suspended["values"]["holo"]["font.scale"], json!(1.0));
     }
 }

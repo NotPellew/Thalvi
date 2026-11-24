@@ -1,32 +1,44 @@
 //! Owns buffered capture uploads to an OpenAI-compatible transcription endpoint.
 
-use std::time::Instant;
+use std::{
+    sync::{Arc, Mutex, PoisonError},
+    time::Instant,
+};
 use tokio::sync::{Notify, mpsc};
 
 use crate::{
     frame::Frame,
     metrics::{Event, Metrics},
+    phrases::WordList,
     recognizer::{
         Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
         TranscriptionFailure,
     },
-    secondary::{OpenAiLive, SecondaryError, transcribe_events},
+    secondary::{Language, OpenAiLive, SecondaryError, transcribe_events},
 };
 
 pub struct OpenAiRecognizer {
     speech: SpeechSource,
     live: OpenAiLive,
+    prompt: String,
     client: reqwest::Client,
     metrics: Metrics,
 }
 
 impl OpenAiRecognizer {
     #[must_use]
-    pub fn new(name: &str, live: OpenAiLive, client: reqwest::Client, metrics: Metrics) -> Self {
+    pub fn new(
+        name: &str,
+        live: OpenAiLive,
+        client: reqwest::Client,
+        metrics: Metrics,
+        words: &WordList,
+    ) -> Self {
         let speech = SpeechSource::direct(name, live.settings.address().to_owned());
         Self {
             speech,
             live,
+            prompt: words.hint(),
             client,
             metrics,
         }
@@ -73,6 +85,7 @@ fn failure(speech: &SpeechSource, error: &SecondaryError) -> RecognizerError {
 pub struct OpenAiSession {
     speech: SpeechSource,
     live: OpenAiLive,
+    prompt: String,
     frames: Vec<Frame>,
     finished: bool,
     client: reqwest::Client,
@@ -83,6 +96,7 @@ pub struct OpenAiSession {
     metrics: Metrics,
     task: Option<tokio::task::JoinHandle<()>>,
     finished_signal: Notify,
+    language: Arc<Mutex<Option<Language>>>,
 }
 
 impl Recognizer for OpenAiRecognizer {
@@ -97,6 +111,7 @@ impl Recognizer for OpenAiRecognizer {
         Ok(OpenAiSession {
             speech: self.speech.clone(),
             live: self.live.clone(),
+            prompt: self.prompt.clone(),
             frames: Vec::new(),
             finished: false,
             client: self.client.clone(),
@@ -107,6 +122,7 @@ impl Recognizer for OpenAiRecognizer {
             metrics: self.metrics.clone(),
             task: None,
             finished_signal: Notify::new(),
+            language: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -127,6 +143,10 @@ impl RecognizerSession for OpenAiSession {
         Ok(())
     }
 
+    fn language(&self) -> Option<Language> {
+        *self.language.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     #[expect(
         clippy::unused_async_trait_impl,
         reason = "Frames are buffered locally without I/O."
@@ -145,6 +165,7 @@ impl RecognizerSession for OpenAiSession {
             let client = self.client.clone();
             let speech = self.speech.clone();
             let live = self.live.clone();
+            let prompt = self.prompt.clone();
             let frames = self.frames.clone();
             let metrics = self.metrics.clone();
             let released_at = self.released_at.unwrap_or_else(Instant::now);
@@ -153,11 +174,12 @@ impl RecognizerSession for OpenAiSession {
                     "Speech transcription stopped unexpectedly.",
                 ));
             };
+            let language = Arc::clone(&self.language);
             self.task = Some(tokio::spawn(async move {
                 let started = Instant::now();
                 let mut first_text = true;
                 let mut deltas = 0_u32;
-                let result = transcribe_events(&client, &live, &frames, |event| {
+                let result = transcribe_events(&client, &live, &frames, &prompt, |event| {
                     if matches!(event, RecognizerEvent::Partial(_)) {
                         deltas = deltas.saturating_add(1);
                         metrics.metric(Event::LiveSttDelta, "ok", None, serde_json::json!({}));
@@ -191,7 +213,9 @@ impl RecognizerSession for OpenAiSession {
                     }),
                 );
                 match result {
-                    Ok(text) => {
+                    Ok(transcript) => {
+                        *language.lock().unwrap_or_else(PoisonError::into_inner) =
+                            transcript.language;
                         if first_text {
                             metrics.metric(
                                 Event::LiveSttFirstText,
@@ -200,7 +224,7 @@ impl RecognizerSession for OpenAiSession {
                                 serde_json::json!({}),
                             );
                         }
-                        let _ = sender.send(Ok(RecognizerEvent::Final(text)));
+                        let _ = sender.send(Ok(RecognizerEvent::Final(transcript.text)));
                     }
                     Err(error) => {
                         let _ = sender.send(Err(failure(&speech, &error)));

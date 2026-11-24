@@ -1,6 +1,6 @@
 //! The local history of dictations: what was heard, when, where it went and how it ended.
 
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::capture::CaptureRoute;
 use crate::delivery::Finished;
 use crate::engine::CaptureOutcome;
-use crate::metrics::{create_private_dir, now_ms};
+use crate::metrics::now_ms;
+use crate::private;
 
 /// The most entries a history may be asked to keep.
 pub const MAX_LIMIT: usize = 1000;
@@ -341,33 +342,15 @@ impl Store {
         };
         let json = serde_json::to_vec(entries).map_err(|error| io(error.into()))?;
         if let Some(parent) = path.parent() {
-            create_private_dir(parent).map_err(io)?;
+            private::create_dir(parent).map_err(io)?;
         }
-        let mut temporary = path.as_os_str().to_owned();
-        temporary.push(".tmp");
-        let temporary = PathBuf::from(temporary);
-        let written =
-            write_private(&temporary, &json).and_then(|()| std::fs::rename(&temporary, path));
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        written.map_err(io)
+        private::write_atomically(path, &json).map_err(io)
     }
 }
 
 fn drop_oldest(entries: &mut Vec<Entry>, limit: usize) {
     let surplus = entries.len().saturating_sub(limit);
     entries.drain(..surplus);
-}
-
-fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let _ = std::fs::remove_file(path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    // Windows files inherit the private ACL of the per-user data directory.
-    options.open(path)?.write_all(contents)
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Display};
-use std::fs::{DirBuilder, File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,6 +15,7 @@ use jiff::Zoned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::private;
 use crate::report::UserError;
 
 /// How many events may wait for the writer before new ones are dropped.
@@ -73,6 +74,9 @@ pub enum Event {
     /// One dictation cleanup: the chat call's own latency and outcome, and separately how long
     /// the user waited from the dictation final until the paste.
     Cleanup,
+    /// A delivered text with its number words as digits: how many numbers were rewritten, never
+    /// the text.
+    Numbers,
     /// Fetching and loading the local speech model.
     SpeechLoad,
     /// Downloading a catalog speech model from the settings window.
@@ -132,6 +136,7 @@ impl Event {
             Self::LiveSttDelta => "desktop_live_stt_delta",
             Self::Writing => "desktop_writing",
             Self::Cleanup => "desktop_cleanup",
+            Self::Numbers => "desktop_numbers",
             Self::SpeechLoad => "desktop_speech_load",
             Self::SpeechDownload => "desktop_speech_download",
             Self::ChatDownload => "desktop_chat_download",
@@ -514,8 +519,8 @@ impl Writer {
         let (mut file, mut size) = if let Some(open) = self.metrics.take() {
             open
         } else {
-            create_private_dir(&self.root)?;
-            let file = open_private(&path)?;
+            private::create_dir(&self.root)?;
+            let file = private::open_append(&path)?;
             let size = file.metadata()?.len();
             (file, size)
         };
@@ -526,7 +531,7 @@ impl Writer {
                 std::fs::rename(&first, backup(&path, 2))?;
             }
             std::fs::rename(&path, first)?;
-            file = open_private(&path)?;
+            file = private::open_append(&path)?;
             size = 0;
         }
         writeln!(file, "{line}")?;
@@ -536,17 +541,17 @@ impl Writer {
 
     fn text(&self, dictation: &Dictation, line: &str) -> io::Result<()> {
         let dir = self.folder(dictation)?;
-        writeln!(open_private(&dir.join("text.txt"))?, "{line}")
+        writeln!(private::open_append(&dir.join("text.txt"))?, "{line}")
     }
 
     fn audio(&self, dictation: &Dictation, name: &str, pcm: &[i16]) -> io::Result<()> {
         let dir = self.folder(dictation)?;
-        open_private(&dir.join(name))?.write_all(&wav(pcm))
+        private::open_append(&dir.join(name))?.write_all(&wav(pcm))
     }
 
     fn folder(&self, dictation: &Dictation) -> io::Result<PathBuf> {
         let dir = self.root.join(&dictation.0);
-        create_private_dir(&dir)?;
+        private::create_dir(&dir)?;
         Ok(dir)
     }
 }
@@ -555,23 +560,6 @@ fn backup(path: &Path, number: u8) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(format!(".{number}"));
     PathBuf::from(name)
-}
-
-fn open_private(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    // Windows files inherit the private ACL of the per-user data directory.
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)
-}
-
-pub(crate) fn create_private_dir(path: &Path) -> io::Result<()> {
-    let mut builder = DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(path)
 }
 
 /// 16-bit mono PCM in a WAV container.

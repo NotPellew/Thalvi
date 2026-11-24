@@ -148,6 +148,16 @@ pub struct LiveEntry {
 }
 
 impl LiveEntry {
+    /// The language the entry was told the speaker uses, when it names one; the number rules
+    /// read it until the recognizer reports the language it detected.
+    #[must_use]
+    pub fn language(&self) -> Option<Language> {
+        match &self.kind {
+            LiveKind::OpenAi(live) => live.language,
+            LiveKind::Realtime(_) | LiveKind::OnDevice(_) => None,
+        }
+    }
+
     /// What errors and notices call this entry.
     #[must_use]
     pub fn source(&self) -> SpeechSource {
@@ -745,6 +755,8 @@ pub fn check(entry: &Value) -> Result<(), String> {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawStt {
+    #[serde(default)]
+    pub(crate) merge: Option<bool>,
     #[serde(default)]
     entries: Option<Vec<RawEntry>>,
     #[serde(default)]

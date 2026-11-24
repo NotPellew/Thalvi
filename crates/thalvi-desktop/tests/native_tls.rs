@@ -88,7 +88,13 @@ async fn check(fixture: &Fixture) {
             true,
         )
         .unwrap();
-        let response = transcribe(&client, &settings, &[]).await;
+        let response = transcribe(
+            &client,
+            &settings,
+            &[],
+            &thalvi_desktop::phrases::WordList::default(),
+        )
+        .await;
         if let Some(problem) = problem {
             assert_eq!(response.unwrap_err(), SecondaryError::Certificate(problem));
             let writer = Writing::new(
@@ -113,6 +119,7 @@ async fn check(fixture: &Fixture) {
                 },
                 client.clone(),
                 Recorder::disabled().metrics(),
+                &thalvi_desktop::phrases::WordList::default(),
             );
             let mut session = recognizer.connect().await.unwrap();
             session.send_frame(&[0; FRAME_SAMPLES]).await.unwrap();
@@ -126,7 +133,7 @@ async fn check(fixture: &Fixture) {
             assert!(error.to_string().contains("Nothing was delivered"));
             session.close().await;
         } else {
-            assert_eq!(response.unwrap(), "Trusted transcription.");
+            assert_eq!(response.unwrap().text, "Trusted transcription.");
         }
         let websocket = tokio::time::timeout(
             Duration::from_secs(10),

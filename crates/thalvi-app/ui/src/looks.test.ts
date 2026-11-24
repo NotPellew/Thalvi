@@ -131,7 +131,7 @@ describe("the settings window's look", () => {
     await open();
     const headings = (page: string) =>
       Array.from(root.querySelectorAll(`section[data-page="${page}"] .grp`)).map((group) => group.querySelector("h4")?.textContent ?? "");
-    expect(headings("overlay")).toEqual(["Overlay", "Look", "Sounds"]);
+    expect(headings("overlay")).toEqual(["Overlay", "Look", "Customize", "Sounds"]);
     expect(headings("listening")).toEqual([
       "Right now",
       "Device",

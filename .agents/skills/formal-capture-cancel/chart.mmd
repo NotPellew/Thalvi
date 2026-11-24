@@ -1,5 +1,5 @@
 stateDiagram-v2
-  state "dictation cleanup after the final pass" as s1
+  state "dictation cleanup before the review" as s1
   state "dictation cleanup of a submit" as s2
   state "ending cue plays, recognizer releases" as s3
   state "explicit write request" as s4
@@ -9,7 +9,7 @@ stateDiagram-v2
   state "nothing goes out" as s8
   state "reading controls queued before the capture" as s9
   state "settling [a stop was seen]" as s10
-  state "showing the settled submit text" as s11
+  state "showing the submit text for approval" as s11
   state "text goes out" as s12
   state "waiting for the final recognizer" as s13
   state "waiting for the full Submit preview" as s14
@@ -33,9 +33,11 @@ stateDiagram-v2
   s6 --> s10: capture cancelled
   s6 --> settling: load fails
   s6 --> listening: model ready
+  s7 --> s1: merge returns
   s7 --> s4: merge returns
   s7 --> settling: merge returns
   s7 --> s10: merge returns
+  s7 --> s14: merge returns
   s9 --> listening: no controls left
   s9 --> s6: no controls left
   s9 --> s8: no controls left

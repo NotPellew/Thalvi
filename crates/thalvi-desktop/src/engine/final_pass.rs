@@ -12,8 +12,11 @@ use crate::{
     entries::{FinalEntry, LiveKind},
     frame::Frame,
     metrics::{Dictation, Event, Recorder},
+    phrases::WordList,
     recognizer::Recognizer,
-    secondary::{self, OpenAiLive, SecondaryApi, SecondaryError, SecondaryStt},
+    secondary::{
+        self, Language, OpenAiLive, SecondaryApi, SecondaryError, SecondaryStt, Transcript,
+    },
 };
 
 const LIMIT: Duration = Duration::from_secs(2);
@@ -27,7 +30,9 @@ enum Source<R> {
 pub(super) struct FinalPass<R> {
     label: Extra,
     source: Source<R>,
-    prompt: String,
+    words: WordList,
+    /// The language the final pass entry was told to expect, when it names one.
+    language: Option<Language>,
 }
 
 impl<R> FinalPass<R> {
@@ -64,10 +69,15 @@ impl<R> FinalPass<R> {
                 },
             ),
         };
+        let language = match &source {
+            Source::OpenAi(entry) => entry.language,
+            Source::Meta(_) | Source::Stream(_) => None,
+        };
         Some(Self {
             label,
             source,
-            prompt: config.stt.phrases.phrases().join(", "),
+            words: config.stt.phrases.clone(),
+            language,
         })
     }
 }
@@ -185,7 +195,7 @@ impl Record {
 }
 
 struct Reply {
-    text: Result<String, Outcome>,
+    text: Result<Transcript, Outcome>,
     at: Instant,
 }
 
@@ -267,18 +277,26 @@ where
         let abort = self.final_tasks.spawn(async move {
             let text = match &pass.source {
                 Source::OpenAi(entry) => {
-                    secondary::transcribe_finished(&client, entry, &frames, &pass.prompt)
+                    secondary::transcribe_finished(&client, entry, &frames, &pass.words.hint())
                         .await
                         .map_err(Outcome::from)
                 }
-                Source::Meta(entry) => secondary::transcribe(&client, entry, &frames)
+                Source::Meta(entry) => secondary::transcribe(&client, entry, &frames, &pass.words)
                     .await
                     .map_err(Outcome::from),
-                Source::Stream(recognizer) => streaming::finished(&**recognizer, &frames).await,
+                Source::Stream(recognizer) => streaming::finished(&**recognizer, &frames)
+                    .await
+                    .map(|text| Transcript {
+                        text,
+                        language: None,
+                    }),
             };
             let at = Instant::now();
-            if let (Some(record), Ok(raw)) = (recording, &text) {
-                record(format!("final pass ({}): {raw}", pass.label.name));
+            if let (Some(record), Ok(transcript)) = (recording, &text) {
+                record(format!(
+                    "final pass ({}): {}",
+                    pass.label.name, transcript.text
+                ));
             }
             let _ = send.send(Reply { text, at });
         });
@@ -313,10 +331,18 @@ where
         let (outcome, at) = match reply {
             Some(Reply { text, at }) if at < deadline => {
                 let outcome = match text {
-                    Ok(raw) if !has_words(&raw) => Outcome::BadReply,
-                    Ok(raw) => {
-                        if let Some(text) = self.agreed(&raw, request.route, has_endings, true) {
+                    Ok(transcript) if !has_words(&transcript.text) => Outcome::BadReply,
+                    Ok(transcript) => {
+                        if let Some(text) =
+                            self.agreed(&transcript.text, request.route, has_endings, true)
+                        {
                             request.text = text;
+                            if let Some(language) = transcript
+                                .language
+                                .or_else(|| self.final_pass.as_ref().and_then(|pass| pass.language))
+                            {
+                                self.language = Some(language);
+                            }
                             Outcome::Replaced
                         } else {
                             Outcome::Disagreed

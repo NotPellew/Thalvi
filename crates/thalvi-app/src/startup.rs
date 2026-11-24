@@ -4,10 +4,18 @@ use std::fmt;
 
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_autostart::ManagerExt;
-#[cfg(target_os = "linux")]
-use thalvi_desktop::host::Session;
 
 use crate::switch::{SwitchState, Unavailable};
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "linux")]
+use linux as os;
+#[cfg(target_os = "windows")]
+use windows as os;
 
 /// The name of the login entry, which the system's startup list shows.
 pub const APP_NAME: &str = "Thalvi";
@@ -54,195 +62,11 @@ impl<R: Runtime> Registration for AppHandle<R> {
     }
 
     fn turned_off_by_user(&self) -> bool {
-        #[cfg(windows)]
-        {
-            approval::turned_off_by_user()
-        }
-        #[cfg(not(windows))]
-        {
-            false
-        }
+        os::turned_off_by_user()
     }
 
     fn unavailable(&self) -> Option<Unavailable> {
-        #[cfg(target_os = "linux")]
-        {
-            unavailable_on(Session::detect().ok(), hyprland::unavailable)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            None
-        }
-    }
-}
-
-/// GNOME runs XDG autostart entries itself, so its login switch is the plain OS entry; only
-/// Hyprland needs advice. `hyprland` is asked only on Hyprland.
-#[cfg(target_os = "linux")]
-fn unavailable_on(
-    session: Option<Session>,
-    hyprland: impl FnOnce() -> Option<Unavailable>,
-) -> Option<Unavailable> {
-    match session {
-        Some(Session::Hyprland) => hyprland(),
-        Some(Session::Gnome) | None => None,
-    }
-}
-
-/// Hyprland runs only the `exec-once` lines of `hyprland.conf`. A session manager such as uwsm
-/// runs XDG autostart entries by starting systemd's `xdg-desktop-autostart.target`; that target
-/// being up is what tells an entry will be read.
-#[cfg(target_os = "linux")]
-mod hyprland {
-    use std::path::PathBuf;
-    use std::process::Command;
-
-    use super::{LOGIN_ARG, Unavailable};
-
-    pub fn unavailable() -> Option<Unavailable> {
-        if autostart_runs(&target_state()) {
-            return None;
-        }
-        Some(no_autostart(launcher().as_deref()))
-    }
-
-    /// Empty when `systemctl` is missing or fails, as on a session without a systemd user manager.
-    fn target_state() -> String {
-        Command::new("systemctl")
-            .args([
-                "--user",
-                "show",
-                "--property=ActiveState",
-                "--value",
-                "xdg-desktop-autostart.target",
-            ])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-            .unwrap_or_default()
-    }
-
-    /// `activating` counts: an entry that starts Thalvi at login runs while the target is still coming up.
-    fn autostart_runs(active_state: &str) -> bool {
-        matches!(active_state, "active" | "activating")
-    }
-
-    /// The `AppImage` when there is one, since the executable then sits in a temporary mount.
-    fn launcher() -> Option<String> {
-        std::env::var_os("APPIMAGE")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_exe().ok())
-            .and_then(|path| path.to_str().map(str::to_owned))
-    }
-
-    fn no_autostart(launcher: Option<&str>) -> Unavailable {
-        let (reason, line) = match launcher {
-            Some(path) => (
-                "Hyprland does not start login entries by itself, so a switch here would do nothing. To start Thalvi at login, add this line to hyprland.conf:",
-                Some(exec_once(path)),
-            ),
-            None => (
-                "Hyprland does not start login entries by itself, so a switch here would do nothing. To start Thalvi at login, add an exec-once line to hyprland.conf that runs Thalvi with --login.",
-                None,
-            ),
-        };
-        Unavailable {
-            reason: reason.to_owned(),
-            line,
-        }
-    }
-
-    /// `exec-once` runs its value with `sh -c`, and `hyprland.conf` reads `#` as a comment unless doubled.
-    fn exec_once(path: &str) -> String {
-        let safe = !path.is_empty()
-            && path
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_-./:@%+=,".contains(&byte));
-        let quoted = if safe {
-            path.to_owned()
-        } else {
-            format!("'{}'", path.replace('\'', r"'\''"))
-        };
-        format!("exec-once = {quoted} {LOGIN_ARG}").replace('#', "##")
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn only_a_started_autostart_target_means_login_entries_run() {
-            for (state, runs) in [
-                ("active", true),
-                ("activating", true),
-                ("inactive", false),
-                ("failed", false),
-                ("", false),
-            ] {
-                assert_eq!(autostart_runs(state), runs, "{state:?}");
-            }
-        }
-
-        #[test]
-        fn the_line_for_hyprland_conf_quotes_what_the_shell_and_the_config_would_misread() {
-            for (path, line) in [
-                (
-                    "/home/me/Thalvi.AppImage",
-                    "exec-once = /home/me/Thalvi.AppImage --login",
-                ),
-                (
-                    "/home/me/My Apps/Thalvi.AppImage",
-                    "exec-once = '/home/me/My Apps/Thalvi.AppImage' --login",
-                ),
-                (
-                    "/home/me/it's $HOME;x/thalvi",
-                    r"exec-once = '/home/me/it'\''s $HOME;x/thalvi' --login",
-                ),
-                (
-                    "/home/me/#1/thalvi",
-                    "exec-once = '/home/me/##1/thalvi' --login",
-                ),
-            ] {
-                assert_eq!(exec_once(path), line, "{path}");
-            }
-        }
-
-        #[test]
-        fn the_note_carries_the_line_unless_the_path_is_unknown() {
-            let known = no_autostart(Some("/opt/thalvi"));
-            assert_eq!(
-                known.line.as_deref(),
-                Some("exec-once = /opt/thalvi --login")
-            );
-            let unknown = no_autostart(None);
-            assert_eq!(unknown.line, None);
-            assert!(unknown.reason.contains("exec-once"));
-        }
-    }
-}
-
-/// Windows records a Task Manager or Settings toggle in `StartupApproved`, apart from the `Run` entry.
-#[cfg(windows)]
-mod approval {
-    use windows_registry::CURRENT_USER;
-
-    use super::APP_NAME;
-
-    const KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
-
-    pub fn turned_off_by_user() -> bool {
-        CURRENT_USER
-            .open(KEY)
-            .and_then(|key| key.get_value(APP_NAME))
-            .is_ok_and(|value| is_off(&value))
-    }
-
-    /// The first byte has bit 0 set when the entry is disabled (`03`, `07`) and clear when it is
-    /// enabled (`02`, `06`); a disabled value then carries the time it was turned off.
-    pub fn is_off(value: &[u8]) -> bool {
-        value.first().is_some_and(|first| first & 1 == 1)
+        os::unavailable()
     }
 }
 
@@ -391,30 +215,6 @@ mod tests {
         unavailable: Option<Unavailable>,
         enables: Cell<u32>,
         disables: Cell<u32>,
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn only_hyprland_gets_login_advice_and_gnome_keeps_the_plain_os_entry() {
-        let advice = || {
-            Some(Unavailable {
-                reason: "Hyprland advice".to_owned(),
-                line: None,
-            })
-        };
-        for (session, shown) in [
-            (Some(Session::Hyprland), true),
-            (Some(Session::Gnome), false),
-            (None, false),
-        ] {
-            let mut asked = false;
-            let result = unavailable_on(session, || {
-                asked = true;
-                advice()
-            });
-            assert_eq!(result.is_some(), shown, "{session:?}");
-            assert_eq!(asked, shown, "{session:?}: Hyprland alone is asked");
-        }
     }
 
     impl Registration for Fake {
@@ -650,25 +450,5 @@ mod tests {
                 problem: None
             })
         );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_marks_a_startup_entry_off_by_bit_zero_of_its_first_byte() {
-        let with_time = |first: u8| {
-            let mut value = vec![first, 0, 0, 0];
-            value.extend([0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x01]);
-            value
-        };
-        for (value, expected) in [
-            (with_time(2), false),
-            (with_time(3), true),
-            (with_time(6), false),
-            (with_time(7), true),
-            (vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], false),
-            (vec![], false),
-        ] {
-            assert_eq!(approval::is_off(&value), expected, "{value:?}");
-        }
     }
 }

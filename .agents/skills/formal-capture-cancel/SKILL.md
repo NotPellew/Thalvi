@@ -50,6 +50,12 @@ The download-size notice (#485) changes only `runner.rs`'s tests module, for
 `Step`'s new `Download` payload. No mapped function
 changed, and `engine.rs`, `recognizer.rs` and `local.rs` are untouched, so the model actions are unchanged.
 
+The scripted-feed wait fix (#612) changes only `pump_until` in `runner.rs`'s tests module. No mapped
+function changed, so the model actions are unchanged.
+
+Retrying a wake model after its download (#616) changes only `runner.rs`'s tests module, for a rig whose
+wake head loads once cached. No mapped function changed, so the model actions are unchanged.
+
 Holding unconfirmed lines back from a terminal adds a branch to `Delivery::paste_in` after admission: when the
 route is not Submit, the text has a line break and `Host::is_terminal` (a synchronous read of the bound target) says
 the window is a terminal, it keeps the text on the clipboard through `keep` instead of calling `deliver`. Both are
@@ -118,6 +124,17 @@ still dropped before input is restored, inside the same ending-cue task; no
 model action, delivery guard or bound changes. The replay's immediate player
 returns no timing because it produces no audio.
 
+The merge switch (#589) makes the merge optional: with `stt.merge` off,
+`Engine::conclude` takes the model's no-merge branch — it tells the streaming
+extras the capture ended, asks the upload extras without awaiting them, hands
+their tasks to `recorded_only` (`Engine::record_only`) and returns the accepted
+live text. `Engine::deliver_with_extras` only chooses between that and the
+existing `Engine::merge`. Extras on with the merge off was already reachable in
+the model (a scratched capture, or one with no words of its own), and no await,
+queue step or cancellation write is added before the final empty receive, so
+the model actions and bounds are unchanged. `engine/streaming.rs` changes only
+in its comments.
+
 Hold-key recovery (#566) adds `Control::HoldKeyWorks`, which `Requests::take` answers false, like
 `Overlay`: it never sets `ended` and neither admits nor blocks delivery. The runner now hands its
 pending hold notice into `Requests` before a capture's drains and takes it back after, so a
@@ -131,6 +148,11 @@ captures, outside the single-capture model. `Requests::take`, `Requests::read_qu
 `Runner::capture` and `Settling::settle` keep the same cancellation writes, delivery paths and await
 boundaries, so the model actions are unchanged.
 
+The word list on every upload (#624) only adds request data: `OpenAiSession` clones the list's hint
+into its existing request task, `Engine::ask_all` and the final pass's task pass the list to
+`secondary::transcribe`, and `Engine::ask_merge` passes it to `start_merge` under the same `bounded`
+call. No await, queue step, cancellation write or delivery path is added, so the model actions are unchanged.
+
 A selected final pass (#586) keeps streaming extras off. At acceptance it starts one finished-audio
 task while the live recognizer closes. Its reply can only supply text through
 `Engine::wait_final_pass`, which polls cancellation before both the reply and the deadline. A
@@ -142,6 +164,24 @@ of the settled text follow the final pass, with separate cancellation-first awai
 the overlay reports a full frame. A refusal, timeout, or lost frame keeps the text for recovery.
 An accepted result still crosses `FinishEmpty`.
 The model checks delivery admission. It does not check correctness of recognition or a reply's time.
+
+The numbers-as-digits formatter (#588) rewrites text synchronously and adds no
+await, control read, queue step or write to cancellation state; a task is never
+formatted. An ordinary submit's pending text is formatted before the existing
+`Prepare`, cleanup and ending pause, and delivery sends it as shown. A merged
+submit whose setting is on is not formatted or cleaned before the merge: after
+`SecondaryReturns` its merged text (or the live fallback) is formatted, cleaned
+if enabled, then shown whole and confirmed through the existing preview and
+review awaits, which the model's `settled` variable selects. A final pass
+formats its settled replacement before cleanup and confirmation, as before.
+Delivery formats a paste, a write and a settled submit; it never formats an
+ordinary submit again. The model checks delivery admission, not whether the
+formatted text is right.
+
+The Parakeet ending advice (#450) changes only the text of `CaptureError::NoEnding`: `Engine::new`
+reads once whether the live entry is Parakeet, and `idle_error` passes that to the error. The idle
+steps in `Engine::drive` and `Engine::feed` still fail the capture with no new await, queue step or
+delivery path, so the model actions are unchanged.
 
 The five checked invariants have these exact meanings:
 
@@ -208,11 +248,11 @@ Temurin JRE `21.0.9+10` in the same user cache, verifying archive SHA-256
 Other platforms need a user-installed Java on PATH. No system package install
 is performed. Downloads require network access only on the first run.
 
-A faithful run here explores 98,912 distinct states (293,297 generated) with no
+A faithful run here explores 242,147 distinct states (751,104 generated) with no
 error; a warm full check takes about 2 s, and the self-test about 10 s. The extra
-states are the dictation-cleanup stage, which a submit takes before its confirmation.
-Each TLC invocation has a 120 s limit and 512 MB heap limit. State counts are
-receipts for this model, not acceptance criteria for a changed model.
+states are the dictation-cleanup stage and the settled merged submit's cleanup,
+preview and confirmation. Each TLC invocation has a 120 s limit and 512 MB heap limit.
+State counts are receipts for this model, not acceptance criteria for a changed model.
 
 A passing run deletes its `/var/tmp/thalvi-formal-...` folder. A counterexample, a
 run blocked once the folder exists (not source drift), and `--self-test` keep it and print `EVIDENCE=/var/tmp/thalvi-formal-...`

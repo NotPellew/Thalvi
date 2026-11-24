@@ -53,13 +53,14 @@ On first launch, Thalvi writes default settings, opens Settings, and downloads t
 - **On this computer (default):** runs offline via ONNX Runtime (`Nemotron Streaming` English default; `Nemotron Unified` 25 European languages with optional WebGPU on Linux; `Parakeet TDT` 25 European languages) or an app-managed `whisper.cpp` helper (`Whisper Turbo` CPU or Vulkan GPU, experimental), or your own ONNX model folder.
 - **Streaming & after-you-stop servers:** connect a WebSocket streaming server (such as the self-hosted recognizer below) or any OpenAI-compatible `/v1/audio/transcriptions` or audio chat endpoint.
 - **Final pass:** select one recognizer other than the live one. It re-transcribes the finished audio and replaces the live text when it answers within two seconds and agrees with the spoken ending. A slow, failed, or mismatched pass keeps the live text and shows a notice. Tasks, empty captures, and captures that used “scratch that” skip the final pass. Cancelled captures deliver nothing.
-- **Extra recognizers & Word list:** enable extra recognizers to merge their text through a chat model, or select one as the final pass without a chat model. While a final pass is selected, the extras and merge pause and keep their settings. OpenAI-compatible final passes use the word list as a hint for names and terms.
+- **Extra recognizers & Word list:** enable extra recognizers to merge their text through a chat model, or switch **Merge with the chat model** off to paste the live text as soon as you stop and only record what each extra heard. Either recognizer kind can be the final pass, which needs no chat model. While a final pass is selected, the extras and merge pause and keep their settings. The word list sends names and terms as a hint to on-device models that support it, Whisper Turbo, realtime servers that support it, OpenAI-compatible and Meta servers (whether active, extra, or final pass), and the chat-model merge. Settings tells you when the active recognizer can't use it.
 
 ### Writing & cleanup (**Settings → Chat model**)
 
 - **On this computer:** download **Qwen3 4B** (`Q4_K_M`, ~2.5 GB, Apache-2.0) and a pinned `llama.cpp` runtime (Vulkan GPU or CPU) directly from Settings—no server to manage.
 - **Manual endpoint:** point at any OpenAI-compatible chat completions API (`llama.cpp`, Ollama, vLLM, etc.).
 - **Prompts & cleanup:** customize the **Writing prompt**, **Opening phrases** (e.g., `"write me an email"`), **App styles** (per-app/window-title prompts on Hyprland and Windows), and opt-in **Clean up dictation** (removes filler words and fixes punctuation on normal pastes).
+- **Write numbers as digits.** Thalvi puts spoken English and German numbers in digits by default in final dictation. “I have fifteen open issues” becomes “I have 15 open issues” and “zwei Komma fünf” becomes “2,5”. Expressions like “the other one” keep their words. The rules work offline and independently of cleanup. The switch is under **Settings → Chat model → Write numbers as digits**.
 
 ### Wake words, looks, history & privacy
 

@@ -1,8 +1,8 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
+import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatBuild, type ChatModelInfo, type CurrentApp, type Draft, type HistoryEntry, type HoldKeyDefaults, type LiveEntry, type LookStyles, type OverlayPreviewState, type SpeechEntry, type SwitchState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
 import { applyPatch, type SettingsPatch } from "./patch.ts";
-import type { AudioStatus, Backend, ChatBuild, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, LiveEntry, LookStyles, SpeechEntry, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 export const CHAT_MODEL: ChatModelInfo = {
   title: "Qwen3 4B · Q4_K_M", size: 2533261953, license: "Apache-2.0",
@@ -27,7 +27,7 @@ export const SETTINGS: Settings = {
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { entries: [{ kind: "realtime", id: "direct", name: "Realtime speech server", active: true, address: "ws://127.0.0.1:8012", model: "nemotron" }] },
+  stt: { merge: true, entries: [{ kind: "realtime", id: "direct", name: "Realtime speech server", active: true, address: "ws://127.0.0.1:8012", model: "nemotron" }] },
   apps: { slack: { classes: ["Slack"], executables: [], input_keys: ["ctrl", "k"] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com", label: "docs" }],
   overlay: { show: true, draft: true },
@@ -56,7 +56,26 @@ export const LOOK_STYLES: LookStyles = {
     holo: { "--neon": "#6bf8ff", "--bg": "#0c1820", "--editor-bg": "#101418" },
     neon: { "--neon": "light-dark(#007a43, #2bff88)", "--bg": "light-dark(#e8eff7, #020617)", "--editor-bg": "#ffffff" },
   },
+  values: { gunmetal: {}, holo: {}, neon: {} },
 };
+
+/** A tiny image whose pixels differ per state, so a preview can be checked byte for byte. */
+export function previewBuffer(state: OverlayPreviewState): ArrayBuffer {
+  const width = 2;
+  const height = 2;
+  const bytes = new Uint8ClampedArray(8 + width * height * 4);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, width, true);
+  view.setUint32(4, height, true);
+  const shade = OVERLAY_PREVIEW_STATES.indexOf(state) + 1;
+  for (let at = 8; at < bytes.length; at += 4) {
+    bytes[at] = shade * 40;
+    bytes[at + 1] = 255 - shade * 40;
+    bytes[at + 2] = shade * 20;
+    bytes[at + 3] = 255;
+  }
+  return bytes.buffer;
+}
 
 const UNIFIED_LANGUAGES = [
   "Bulgarian",
@@ -154,6 +173,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
     getLookStyles: vi.fn<(styles?: LookStyles) => Promise<LookStyles>>(() => Promise.resolve(structuredClone(lookStyles))),
+    previewOverlay: vi.fn<(state: OverlayPreviewState, scale: number) => Promise<ArrayBuffer>>((state) => Promise.resolve(previewBuffer(state))),
     settingsReady: vi.fn(() => Promise.resolve()),
     saveSettings: vi.fn<(patch: SettingsPatch) => Promise<void>>((patch) => {
       held = Object.assign({ writing: null, microphone: null }, applyPatch(held, patch));

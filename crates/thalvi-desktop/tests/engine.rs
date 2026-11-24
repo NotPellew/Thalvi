@@ -19,8 +19,8 @@ use thalvi_desktop::engine::fakes::{
     SpotterControl, WakeControl,
 };
 use thalvi_desktop::engine::{
-    CaptureError, CaptureOutcome, Engine, EngineHandle, EngineState, FrameSource, ListenError,
-    Parts, PreviewError, StreamingExtra, SubmitPreview, WakeTrigger,
+    CaptureError, CaptureOutcome, EndingListener, Engine, EngineHandle, EngineState, FrameSource,
+    ListenError, Parts, PreviewError, StreamingExtra, SubmitPreview, WakeTrigger,
 };
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
@@ -31,6 +31,7 @@ use thalvi_desktop::models::CatalogSpeech;
 use thalvi_desktop::recognizer::{
     FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, SpeechSource,
 };
+use thalvi_desktop::secondary::Language;
 use thalvi_desktop::spotter::KeywordSpotter;
 use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
@@ -2007,34 +2008,55 @@ async fn a_capture_fails_when_the_microphone_gives_no_audio_for_three_seconds() 
 
 #[tokio::test(start_paused = true)]
 async fn a_capture_without_words_for_a_minute_ends_and_keeps_its_text() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Hello world").await;
-            rig.feed_until(40_000, Kind::Quiet).await;
-            rig.partial("more").await;
-            rig.feed_until(70_000, Kind::Quiet).await;
-            rig.partial("[noise]").await;
-            rig.feed_until(90_000, Kind::Quiet).await;
-            rig.partial("uh").await;
-            rig.feed_until(99_960, Kind::Quiet).await;
-            assert!(
-                !task.is_finished(),
-                "words at 40 s restart the minute; noise does not"
-            );
-            rig.feed_until(100_080, Kind::Quiet).await;
-            assert_eq!(
-                finished(task).await,
-                CaptureOutcome::Failed {
-                    error: CaptureError::NoEnding(Duration::from_secs(60)),
-                    recoverable_text: Some("Hello world".to_owned())
-                }
-            );
-        })
-        .await;
+    for (name, config, listener, message) in [
+        (
+            "Nemotron",
+            "{}",
+            EndingListener::Other,
+            "Didn't hear an ending for 1 minute.",
+        ),
+        (
+            "Parakeet",
+            r#"{"stt": {"engine": "local", "model": "parakeet_tdt_v3"}}"#,
+            EndingListener::Parakeet,
+            "Didn't hear an ending for 1 minute. Parakeet may miss an English ending after other languages; add one in your language in Settings → Endings.",
+        ),
+    ] {
+        LocalSet::new()
+            .run_until(async {
+                let (mut rig, engine, frames) = Rig::new(config);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals("Hello world").await;
+                rig.feed_until(40_000, Kind::Quiet).await;
+                rig.partial("more").await;
+                rig.feed_until(70_000, Kind::Quiet).await;
+                rig.partial("[noise]").await;
+                rig.feed_until(90_000, Kind::Quiet).await;
+                rig.partial("uh").await;
+                rig.feed_until(99_960, Kind::Quiet).await;
+                assert!(
+                    !task.is_finished(),
+                    "{name}: words at 40 s restart the minute; noise does not"
+                );
+                rig.feed_until(100_080, Kind::Quiet).await;
+                let error = CaptureError::NoEnding {
+                    idle: Duration::from_secs(60),
+                    listener,
+                };
+                assert_eq!(error.to_string(), message, "{name}");
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Failed {
+                        error,
+                        recoverable_text: Some("Hello world".to_owned())
+                    },
+                    "{name}"
+                );
+            })
+            .await;
+    }
 }
 
 /// Milliseconds after the wake word at which the capture opens; the five-minute cap counts from here.
@@ -2116,7 +2138,10 @@ async fn configured_capture_limits_replace_the_defaults() {
             rig.feed_until(29_920, Kind::Quiet).await;
             assert!(!task.is_finished());
             rig.at(30_000).await;
-            let idle = CaptureError::NoEnding(Duration::from_secs(20));
+            let idle = CaptureError::NoEnding {
+                idle: Duration::from_secs(20),
+                listener: EndingListener::Other,
+            };
             assert_eq!(idle.to_string(), "Didn't hear an ending for 20 seconds.");
             assert_eq!(
                 finished(task).await,
@@ -2168,7 +2193,11 @@ fn the_time_notices_read_whole_minutes_as_minutes_and_the_rest_as_seconds() {
             format!("No words heard for {words}.")
         );
         assert_eq!(
-            CaptureError::NoEnding(seconds).to_string(),
+            CaptureError::NoEnding {
+                idle: seconds,
+                listener: EndingListener::Other,
+            }
+            .to_string(),
             format!("Didn't hear an ending for {words}.")
         );
         assert_eq!(
@@ -2289,8 +2318,8 @@ async fn serve_logged<T: Send + 'static>(
 }
 
 /// A config with a direct speech entry live, a chat endpoint at `chat_url` and these extras, in
-/// order: `(name, url, switched on)`.
-fn with_extras(chat_url: &str, extras: &[(&str, &str, bool)]) -> String {
+/// order: `(name, url, switched on)`. `merge` is written only when the test sets it.
+fn extras_config(chat_url: &str, merge: Option<bool>, extras: &[(&str, &str, bool)]) -> String {
     let extras: Vec<String> = extras
         .iter()
         .map(|(name, url, on)| {
@@ -2299,10 +2328,47 @@ fn with_extras(chat_url: &str, extras: &[(&str, &str, bool)]) -> String {
             )
         })
         .collect();
+    let merge = merge.map_or_else(String::new, |merge| format!(r#""merge": {merge}, "#));
     format!(
-        r#"{{"ending_pause": {{"paste": 2.5}}, "writing": {{"url": "{chat_url}", "model": "chat"}}, "stt": {{"entries": [{{"kind": "realtime", "id": "s", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}{}]}}}}"#,
+        r#"{{"ending_pause": {{"paste": 2.5}}, "writing": {{"url": "{chat_url}", "model": "chat"}}, "stt": {{{merge}"entries": [{{"kind": "realtime", "id": "s", "name": "Realtime speech server", "active": true, "address": "ws://127.0.0.1:8080", "model": "m"}}{}]}}}}"#,
         extras.concat()
     )
+}
+
+/// [`extras_config`] with no `stt.merge`, as a config from before the switch loads.
+fn with_extras(chat_url: &str, extras: &[(&str, &str, bool)]) -> String {
+    extras_config(chat_url, None, extras)
+}
+
+/// [`extras_config`] with a word list set.
+fn extras_with_words(
+    chat_url: &str,
+    merge: Option<bool>,
+    extras: &[(&str, &str, bool)],
+    words: &[&str],
+) -> serde_json::Value {
+    let mut config: serde_json::Value =
+        serde_json::from_str(&extras_config(chat_url, merge, extras)).expect("config JSON");
+    config["stt"]["phrases"] = json!(words);
+    config
+}
+
+/// The text of the multipart part `name` in an upload body, if the request has one.
+fn part_text(body: &[u8], name: &str) -> Option<String> {
+    let body = String::from_utf8_lossy(body);
+    let marker = format!("name=\"{name}\"\r\n\r\n");
+    let start = body.find(&marker)? + marker.len();
+    let end = start + body[start..].find("\r\n--").expect("part end");
+    Some(body[start..end].to_owned())
+}
+
+/// The JSON of the multipart part `name` in an upload body.
+fn part_json(body: &[u8], name: &str) -> serde_json::Value {
+    let body = String::from_utf8_lossy(body);
+    let marker = format!("name=\"{name}\"\r\nContent-Type: application/json\r\n\r\n");
+    let start = body.find(&marker).expect("JSON part") + marker.len();
+    let end = start + body[start..].find("\r\n--").expect("part end");
+    serde_json::from_str(&body[start..end]).expect("part JSON")
 }
 
 /// A capture that says "live words paste that" at 1000 and is delivered at 3500.
@@ -2360,6 +2426,51 @@ fn capture_and_listen(
 
 /// The extras go out as the capture ends, while the accepted cue plays.
 const MERGE_STARTS: u64 = 3500;
+
+/// Every state the engine enters from now on, in order; the task ends with the engine.
+fn watch_states(rig: &Rig) -> Rc<RefCell<Vec<EngineState>>> {
+    let mut states = rig.handle.state();
+    let seen: Rc<RefCell<Vec<EngineState>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    tokio::task::spawn_local(async move {
+        loop {
+            sink.borrow_mut().push(states.borrow_and_update().clone());
+            if states.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+    seen
+}
+
+/// Captures as [`capture_task`] does, once per wake word, then listens for 20 s so extras the
+/// delivery did not wait for can finish and be recorded.
+fn captures_and_listen(
+    rig: &Rig,
+    mut engine: TestEngine,
+    mut frames: FakeFrames,
+    count: usize,
+) -> (
+    JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<(CaptureOutcome, u64)>,
+) {
+    let origin = tokio::time::Instant::now() - ms(rig.now());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let worker = tokio::task::spawn_local(async move {
+        for _ in 0..count {
+            assert_eq!(
+                engine.listen(&mut frames).await.unwrap(),
+                WakeTrigger::Capture
+            );
+            let outcome = engine.capture(&mut frames, None).await;
+            let at = u64::try_from(origin.elapsed().as_millis()).unwrap();
+            tx.send((outcome, at)).unwrap();
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(20), engine.listen(&mut frames)).await;
+        engine.finish().await;
+    });
+    (worker, rx)
+}
 
 const ALL: RecordKinds = RecordKinds {
     metrics: true,
@@ -2485,6 +2596,164 @@ async fn the_texts_of_the_live_recognizer_and_the_extras_are_merged_into_the_tex
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_openai_extra_sends_the_word_list_as_prompt() {
+    LocalSet::new()
+        .run_until(async {
+            // (the list, the prompt the extra's request should carry)
+            let cases = [
+                (&["Cybrex2", "Thalvi"][..], Some("Cybrex2, Thalvi")),
+                (&[][..], None),
+            ];
+            for (words, expected) in cases {
+                let (url, mut uploads) = serve_logged([Reply::Json(A)], <[u8]>::to_vec).await;
+                let config =
+                    extras_with_words("http://127.0.0.1:1", None, &[("A", &url, true)], words);
+                let (mut rig, engine, frames) = Rig::new(&config.to_string());
+                let task = capture_and_listen(&rig, engine, frames, 0);
+                live_words(&mut rig).await;
+                finished(task).await;
+                let body = uploads.recv().await.expect("one upload");
+                assert_eq!(part_text(&body, "prompt").as_deref(), expected, "{words:?}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_meta_extra_sends_the_word_list_as_keywords() {
+    LocalSet::new()
+        .run_until(async {
+            let cases = [
+                (
+                    &["Cybrex2", "Thalvi"][..],
+                    Some(json!(["Cybrex2", "Thalvi"])),
+                ),
+                (&[][..], None),
+            ];
+            for (words, expected) in cases {
+                let (url, mut uploads) = serve_logged(
+                    [Reply::Json(r#"{"transcript":"A words paste that"}"#)],
+                    <[u8]>::to_vec,
+                )
+                .await;
+                let mut config =
+                    extras_with_words("http://127.0.0.1:1", None, &[("Meta", &url, true)], words);
+                config["stt"]["entries"][1]["api"] = json!("meta");
+                let (mut rig, engine, frames) = Rig::new(&config.to_string());
+                let task = capture_and_listen(&rig, engine, frames, 0);
+                live_words(&mut rig).await;
+                finished(task).await;
+                let body = uploads.recv().await.expect("one upload");
+                let request = part_json(&body, "request");
+                assert_eq!(request.get("keywords"), expected.as_ref(), "{words:?}");
+                assert_eq!(request["mode"], "PUSH_TO_TALK", "{words:?}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_meta_final_pass_sends_the_word_list_as_keywords() {
+    LocalSet::new()
+        .run_until(async {
+            let cases = [
+                (
+                    &["Cybrex2", "Thalvi"][..],
+                    Some(json!(["Cybrex2", "Thalvi"])),
+                ),
+                (&[][..], None),
+            ];
+            for (words, expected) in cases {
+                let (url, mut uploads) = serve_logged(
+                    [Reply::Json(r#"{"transcript":"Thalvi paste that"}"#)],
+                    <[u8]>::to_vec,
+                )
+                .await;
+                let mut config = with_final_pass(&url, words);
+                config["stt"]["entries"][1]["api"] = json!("meta");
+                let (mut rig, engine, frames) = Rig::new(&config.to_string());
+                let (worker, mut captures) =
+                    final_captures(&rig, engine, frames, &[WakeTrigger::Hold]);
+                rig.hold().await;
+                rig.say(800, Say::Final("live text")).await;
+                rig.release(1000).await;
+                rig.finals(" ").await;
+                let body = uploads.recv().await.expect("one upload");
+                let request = part_json(&body, "request");
+                assert_eq!(request.get("keywords"), expected.as_ref(), "{words:?}");
+                assert_eq!(
+                    captures.recv().await.expect("one capture").outcome,
+                    accepted(CaptureRoute::Paste, "Thalvi paste that"),
+                    "{words:?}"
+                );
+                finished(worker).await;
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_merge_request_names_the_word_list_as_terms_to_spell() {
+    LocalSet::new()
+        .run_until(async {
+            let (a, _a) = serve(Reply::After(100, A)).await;
+            let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("Live A words."))).await;
+            let config = extras_with_words(
+                &chat_url,
+                Some(true),
+                &[("A", &a, true)],
+                &["Cybrex2", "Thalvi"],
+            );
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let task = capture_and_listen(&rig, engine, frames, 0);
+            live_words(&mut rig).await;
+            assert_eq!(
+                finished(task).await.outcome,
+                accepted(CaptureRoute::Paste, "Live A words.")
+            );
+            let asked = request(&mut asked).await;
+            let system = asked.body["messages"][0]["content"]
+                .as_str()
+                .expect("system message");
+            assert!(system.starts_with(MERGE_PROMPT), "{system}");
+            assert!(system.contains(r#"["Cybrex2","Thalvi"]"#), "{system}");
+            assert_eq!(
+                asked.body["messages"][1]["content"],
+                r#"["live words","A words"]"#
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merge_that_adds_a_word_list_term_no_transcript_has_keeps_the_live_text() {
+    LocalSet::new()
+        .run_until(async {
+            let (a, _a) = serve(Reply::After(100, A)).await;
+            let (chat_url, _asked, _feed) = chat(Chat::Stream(says!("Live Cybrex2"))).await;
+            let config = extras_with_words(
+                &chat_url,
+                Some(true),
+                &[("A", &a, true)],
+                &["Cybrex2", "Thalvi"],
+            );
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let task = capture_and_listen(&rig, engine, frames, 0);
+            live_words(&mut rig).await;
+            let pasted = finished(task).await;
+            assert_eq!(
+                pasted.outcome,
+                accepted(CaptureRoute::Paste, "live words")
+            );
+            let notice =
+                "Merge skipped: the chat model used a word none of the recognizers heard. Used the live text.";
+            assert_eq!(pasted.notices, [notice]);
+            assert_eq!(pasted.note.as_deref(), Some(notice));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_submit_sends_the_merged_text_and_a_task_acts_on_the_live_text_without_merging() {
     LocalSet::new()
         .run_until(async {
@@ -2526,6 +2795,10 @@ async fn a_submit_sends_the_merged_text_and_a_task_acts_on_the_live_text_without
                 rig.feed_until(3499, Kind::Quiet).await;
                 rig.at(3500).await;
 
+                // A settled Submit shows its whole text and waits for that before it is sent.
+                if route == CaptureRoute::Submit {
+                    rig.final_preview(delivered, ms(2500)).await.shown();
+                }
                 assert_eq!(
                     finished(task).await,
                     accepted(route, delivered),
@@ -2715,6 +2988,145 @@ async fn an_extra_that_misses_the_merge_is_left_out_and_still_recorded() {
                  accepted (paste): A words\n\
                  extra (B): B words paste that\n"
             );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn merge_off_pastes_the_live_text_at_once_and_only_records_what_each_extra_heard() {
+    LocalSet::new()
+        .run_until(async {
+            for (name, reply, outcome, recorded) in [
+                (
+                    "Late",
+                    Reply::After(3000, A),
+                    "ok",
+                    Some("extra (Late): A words paste that\n"),
+                ),
+                ("Failing", Reply::Status(500), "error", None),
+                ("Silent", Reply::Stall, "timeout", None),
+            ] {
+                let dir = record_dir(&format!("merge-off-{outcome}"));
+                let (extra, _uploads) = serve(reply).await;
+                let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("unused"))).await;
+                let config = extras_config(&chat_url, Some(false), &[(name, &extra, true)]);
+                let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+                let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+                let states = watch_states(&rig);
+                let task = capture_and_listen(&rig, engine, frames, 0);
+                live_words(&mut rig).await;
+                let pasted = finished(task).await;
+
+                assert_eq!(pasted.outcome, accepted(CaptureRoute::Paste, "live words"));
+                assert_eq!(
+                    pasted.at, MERGE_STARTS,
+                    "{name}: pasted as the ending pause ended"
+                );
+                assert_eq!(pasted.notices, Vec::<String>::new(), "{name}");
+                assert_eq!(pasted.note, None, "{name}");
+                assert!(asked.try_recv().is_err(), "{name}: no chat request");
+                assert!(
+                    !states
+                        .borrow()
+                        .iter()
+                        .any(|state| matches!(state, EngineState::Merging { .. })),
+                    "{name}: never merged"
+                );
+                extras_were(&extra_metrics(&dir), &[(name, outcome, false)]);
+                let lines = read_lines(&dir.join("metrics.jsonl"));
+                assert!(
+                    lines.iter().all(|line| line["event"] != "desktop_merge"),
+                    "{name}: no merge metric"
+                );
+                if outcome == "timeout" {
+                    let took = lines
+                        .iter()
+                        .find(|line| line["event"] == "desktop_extra_stt")
+                        .unwrap()["duration_ms"]
+                        .as_f64()
+                        .unwrap();
+                    assert_eq!(took.round(), 10_000.0, "{name}: its own timeout");
+                }
+                let folder = dictation_dirs(&dir).pop().unwrap();
+                let text = std::fs::read_to_string(folder.join("text.txt")).unwrap();
+                match recorded {
+                    Some(line) => assert!(
+                        text.ends_with(&format!("accepted (paste): live words\n{line}")),
+                        "{name}: {text}"
+                    ),
+                    None => assert!(!text.contains("extra ("), "{name}: {text}"),
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_does_not_wait_for_the_previous_captures_extra() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("merge-off-next");
+            // The first capture's extra answers at 9500, after the second capture is delivered.
+            let (extra, mut uploads) = serve(Reply::After(6000, A)).await;
+            let (chat_url, mut asked, _feed) = chat(Chat::Stream(says!("unused"))).await;
+            let config = extras_config(&chat_url, Some(false), &[("A", &extra, true)]);
+            let recorder = Recorder::in_dir(ALL, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording(&config, recorder);
+            let states = watch_states(&rig);
+            let (worker, mut captures) = captures_and_listen(&rig, engine, frames, 2);
+            live_words(&mut rig).await;
+            let first = captures.recv().await.unwrap();
+            assert_eq!(first.0, accepted(CaptureRoute::Paste, "live words"));
+            assert_eq!(first.1, MERGE_STARTS);
+
+            // The accepted cue ends and the microphone gate opens, then the worker listens again
+            // before the next wake, which its reset would otherwise clear.
+            rig.at(MERGE_STARTS + 200).await;
+            settle().await;
+            let next = rig.now();
+            rig.server.connect_again();
+            rig.wake_word().await;
+            rig.server.ready();
+            rig.at(next + 230).await;
+            rig.feed_until(next + 1000, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(next + 3499, Kind::Quiet).await;
+            rig.at(next + 3500).await;
+            let second = tokio::time::timeout(Duration::from_secs(5), captures.recv())
+                .await
+                .expect("the next capture should finish without the first extra")
+                .unwrap();
+            assert_eq!(second.0, accepted(CaptureRoute::Paste, "live words"));
+            assert_eq!(second.1, next + 3500, "delivered before A's first answer");
+            finished(worker).await;
+
+            assert!(
+                uploads.recv().await.is_some(),
+                "the first capture's extra was asked"
+            );
+            assert!(
+                uploads.recv().await.is_some(),
+                "the second capture's extra was asked"
+            );
+            assert!(asked.try_recv().is_err(), "no chat request");
+            assert!(
+                !states
+                    .borrow()
+                    .iter()
+                    .any(|state| matches!(state, EngineState::Merging { .. })),
+                "never merged"
+            );
+            extras_were(
+                &extra_metrics(&dir),
+                &[("A", "ok", false), ("A", "ok", false)],
+            );
+            for folder in dictation_dirs(&dir) {
+                let text = std::fs::read_to_string(folder.join("text.txt")).unwrap();
+                assert!(
+                    text.ends_with("accepted (paste): live words\nextra (A): A words paste that\n"),
+                    "{text}"
+                );
+            }
         })
         .await;
 }
@@ -3955,7 +4367,10 @@ async fn the_capture_limits_still_end_a_capture_whose_recognizer_stopped_taking_
                     r#"{"idle": 10, "max": 600}"#,
                     true,
                     15_000,
-                    CaptureError::NoEnding(Duration::from_secs(10)),
+                    CaptureError::NoEnding {
+                        idle: Duration::from_secs(10),
+                        listener: EndingListener::Other,
+                    },
                 ),
                 (
                     "idle without words",
@@ -6289,6 +6704,419 @@ async fn dictate(rig: &mut Rig, route: CaptureRoute) -> u64 {
     rig.feed_until(3499, Kind::Quiet).await;
     rig.at(3600).await;
     decided
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paste_gets_number_words_as_digits_by_default_and_off_delivers_the_same_bytes_as_before()
+{
+    LocalSet::new()
+        .run_until(async {
+            // (name, config, route, the ending, the words, what is delivered)
+            let cases = [
+                (
+                    "on by default",
+                    "{}".to_owned(),
+                    CaptureRoute::Paste,
+                    "paste that",
+                    "I have fifteen open issues",
+                    "I have 15 open issues",
+                ),
+                (
+                    "off",
+                    r#"{"writing": {"numbers_as_digits": false}}"#.to_owned(),
+                    CaptureRoute::Paste,
+                    "paste that",
+                    "I have fifteen open issues",
+                    "I have fifteen open issues",
+                ),
+                (
+                    "a task is not formatted",
+                    "{}".to_owned(),
+                    CaptureRoute::Task,
+                    "do that",
+                    "open tab three",
+                    "open tab three",
+                ),
+            ];
+            for (name, config, route, ending, said, delivered) in cases {
+                let (mut rig, engine, frames) = Rig::new(&config);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                rig.finals(&format!("{said} {ending}")).await;
+                rig.feed_until(3499, Kind::Quiet).await;
+                rig.at(3600).await;
+                assert_eq!(finished(task).await, accepted(route, delivered), "{name}");
+            }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_sends_the_formatted_text_to_the_writing_model() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut asked, _feed) = chat(Chat::Stream(says!("I have 15 open issues."))).await;
+            let (mut rig, engine, frames) = Rig::new(&with_writing(&url));
+            let task = Ask::Ending.start(engine, frames);
+            Ask::Ending
+                .say(&mut rig, "I have fifteen open issues")
+                .await;
+            let asked = request(&mut asked).await;
+            assert_eq!(
+                asked.body["messages"][1],
+                json!({"role": "user", "content": "I have 15 open issues"})
+            );
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "I have 15 open issues.")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_submit_confirms_the_formatted_text_that_is_then_accepted() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("I have fifteen open issues submit").await;
+            rig.state_is(EngineState::PendingEnding {
+                route: CaptureRoute::Submit,
+                text: "I have 15 open issues".to_owned(),
+                waiting_for_quiet: false,
+            })
+            .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Submit, "I have 15 open issues")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cleanup_gets_the_formatted_text_and_the_paste_counts_the_rewrites_without_recording_them()
+{
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("numbers-cleanup");
+            let (url, mut asked, _feed) =
+                chat(Chat::After(500, says!("I have 15 open issues."))).await;
+            let (mut rig, engine, frames) =
+                Rig::recording(&cleaning(&url), Recorder::in_dir(ALL, &dir).unwrap());
+            let task = capture_in(engine, frames, WakeTrigger::Capture, None);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("I have fifteen open issues paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            let body = request(&mut asked).await.body;
+            assert_eq!(body["messages"][0]["content"], CLEANUP_PROMPT);
+            assert_eq!(body["messages"][1]["content"], "I have 15 open issues");
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "I have 15 open issues.")
+            );
+            let metrics = read_lines(&dir.join("metrics.jsonl"));
+            let numbers = metrics
+                .iter()
+                .find(|line| line["event"] == "desktop_numbers")
+                .expect("a numbers metric");
+            assert_eq!(numbers["outcome"], "ok");
+            assert_eq!(numbers["count"], 1);
+            assert!(
+                !numbers.to_string().contains("I have"),
+                "no dictated text in the metrics: {numbers}"
+            );
+            std::fs::remove_dir_all(&dir).unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_pass_text_is_formatted_before_cleanup_and_the_submit_confirms_it() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("numbers-final-pass");
+            let (url, mut final_requests) = serve(Reply::Json(
+                r#"{"text":"I have fifteen open issues submit"}"#,
+            ))
+            .await;
+            let (writing, mut chat_requests, _) =
+                chat(Chat::Stream(says!("I have 15 open issues."))).await;
+            let mut config = with_final_pass(&url, &[]);
+            config["writing"] = json!({"url": writing, "model": "chat", "clean_dictation": true});
+            let (mut rig, engine, frames) = Rig::recording(
+                &config.to_string(),
+                Recorder::in_dir(METRICS_ONLY, &dir).unwrap(),
+            );
+            let (worker, mut captures) =
+                final_captures(&rig, engine, frames, &[WakeTrigger::Capture]);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words submit").await;
+            rig.feed_until(3500, Kind::Quiet).await;
+            final_requests.recv().await.unwrap();
+            let cleanup = request(&mut chat_requests).await;
+            assert_eq!(
+                cleanup.body["messages"][1]["content"],
+                "I have 15 open issues"
+            );
+            rig.final_preview("I have 15 open issues.", ms(2500))
+                .await
+                .shown();
+            assert_eq!(
+                captures.recv().await.unwrap().outcome,
+                accepted(CaptureRoute::Submit, "I have 15 open issues.")
+            );
+            finished(worker).await;
+            let metric = read_lines(&dir.join("metrics.jsonl"))
+                .into_iter()
+                .find(|line| line["event"] == "desktop_numbers")
+                .expect("a numbers metric");
+            assert_eq!(metric["count"], 1);
+            std::fs::remove_dir_all(&dir).unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merged_submit_waits_for_the_merge_then_confirms_the_formatted_and_cleaned_text() {
+    LocalSet::new()
+        .run_until(async {
+            let (extra, mut uploads) = serve(Reply::Json(
+                r#"{"text": "send the fifteen reports submit"}"#,
+            ))
+            .await;
+            let (chat_url, mut asked, _feed) =
+                chat(Chat::Stream(says!("Send the fifteen reports."))).await;
+            let mut config: serde_json::Value =
+                serde_json::from_str(&with_extras(&chat_url, &[("Extra", &extra, true)])).unwrap();
+            config["writing"] = json!({"url": chat_url, "model": "chat", "clean_dictation": true});
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("send the fifteen reports submit").await;
+            rig.state_is(EngineState::Capturing {
+                committed: "send the fifteen reports".to_owned(),
+                partial: None,
+                notice: None,
+            })
+            .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+
+            // The merge sees the raw live words, and cleanup the formatted merged text.
+            let merge = request(&mut asked).await;
+            assert_eq!(merge.body["messages"][0]["content"], MERGE_PROMPT);
+            assert_eq!(
+                merge.body["messages"][1]["content"],
+                r#"["send the fifteen reports","send the fifteen reports"]"#
+            );
+            let cleanup = request(&mut asked).await;
+            assert_eq!(cleanup.body["messages"][0]["content"], CLEANUP_PROMPT);
+            assert_eq!(
+                cleanup.body["messages"][1]["content"],
+                "Send the 15 reports."
+            );
+            // The settled text is shown whole, and sent exactly as shown.
+            rig.final_preview("Send the fifteen reports.", ms(2500))
+                .await
+                .shown();
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Submit, "Send the fifteen reports.")
+            );
+            assert!(uploads.recv().await.is_some());
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_ordinary_submit_never_reformats_its_cleanup_reply_after_the_confirmation() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut asked, _feed) =
+                chat(Chat::Stream(says!("I have fifteen open issues."))).await;
+            let (mut rig, engine, frames) = Rig::new(&cleaning(&url));
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("I have three open issues submit").await;
+            let cleanup = request(&mut asked).await;
+            assert_eq!(
+                cleanup.body["messages"][1]["content"],
+                "I have 3 open issues"
+            );
+            rig.state_is(EngineState::PendingEnding {
+                route: CaptureRoute::Submit,
+                text: "I have fifteen open issues.".to_owned(),
+                waiting_for_quiet: false,
+            })
+            .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Submit, "I have fifteen open issues."),
+                "the reply shown before the pause is the text that is sent"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_entries_language_hint_formats_a_german_dictation() {
+    LocalSet::new()
+        .run_until(async {
+            let config = r#"{
+                "stt": {"entries": [{"kind": "open_ai", "id": "de", "name": "German",
+                    "active": true, "address": "http://127.0.0.1:9/v1", "model": "m",
+                    "language": "de"}]}
+            }"#;
+            let (mut rig, engine, frames) = Rig::new(config);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("Ich habe fünfzehn offene Tickets paste that")
+                .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_detected_language_formats_the_dictation_when_the_entry_has_no_hint() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.server.heard_language(Language::detected("German"));
+            rig.finals("Ich habe fünfzehn offene Tickets paste that")
+                .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_detected_language_another_than_english_leaves_its_words_alone() {
+    LocalSet::new()
+        .run_until(async {
+            // Plain ASCII is formatted as English only when no language was detected.
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.server.heard_language(Language::detected("french"));
+            rig.finals("I have two cats paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3600).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "I have two cats")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_pass_language_formats_the_text_it_replaced() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut requests) = serve(Reply::Json(
+                r#"{"text":"Ich habe fünfzehn offene Tickets paste that","language":"german"}"#,
+            ))
+            .await;
+            let (mut rig, engine, frames) = Rig::new(&with_final_pass(&url, &[]).to_string());
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            requests.recv().await.unwrap();
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_configured_final_pass_language_hint_formats_its_reply() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut requests) = serve_logged(
+                [Reply::Json(
+                    r#"{"choices":[{"message":{"content":"Ich habe fünfzehn offene Tickets paste that"}}]}"#,
+                )],
+                |_| (),
+            )
+            .await;
+            let mut config = with_final_pass(&url, &[]);
+            config["stt"]["entries"][1] = json!({
+                "kind": "open_ai", "id": "final", "name": "Final", "active": false,
+                "model": "asr", "address": url, "request": "chat", "language": "de",
+                "final_pass": true
+            });
+            let (mut rig, engine, frames) = Rig::new(&config.to_string());
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.finals("live words paste that").await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            requests.recv().await.unwrap();
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_final_pass_keeps_the_live_language() {
+    LocalSet::new()
+        .run_until(async {
+            let (url, mut requests) = serve(Reply::Status(500)).await;
+            let (mut rig, engine, frames) = Rig::new(&with_final_pass(&url, &[]).to_string());
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1000, Kind::Quiet).await;
+            rig.server.heard_language(Language::detected("de"));
+            rig.finals("Ich habe fünfzehn offene Tickets paste that")
+                .await;
+            rig.feed_until(3499, Kind::Quiet).await;
+            rig.at(3500).await;
+            requests.recv().await.unwrap();
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
+            );
+        })
+        .await;
 }
 
 #[tokio::test(start_paused = true)]

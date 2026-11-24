@@ -22,8 +22,9 @@ use thalvi_desktop::host::{
     Desktop, HoldSource, HoldWatch, Host, HostError, RequestServer, refusal,
 };
 use thalvi_desktop::metrics::{Event, Recorder};
-use thalvi_desktop::models::SpeechDownloads;
+use thalvi_desktop::models::{CatalogHead, SpeechDownloads};
 use thalvi_desktop::speech_device::SpeechDevices;
+use thalvi_desktop::wake::HeadModel;
 use tokio::sync::watch;
 
 use crate::agent::{self, Catalog, ModelRow, Running, Switch};
@@ -31,7 +32,7 @@ use crate::client;
 use crate::commands;
 use crate::launch::{Launch, relaunch_shows_settings};
 use crate::menu_entry::{self, MenuEntry};
-use crate::overlay::{FailureSink, Overlay, Visibility};
+use crate::overlay::{FailureSink, Overlay};
 use crate::runner::{AudioStatus, Control, EngineLink, Restart};
 use serde_json::Value;
 
@@ -118,6 +119,16 @@ impl SyncedConfig {
         self.set(&config);
         Ok(())
     }
+
+    /// Runs `act` on the config saved now, under the save lock, when it selects catalog `head`
+    /// for the dictation wake word; a download of a head it does not select acts on nothing.
+    pub(crate) fn wake_head_downloaded(&self, head: CatalogHead, act: impl FnOnce(&DesktopConfig)) {
+        let _save = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let config = self.config();
+        if config.wake.capture().model == HeadModel::Catalog(head) {
+            act(&config);
+        }
+    }
 }
 
 /// What the commands and the tray menu reach.
@@ -141,6 +152,8 @@ pub struct AppState {
     tray: OnceLock<Tray>,
     host: Arc<Desktop>,
     overlay_shown: AtomicBool,
+    /// The system theme the live overlay was last told to follow.
+    dark: AtomicBool,
     /// Why the login entry could not be put back on start, for the switch to show.
     login_problem: Mutex<Option<String>>,
     /// Why the app menu entry could not be rewritten on start, for the switch to show.
@@ -221,6 +234,7 @@ impl AppState {
             tray: OnceLock::new(),
             host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
             overlay_shown: AtomicBool::new(config.overlay.show),
+            dark: AtomicBool::new(true),
             login_problem: Mutex::new(None),
             menu_problem: Mutex::new(None),
             request_server: Mutex::new(None),
@@ -245,6 +259,12 @@ impl AppState {
         self.saves.config()
     }
 
+    /// Whether the system theme is dark, for a preview to use the live overlay's palette.
+    #[must_use]
+    pub(crate) fn is_dark(&self) -> bool {
+        self.dark.load(Ordering::SeqCst)
+    }
+
     /// Builds a settings form from the config now in use, saves it and takes it into effect,
     /// ordered against every other save; see `SyncedConfig::save_form`.
     ///
@@ -257,6 +277,15 @@ impl AppState {
         self.saves.save_form(form, |current, config, write| {
             self.take_effect(current, config, write)
         })
+    }
+
+    /// Re-applies the config saved now to the engine after `head` was downloaded, when it selects
+    /// that head, so a wake load that failed before the file was cached is retried and clears its
+    /// failure. A download of a head the saved config does not select sends nothing.
+    pub(crate) fn wake_head_downloaded(&self, head: CatalogHead) {
+        self.saves.wake_head_downloaded(head, |config| {
+            self.link.send(Control::Apply(Box::new(config.clone())));
+        });
     }
 
     /// Writes `config` and takes it into effect. Changed hold keys are watched before the file is
@@ -379,6 +408,7 @@ impl AppState {
     fn apply(&self, config: &DesktopConfig) {
         self.overlay_shown
             .store(config.overlay.show, Ordering::SeqCst);
+        self.overlay.set_enabled(config.overlay.show);
         self.overlay.show_draft(config.overlay.draft);
         self.overlay.set_style(overlay_style(config));
         self.overlay.set_recordings(config.recordings);
@@ -544,7 +574,6 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
         return Ok(());
     }
     // GTK's backend is fixed when it starts, which the builder below does.
-    #[cfg(target_os = "linux")]
     Desktop::prepare_toolkit().map_err(|error| error.to_string())?;
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
@@ -565,6 +594,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::get_audio,
             commands::get_settings,
             commands::get_look_styles,
+            commands::preview_overlay,
             commands::settings_ready,
             commands::save_settings,
             commands::set_listening,
@@ -838,6 +868,7 @@ fn start_overlay(app: &AppHandle, state: &AppState) {
         }
     }));
     let config = state.config();
+    state.overlay.set_enabled(config.overlay.show);
     state.overlay.show_draft(config.overlay.draft);
     state.overlay.set_style(overlay_style(&config));
     // Kept for the thread's life: a later apply reaches it through set_recordings.
@@ -864,9 +895,10 @@ fn create_windows(app: &AppHandle) -> tauri::Result<()> {
             .build()?;
     // The overlay follows the system's theme as the settings window sees it, as the web views did.
     if let Ok(theme) = settings.theme() {
-        app.state::<AppState>()
-            .overlay
-            .set_dark(theme == Theme::Dark);
+        let state = app.state::<AppState>();
+        let dark = theme == Theme::Dark;
+        state.dark.store(dark, Ordering::SeqCst);
+        state.overlay.set_dark(dark);
     }
     let (window, handle) = (settings.clone(), app.clone());
     settings.on_window_event(move |event| match event {
@@ -875,10 +907,10 @@ fn create_windows(app: &AppHandle) -> tauri::Result<()> {
             let _ = window.hide();
         }
         WindowEvent::ThemeChanged(theme) => {
-            handle
-                .state::<AppState>()
-                .overlay
-                .set_dark(*theme == Theme::Dark);
+            let state = handle.state::<AppState>();
+            let dark = *theme == Theme::Dark;
+            state.dark.store(dark, Ordering::SeqCst);
+            state.overlay.set_dark(dark);
         }
         _ => {}
     });
@@ -988,8 +1020,7 @@ fn show(app: &AppHandle, status: &Status) {
         tray.show(status);
     }
     let _ = app.emit("thalvi://status", status);
-    let enabled = state.overlay_shown.load(Ordering::SeqCst);
-    state.overlay.show(status, Visibility::of(status, enabled));
+    state.overlay.show(status);
 }
 
 /// Opens the settings window; only an explicit user action calls this. A window not yet wearing
@@ -1338,6 +1369,70 @@ mod tests {
             file.look
         );
         assert_eq!(leftovers, ["desktop.json"], "no temporary file is left");
+    }
+
+    #[test]
+    fn only_a_download_of_the_saved_wake_head_reapplies_the_saved_config_under_the_save_lock() {
+        use thalvi_desktop::models::CatalogHead;
+        // (what the saved config selects, the head that was downloaded, whether the engine hears it)
+        type Case = (&'static str, &'static str, CatalogHead, bool);
+        let cases: [Case; 4] = [
+            (
+                "the selected head",
+                r#"{"wake":{"capture":{"model":"hey_mycroft"}}}"#,
+                CatalogHead::HeyMycroft,
+                true,
+            ),
+            (
+                "another head",
+                r#"{"wake":{"capture":{"model":"hey_mycroft"}}}"#,
+                CatalogHead::HeyJarvis,
+                false,
+            ),
+            (
+                "the default head",
+                r#"{"microphone":"USB Mic"}"#,
+                CatalogHead::HeyThalvi,
+                true,
+            ),
+            (
+                "a head from a file",
+                r#"{"wake":{"capture":{"model":"/models/me.onnx"}}}"#,
+                CatalogHead::HeyMycroft,
+                false,
+            ),
+        ];
+        for (at, (case, json, downloaded, reapplied)) in cases.into_iter().enumerate() {
+            let dir =
+                std::env::temp_dir().join(format!("thalvi-app-wake-{}-{at}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let saved = DesktopConfig::from_json_str(json).unwrap();
+            let synced = SyncedConfig::new(
+                Store::new(Some(dir.join("desktop.json"))).unwrap(),
+                saved.clone(),
+            );
+            let applied = Mutex::new(Vec::new());
+
+            synced.wake_head_downloaded(downloaded, |config| {
+                assert!(
+                    synced.lock.try_lock().is_err(),
+                    "{case}: the config is read and sent under the save lock"
+                );
+                applied
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(config.clone());
+            });
+            let applied = applied.into_inner().unwrap_or_else(PoisonError::into_inner);
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert_eq!(
+                applied,
+                if reapplied { vec![saved] } else { Vec::new() },
+                "{case}"
+            );
+        }
     }
 
     #[test]
