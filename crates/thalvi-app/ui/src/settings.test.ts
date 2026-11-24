@@ -528,6 +528,46 @@ describe("applying a change", () => {
   });
 });
 
+describe("the ending hint", () => {
+  const HINT = "Parakeet may not hear an English ending after speech in another language. Add endings in the language you dictate, like “text einfügen”.";
+
+  const endingNote = (): HTMLParagraphElement | null => {
+    const heading = Array.from(root.querySelectorAll<HTMLElement>('section[data-page="commands"] h4[data-group]'))
+      .find((node) => node.textContent === "Endings");
+    if (!heading) throw new Error("no Endings group");
+    const next = heading.nextElementSibling;
+    return next instanceof HTMLParagraphElement && next.classList.contains("note") ? next : null;
+  };
+
+  const cases: [string, Settings, string][] = [
+    ["Parakeet on device", local("parakeet_tdt_v3"), HINT],
+    ["Nemotron on device by default", local(), ""],
+    ["a realtime live recognizer", SETTINGS, ""],
+  ];
+
+  it.each(cases)("shows the hint only with %s live", async (_case, settings, hint) => {
+    await open(settings);
+    goTo("commands");
+    const note = endingNote();
+    expect(note?.textContent ?? "").toBe(hint);
+    if (note !== null) {
+      expect(note.hasAttribute("role")).toBe(false);
+      expect(note.classList.contains("ok")).toBe(true);
+      expect(note.hidden).toBe(false);
+    }
+  });
+
+  it("follows the live recognizer when the settings change elsewhere", async () => {
+    const stub = await open(local());
+    goTo("commands");
+    expect(endingNote()).toBeNull();
+    stub.backend.getSettings.mockImplementation(() => Promise.resolve(local("parakeet_tdt_v3")));
+    stub.changedElsewhere();
+    await settle();
+    expect(endingNote()?.textContent).toBe(HINT);
+  });
+});
+
 describe("tables", () => {
   it("adds an ending phrase normalized and removes another", async () => {
     const stub = await open();

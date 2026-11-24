@@ -178,6 +178,11 @@ Delivery formats a paste, a write and a settled submit; it never formats an
 ordinary submit again. The model checks delivery admission, not whether the
 formatted text is right.
 
+The Parakeet ending advice (#450) changes only the text of `CaptureError::NoEnding`: `Engine::new`
+reads once whether the live entry is Parakeet, and `idle_error` passes that to the error. The idle
+steps in `Engine::drive` and `Engine::feed` still fail the capture with no new await, queue step or
+delivery path, so the model actions are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty

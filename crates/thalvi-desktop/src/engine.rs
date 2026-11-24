@@ -36,6 +36,7 @@ use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
 use crate::hold::{Cutoff, HoldKind, KeyState, Press, Presses, Refusal};
 use crate::merge;
 use crate::metrics::{Dictation, Event, Metrics, RecordKinds, Recorder};
+use crate::models::CatalogSpeech;
 use crate::numbers;
 use crate::phrases::WordList;
 use crate::recognizer::{
@@ -44,6 +45,7 @@ use crate::recognizer::{
 use crate::report::UserError;
 use crate::secondary::{self, Language, SecondaryApi, SecondaryError};
 use crate::spotter::KeywordSpotter;
+use crate::transducer::SpeechChoice;
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
 use crate::wake_stats::{Latency, LatencySummary, NearMisses};
@@ -265,6 +267,13 @@ pub enum EngineState {
     },
 }
 
+/// Whether the live recognizer is Parakeet, which leaves out an English ending spoken after another language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndingListener {
+    Parakeet,
+    Other,
+}
+
 /// Why a capture failed; `Display` is the plain notice for the user.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CaptureError {
@@ -297,8 +306,11 @@ pub enum CaptureError {
     NothingHeard,
     #[error("No words heard for {}.", plain_duration(*.0))]
     NoWords(Duration),
-    #[error("Didn't hear an ending for {}.", plain_duration(*.0))]
-    NoEnding(Duration),
+    #[error("{}", ending_notice(*idle, *listener))]
+    NoEnding {
+        idle: Duration,
+        listener: EndingListener,
+    },
     #[error("Capture stopped after {} without an ending.", plain_duration(*.0))]
     TooLong(Duration),
     #[error(transparent)]
@@ -321,7 +333,7 @@ impl UserError for CaptureError {
             Self::MicStopped => "Microphone stopped mid-capture",
             Self::HoldTooShort => "Key released too soon",
             Self::NothingHeard | Self::NoWords(_) => "No words heard",
-            Self::NoEnding(_) => "No ending heard",
+            Self::NoEnding { .. } => "No ending heard",
             Self::TooLong(_) => "Capture too long — not delivered",
             Self::SubmitPreview(_) => "Submit needs review",
             Self::Full(_) => "Capture full — finish or cancel",
@@ -340,6 +352,17 @@ fn plain_duration(duration: Duration) -> String {
     format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
 }
 
+/// The ending timeout notice, with the cause and the fix when Parakeet is listening.
+fn ending_notice(idle: Duration, listener: EndingListener) -> String {
+    let notice = format!("Didn't hear an ending for {}.", plain_duration(idle));
+    match listener {
+        EndingListener::Other => notice,
+        EndingListener::Parakeet => format!(
+            "{notice} Parakeet may miss an English ending after other languages; add one in your language in Settings → Endings."
+        ),
+    }
+}
+
 impl CaptureError {
     /// A short name for the metrics, without any text.
     #[must_use]
@@ -353,7 +376,7 @@ impl CaptureError {
             Self::Writing(_) => "writing",
             Self::HoldTooShort => "hold_too_short",
             Self::NothingHeard => "hold_empty",
-            Self::NoWords(_) | Self::NoEnding(_) => "no_ending",
+            Self::NoWords(_) | Self::NoEnding { .. } => "no_ending",
             Self::TooLong(_) => "too_long",
             Self::SubmitPreview(_) => "submit_preview",
             Self::Full(_) => "full",
@@ -522,6 +545,8 @@ pub struct Engine<R, W, C> {
     submit_confirmation: SubmitConfirmation,
     chat: Option<crate::chat::Chat>,
     speech: SpeechSource,
+    /// The live recognizer's bearing on an ending spoken in another language.
+    ending_listener: EndingListener,
     http: reqwest::Client,
     recorder: Recorder,
     notice: Rc<dyn Fn(&str)>,
@@ -1109,9 +1134,9 @@ fn nothing_delivered(outcome: &CaptureOutcome) -> Option<&'static str> {
 }
 
 /// The capture heard no new words for `idle`: words were heard but never their ending, or none at all.
-fn idle_error(idle: Duration, text: &CaptureSession) -> CaptureError {
+fn idle_error(idle: Duration, text: &CaptureSession, listener: EndingListener) -> CaptureError {
     if recoverable(text).is_some() {
-        CaptureError::NoEnding(idle)
+        CaptureError::NoEnding { idle, listener }
     } else {
         CaptureError::NoWords(idle)
     }
@@ -1186,6 +1211,14 @@ where
             submit_confirmation: SubmitConfirmation::Live,
             chat: parts.chat,
             speech: config.speech_source(),
+            ending_listener: if matches!(
+                &config.stt.entries.active_live().kind,
+                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ParakeetTdtV3))
+            ) {
+                EndingListener::Parakeet
+            } else {
+                EndingListener::Other
+            },
             http: parts.http,
             recorder,
             notice: Rc::from(parts.notice),
@@ -2015,7 +2048,11 @@ where
                     None
                 }
                 Step::Silent => Some(Done::Failed(CaptureError::MicStopped)),
-                Step::Idle => Some(Done::Failed(idle_error(self.limits.idle(), &live.text))),
+                Step::Idle => Some(Done::Failed(idle_error(
+                    self.limits.idle(),
+                    &live.text,
+                    self.ending_listener,
+                ))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
                 Step::Tail => Some(if live.session.buffers_audio() {
                     Done::Failed(CaptureError::Recognizer(RecognizerError::said(
@@ -2517,7 +2554,11 @@ where
                 _ = self.cancel.changed() => return Err(Stop::Cancelled),
                 sent = live.session.send_frame(frame) => sent.map_err(|e| Stop::Failed(e.into()))?,
                 () = tokio::time::sleep_until(live.last_words + limits.idle()) => {
-                    return Err(Stop::Failed(idle_error(limits.idle(), &live.text)));
+                    return Err(Stop::Failed(idle_error(
+                        limits.idle(),
+                        &live.text,
+                        self.ending_listener,
+                    )));
                 }
                 () = tokio::time::sleep_until(live.started + limits.max()) => {
                     return Err(Stop::Failed(CaptureError::TooLong(limits.max())));

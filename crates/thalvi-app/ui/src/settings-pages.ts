@@ -804,8 +804,13 @@ function commands(context: PageContext): HTMLElement[] {
     pause("task", "Quiet before running a task"),
   ];
   const pauses = settings.ending_pause;
+  const active = settings.stt.entries.filter(isLive).find((entry) => entry.active);
+  const parakeet = active?.kind === "on_device" && active.model === "parakeet_tdt_v3";
   return [
     group("Endings"),
+    ...(parakeet
+      ? [el("p", { class: "note ok" }, "Parakeet may not hear an English ending after speech in another language. Add endings in the language you dictate, like “text einfügen”.")]
+      : []),
     row("Ending phrases", "Say one to finish. Every action needs one.", endingsTable(context)),
     group("Quiet before acting"),
     details(
