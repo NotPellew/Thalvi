@@ -734,6 +734,12 @@ enum Release {
     Over,
 }
 
+struct QuietEnding {
+    request: Option<CaptureRequest>,
+    without_ending: bool,
+    pause: Option<Duration>,
+}
+
 impl<S: RecognizerSession> Live<S> {
     /// Whether a frame queued at `order` came after the key went up and is not the hold's to
     /// send.
@@ -756,6 +762,25 @@ impl<S: RecognizerSession> Live<S> {
                 },
             ),
             _ => None,
+        }
+    }
+
+    fn take_quiet_ending(&mut self) -> QuietEnding {
+        let now = Instant::now();
+        let pause = self
+            .text
+            .quiet_since()
+            .map(|since| now.duration_since(since));
+        let without_ending = self.text.pending().is_some_and(|p| p.without_ending);
+        let ended = self.text.ready_at();
+        let request = self.text.poll_ready(now);
+        if request.is_some() {
+            self.capture_end = self.capture_end.or(ended);
+        }
+        QuietEnding {
+            request,
+            without_ending,
+            pause,
         }
     }
 }
@@ -2043,7 +2068,7 @@ where
                     self.record_late(answer);
                     None
                 }
-                Step::Quiet => self.on_quiet(live),
+                Step::Quiet => self.on_quiet(live.take_quiet_ending()),
                 Step::Disputed => {
                     self.on_disputed(live);
                     None
@@ -2323,25 +2348,16 @@ where
         None
     }
 
-    fn on_quiet(&self, live: &mut Live<R::Session>) -> Option<Done> {
-        let now = Instant::now();
-        let since = live.text.quiet_since();
-        let without_ending = live.text.pending().is_some_and(|p| p.without_ending);
-        let ended = live.text.ready_at();
-        let request = live.text.poll_ready(now)?;
-        live.capture_end = live.capture_end.or(ended);
-        self.ending_state(if without_ending {
+    fn on_quiet(&self, ending: QuietEnding) -> Option<Done> {
+        let request = ending.request?;
+        self.ending_state(if ending.without_ending {
             "accepted_without_ending"
         } else {
             "accepted"
         });
-        if let Some(since) = since {
-            self.recorder.metric(
-                Event::EndingPause,
-                "ok",
-                Some(now.duration_since(since)),
-                Value::Null,
-            );
+        if let Some(pause) = ending.pause {
+            self.recorder
+                .metric(Event::EndingPause, "ok", Some(pause), Value::Null);
         }
         Some(Done::Accepted(request))
     }
@@ -3658,14 +3674,19 @@ where
         // An extra can hear the spoken ending twice ("Yes. Submit. Submit."); every trailing copy is the ending.
         loop {
             let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
-            match parser.on_final(&text, Instant::now(), false) {
-                Ok(FinalStep::Armed(pending))
-                    if pending.route == route && pending.text.len() < text.len() =>
-                {
-                    text = pending.text;
-                }
-                _ => break,
+            let Ok(FinalStep::Armed(PendingEnding {
+                route: ending_route,
+                text: stripped,
+                without_ending: false,
+                ..
+            })) = parser.on_final(&text, Instant::now(), false)
+            else {
+                break;
+            };
+            if ending_route != route {
+                break;
             }
+            text = stripped;
         }
         if require_ending {
             if let Some(before) = text
