@@ -1,10 +1,11 @@
 //! Wires the engine to the tray, the overlay, the settings window and the commands.
 
+use std::future::Future;
 use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use semver::Version;
 use serde::Serialize;
@@ -131,12 +132,92 @@ impl SyncedConfig {
     }
 }
 
+/// Tracks command-started downloads so quitting cancels them and waits for partial files to drop.
+pub(crate) struct ActiveDownloads {
+    quitting: watch::Sender<bool>,
+    active: Mutex<usize>,
+    drained: Condvar,
+}
+
+impl ActiveDownloads {
+    fn new() -> Self {
+        let (quitting, _) = watch::channel(false);
+        Self {
+            quitting,
+            active: Mutex::new(0),
+            drained: Condvar::new(),
+        }
+    }
+
+    /// Runs `download` until it completes or quitting begins; returns `None` when cancelled by quit.
+    pub(crate) async fn run<T>(&self, download: impl Future<Output = T>) -> Option<T> {
+        let mut quitting = self.quitting.subscribe();
+        let _guard = {
+            let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+            if *quitting.borrow() {
+                return None;
+            }
+            *active += 1;
+            ActiveDownloadGuard {
+                active: &self.active,
+                drained: &self.drained,
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = quitting.wait_for(|&quit| quit) => None,
+            result = download => Some(result),
+        }
+    }
+
+    /// Signals every running command download to cancel now.
+    fn begin_quit(&self) {
+        let _active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        self.quitting.send_replace(true);
+    }
+
+    /// Waits up to `timeout` for every cancelled download future (and its partial file) to drop.
+    fn wait_drained(&self, timeout: Duration) {
+        let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        let deadline = Instant::now() + timeout;
+        while *active > 0 {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            let (guard, wait) = self
+                .drained
+                .wait_timeout(active, remaining)
+                .unwrap_or_else(PoisonError::into_inner);
+            active = guard;
+            if wait.timed_out() {
+                break;
+            }
+        }
+    }
+}
+
+struct ActiveDownloadGuard<'a> {
+    active: &'a Mutex<usize>,
+    drained: &'a Condvar,
+}
+
+impl Drop for ActiveDownloadGuard<'_> {
+    fn drop(&mut self) {
+        let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        if *active == 0 {
+            self.drained.notify_all();
+        }
+    }
+}
+
 /// What the commands and the tray menu reach.
 pub struct AppState {
     pub link: EngineLink,
     saves: SyncedConfig,
     pub overlay: Overlay,
     pub speech_downloads: SpeechDownloads,
+    pub(crate) downloads: ActiveDownloads,
     pub chat_install: tokio::sync::Mutex<()>,
     /// Where the speech model runs, shared with the engine thread that loads it.
     pub speech_devices: Arc<SpeechDevices>,
@@ -225,6 +306,7 @@ impl AppState {
             saves: SyncedConfig::new(store, config.clone()),
             overlay: Overlay::default(),
             speech_downloads: SpeechDownloads::default(),
+            downloads: ActiveDownloads::new(),
             chat_install: tokio::sync::Mutex::new(()),
             speech_devices,
             history,
@@ -595,6 +677,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_audio,
+            commands::get_rebuilding,
             commands::get_settings,
             commands::get_look_styles,
             commands::preview_overlay,
@@ -926,6 +1009,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
     let mut status = state.link.status_updates();
     let mut level = state.link.level_updates();
     let mut audio = state.link.audio_updates();
+    let mut rebuilding = state.link.rebuilding_updates();
     let tray = Tray::new(
         app,
         &status.borrow(),
@@ -957,6 +1041,12 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
                             tray.listening(current.paused);
                         }
                         let _ = handle.emit("thalvi://audio", current);
+                    }
+                    changed
+                }
+                changed = rebuilding.changed() => {
+                    if changed.is_ok() {
+                        let _ = handle.emit("thalvi://rebuilding", *rebuilding.borrow_and_update());
                     }
                     changed
                 }
@@ -1081,6 +1171,10 @@ impl Running for Live {
 
     fn audio(&self) -> watch::Receiver<AudioStatus> {
         self.0.state::<AppState>().link.audio_updates()
+    }
+
+    fn rebuilding(&self) -> watch::Receiver<bool> {
+        self.0.state::<AppState>().link.rebuilding_updates()
     }
 
     fn last_error(&self) -> Option<Failure> {
@@ -1252,7 +1346,9 @@ fn quit(app: &AppHandle) {
                 .unwrap_or_else(PoisonError::into_inner)
                 .take(),
         );
+        state.downloads.begin_quit();
         state.link.quit();
+        state.downloads.wait_drained(crate::runner::QUIT_TIMEOUT);
         app.exit(0);
     });
 }
@@ -1848,5 +1944,47 @@ mod tests {
             drop(watch);
             assert_eq!(*log.lock().unwrap(), dropped, "{case}");
         }
+    }
+
+    #[tokio::test]
+    async fn quitting_cancels_active_command_downloads_and_waits_for_cleanup() {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let downloads = Arc::new(ActiveDownloads::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn({
+            let downloads = Arc::clone(&downloads);
+            let dropped = Arc::clone(&dropped);
+            async move {
+                downloads
+                    .run(async move {
+                        let _flag = DropFlag(dropped);
+                        let _ = entered_tx.send(());
+                        std::future::pending::<()>().await;
+                    })
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered)
+            .await
+            .expect("download entered")
+            .expect("entered sender");
+
+        downloads.begin_quit();
+        tokio::task::spawn_blocking({
+            let downloads = Arc::clone(&downloads);
+            move || downloads.wait_drained(Duration::from_secs(2))
+        })
+        .await
+        .expect("wait_drained returned");
+
+        assert!(dropped.load(Ordering::SeqCst), "download future dropped");
+        assert!(task.await.expect("task finished").is_none());
+        assert!(downloads.run(async { 1 }).await.is_none());
     }
 }

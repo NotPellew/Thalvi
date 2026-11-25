@@ -894,6 +894,7 @@ function modelCard(info: SpeechModelInfo, backend: Backend, picker: HTMLElement)
         : `Downloading… ${String(event.percent)}%`;
     busy(download, running);
     if (event.status === "done") {
+      info.cached = true;
       if (document.activeElement === download) picker.focus();
       cached(true);
       showDevice();
@@ -1046,7 +1047,7 @@ function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
 }
 
 /** The model and folder rows of an On this computer entry; they write into `working`. */
-function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageContext, sharedModels?: Promise<SpeechModelInfo[]>): { rows: HTMLElement[]; validate: () => Promise<void> } {
+function onDeviceRows(working: OnDeviceEntry, { controls, backend }: PageContext, sharedModels?: Promise<SpeechModelInfo[]>): { rows: HTMLElement[]; validate: () => Promise<void>; progress: (event: SpeechModelProgress) => void } {
   const catalog = new Map<string, ModelCard>();
   const listed: SpeechModelInfo[] = [];
   // Only narrows the model list; it is not applied and does not reach recognition.
@@ -1074,7 +1075,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
   const listProblem = note();
   const ownFolder = el("div", { class: "own" }, el("span", { class: "unit" }, "Your own model folder"));
 
-  live.speechModel = (event) => {
+  const progress = (event: SpeechModelProgress): void => {
     catalog.get(event.name)?.progress(event);
   };
 
@@ -1216,6 +1217,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend, live }: PageC
         throw error;
       });
     },
+    progress,
   };
 }
 
@@ -1248,8 +1250,17 @@ function speech(context: PageContext): SpeechRows {
   const retry = button("Retry", retryDownload);
   const summaryActions = el("div", { class: "trow", hidden: true }, useServer, retry, retryProblem);
   let currentStatus: Status = { state: "listening" };
+  let rebuilding = false;
   const modelTitles = new Map<string, string>();
   let speechModelList: SpeechModelInfo[] = [];
+  let editorSpeechProgress: (event: SpeechModelProgress) => void = () => undefined;
+  context.live.speechModel = (event) => {
+    if (event.status === "done") {
+      const info = speechModelList.find((item) => item.name === event.name);
+      if (info) info.cached = true;
+    }
+    editorSpeechProgress(event);
+  };
   const speechModels: Promise<SpeechModelInfo[]> = backend.listSpeechModels();
   speechModels.then(
     (models) => {
@@ -1272,6 +1283,17 @@ function speech(context: PageContext): SpeechRows {
     },
     () => undefined,
   );
+  backend.onRebuilding((queued) => {
+    rebuilding = queued;
+    updateSummary();
+  });
+  backend.getRebuilding().then(
+    (queued) => {
+      rebuilding = queued;
+      updateSummary();
+    },
+    () => undefined,
+  );
 
   function modelTitleFor(entry: OnDeviceEntry): string {
     const model = entry.model ?? SPEECH_MODEL;
@@ -1282,14 +1304,15 @@ function speech(context: PageContext): SpeechRows {
     switch (status.state) {
       case "listening":
       case "keyboardOnly":
+      case "done":
+        return "Ready";
       case "starting":
       case "capturing":
       case "pending":
       case "writing":
       case "thinking":
       case "working":
-      case "done":
-        return "Ready";
+        return rebuilding ? "Loads after this dictation" : "Ready";
       case "transcribing":
         return "Transcribing…";
       case "finalPass":
@@ -1668,7 +1691,7 @@ function speech(context: PageContext): SpeechRows {
     editor.replaceChildren();
     editor.hidden = true;
     syncEditor = () => undefined;
-    context.live.speechModel = () => undefined;
+    editorSpeechProgress = () => undefined;
     render();
     if (returnFocus) {
       back()?.focus();
@@ -1753,6 +1776,7 @@ function speech(context: PageContext): SpeechRows {
         const built = onDeviceRows(working, context, speechModels);
         rows.push(...built.rows);
         validate = built.validate;
+        editorSpeechProgress = built.progress;
         break;
       }
       case "extra":
@@ -1877,12 +1901,16 @@ function speech(context: PageContext): SpeechRows {
   let installingChat = false;
   const installChat = button("Download chat model", () => {
     say(chatProblem, "");
+    chatState.textContent = "";
     installingChat = true;
     installChat.disabled = true;
     chatProgress.hidden = false;
     backend.downloadChatModel(chosenBuild).then(() => {
       chatState.textContent = "Installed. Starts when writing or merging first needs it.";
-    }, (error: unknown) => { say(chatProblem, errorText(error)); }).finally(() => {
+    }, (error: unknown) => {
+      chatState.textContent = "";
+      say(chatProblem, errorText(error));
+    }).finally(() => {
       installingChat = false;
       chatProgress.hidden = true;
       void refreshChat();
@@ -1890,6 +1918,7 @@ function speech(context: PageContext): SpeechRows {
   });
   const [removeChat] = confirmed("Remove chat model", "Delete the downloaded chat model from this computer?", "Yes, delete model", "Keep model", () => {
     say(chatProblem, "");
+    chatState.textContent = "";
     backend.removeChatModel().then(refreshChat, (error: unknown) => { say(chatProblem, errorText(error)); });
   });
   function refreshChat(): Promise<void> {
@@ -1905,7 +1934,10 @@ function speech(context: PageContext): SpeechRows {
     chatProgress.value = progress.percent;
     if (progress.status === "verifying") chatState.textContent = "Checking the installation and download checksums…";
     else if (progress.status === "downloading") chatState.textContent = `Downloading and checking checksums… ${String(progress.percent)}%`;
-    else if (progress.status === "failed") { say(chatProblem, progress.message ?? "The download failed."); }
+    else if (progress.status === "failed") {
+      chatState.textContent = "";
+      say(chatProblem, progress.message ?? "The download failed.");
+    }
   });
   void refreshChat();
   const localRows = [

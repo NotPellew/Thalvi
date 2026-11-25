@@ -1,6 +1,6 @@
 name: Heavy
 
-# Every gate with no path detection, plus mutation testing over the Rust changed since the
+# Every gate with no path detection, plus mutation testing over the high-risk Rust changed since the
 # `verified` tag. A green full run on main moves `verified`; a failed one files a ci-regression issue.
 on:
   push:
@@ -151,10 +151,10 @@ jobs:
               fi
             done
           } >> "$GITHUB_STEP_SUMMARY"
-          # Missed mutants (2) only advise; timeouts (3), a failing baseline (4) or any other error fail the shard.
           case "$status" in
-            0|2) ;;
-            3) echo "::error::Some mutants timed out; they are listed in the summary."; exit "$status" ;;
+            0) ;;
+            2) echo "::error::Some mutants survived; they are listed in the step summary."; exit "$status" ;;
+            3) echo "::error::Some mutants timed out; they are listed in the step summary."; exit "$status" ;;
             *) echo "::error::cargo mutants exited with $status, so this shard's results can't be trusted."; exit "$status" ;;
           esac
       - if: always() && steps.diff.outputs.rust == 'true'
@@ -258,12 +258,13 @@ jobs:
 
   verified:
     name: verified
-    needs: [start, ci, mutants, gnome-appimage]
+    needs: [start, ci, mutants, explore, gnome-appimage]
     if: >-
       github.ref == 'refs/heads/main' &&
       (inputs.scope || 'all') == 'all' &&
       needs.ci.result == 'success' &&
       needs.mutants.result == 'success' &&
+      needs.explore.result == 'success' &&
       needs.gnome-appimage.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5

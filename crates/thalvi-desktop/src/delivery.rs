@@ -499,6 +499,11 @@ mod tests {
             let (finished, seen) = finish(FakeHost::default(), accepted(route, text)).await;
             let finished = finished.unwrap();
             assert!(finished.delivered, "{route:?} {text}");
+            assert_eq!(
+                finished.text_delivery,
+                Some(Delivered::InWindow),
+                "{route:?}"
+            );
             assert_eq!(finished.notice, "Delivered.", "{route:?} {text}");
             assert_eq!(
                 seen,
@@ -571,6 +576,11 @@ mod tests {
             .await;
             let finished = finished.unwrap();
             assert!(finished.delivered, "{route:?}");
+            assert_eq!(
+                finished.text_delivery,
+                Some(Delivered::OnClipboard),
+                "{route:?}"
+            );
             assert_eq!(finished.notice, notice, "{route:?}");
             assert_eq!(
                 seen,
@@ -981,6 +991,7 @@ mod tests {
             route,
             text: "run it".to_owned(),
             waiting_for_quiet: false,
+            preview: None,
         };
         assert_eq!(
             submit_notice(&pending(CaptureRoute::Submit), "firefox").as_deref(),
@@ -1003,11 +1014,16 @@ mod tests {
         assert_eq!(bound.window().as_deref(), Some("firefox"));
         let failed = Bound::<FakeWindow>(Err(HostError::Unsupported(String::new())));
         assert_eq!(failed.window(), None);
-        for (host, expected) in [
-            (FakeHost::default(), Some(WindowApp::new("firefox", ""))),
-            (FakeHost::default().clipboard_only(), None),
+        for (host, copies_only, expected) in [
+            (
+                FakeHost::default(),
+                false,
+                Some(WindowApp::new("firefox", "")),
+            ),
+            (FakeHost::default().clipboard_only(), true, None),
         ] {
             let delivery = Delivery::new(host);
+            assert_eq!(delivery.copies_only(), copies_only);
             assert_eq!(delivery.writing_target(&bound), expected);
             assert_eq!(delivery.writing_target(&failed), None);
         }

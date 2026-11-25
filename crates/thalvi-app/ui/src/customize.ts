@@ -240,6 +240,7 @@ export function customize(context: PageContext): HTMLElement[] {
         () => {
           entry.last = wanted;
           entry.shown = wanted;
+          if (entry.swatch !== null && typeof wanted === "string") entry.swatch.style.backgroundColor = wanted;
         },
         (error: unknown) => {
           showValue(entry, entry.last);

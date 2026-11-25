@@ -51,8 +51,11 @@ The UI is rebuilt only when a source is newer than the last build: Tauri embeds
 
 The binary loads `libwebgpu_dawn.so` from its own folder (rpath `$ORIGIN`);
 `app-start` and `ctl` bind every `.so` beside it into the sandbox, and without it
-the app exits 127 at once. A warm target builds in about a minute. Evidence and binaries live under
-`/var/tmp/thalvi-rig/` (`THALVI_RIG_BASE` changes it); never commit them.
+the app exits 127 at once. A warm target builds in about a minute. Evidence lives under each run's `out/`
+and binaries under `/var/tmp/thalvi-rig/bin/` (`THALVI_RIG_BASE` changes the
+base). `up` removes runs older than 24 h whose compositor and app have stopped, and
+bin folders no run names that nothing read or changed for 24 h, so copy evidence
+you must keep elsewhere; never commit any of it.
 
 ## Launch
 
@@ -75,14 +78,19 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   downloads that model's files at start; add `--env HTTPS_PROXY=http://127.0.0.1:1`
   unless the download is the point. Add `"recordings":{"metrics":true,"text":true,"audio":false}`
   for the evidence below.
-- Copy model files read-only from a cache into `$R/home/.local/share/thalvi/models/`
-  to skip downloads (the app accepts a cached file by its pinned size, without
-  rehashing it). A start with the default wake word needs `melspectrogram.onnx`,
+- Seed the read-only cache once from the developer's `~/.local/share/thalvi/models/`
+  or a download: `install -D -m 444 -t $BASE/models FILE...` (`$BASE` is
+  `THALVI_RIG_BASE` or `/var/tmp/thalvi-rig`). Then pass the same files to
+  `up --models ...`: the default wake word needs `melspectrogram.onnx`,
   `embedding_model.onnx`, `hey_thalvi_v0.0.14.onnx` and the ending spotter's four
   `kws_gigaspeech_3m.*` files (about 9 MB together); on-device Nemotron adds
-  `nemotron_160ms.*`, and another chosen wake word its own head. A missing
-  ending spotter downloads from modelscope.cn, which can be slow enough to fail;
-  the app then says so and keeps working.
+  `nemotron_160ms.*`, and another chosen wake word its own head. `up` hardlinks
+  each named file or `NAME.*` into `$R/home/.local/share/thalvi/models/` and
+  stops if one is missing; deleting `$R/home/.local/share/thalvi` or the app
+  replacing a damaged file leaves the cache intact. The app accepts a cached file
+  by its pinned size, without rehashing it. A missing ending spotter downloads
+  from modelscope.cn, which can be slow enough to fail; the app then says so and
+  keeps working.
 - App output is `$R/out/app-<tag>.log`, every line stamped with its arrival time.
   The app's own state: `$H ctl $R status`.
 
@@ -209,7 +217,7 @@ only loopback, so nothing leaves the machine and abstract unix sockets are the r
 - A trace shows no AF_INET `connect` when nothing tried to leave the machine; a refused
   attempt still appears there (`ENETUNREACH`). Run an app with an unreachable
   speech server first as a control that the trace sees what it should.
-- Copy the model files (Launch lists them) in first. With
+- Pass the model files with `up --models ...` (Launch lists them) first. With
   `recordings` on in the config (`metrics`, `text`), `$R/home/.local/share/thalvi/recordings/` holds
   what the recognizer heard and how each capture ended.
 - Say the wake phrase (or `ctl hold-start`), then wait until the capture is ready before
@@ -417,6 +425,10 @@ $H ctl $R quit     # the app quits as the tray's Quit does; the next two make su
 $H app-stop $R     # the app only
 $H down $R         # app and compositors; $R/out stays
 ```
+
+Once a run is older than 24 h and its compositor and app have stopped, the next
+`up` removes it (Build the commit says the same for `bin/`), so keep anything you
+must retain outside the base.
 
 Before teardown, save the nonempty `app.pid` and `compositor.pid` values in
 your evidence; the helper clears these files when it stops them. Afterwards,
