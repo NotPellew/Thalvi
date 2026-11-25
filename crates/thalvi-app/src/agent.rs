@@ -196,6 +196,8 @@ impl Switch {
 pub trait Running {
     fn status(&self) -> watch::Receiver<Status>;
     fn audio(&self) -> watch::Receiver<AudioStatus>;
+    /// Whether the next dictation waits for the engine a saved change rebuilds.
+    fn rebuilding(&self) -> watch::Receiver<bool>;
     /// The latest failure shown, which `copy-error` can report.
     fn last_error(&self) -> Option<Failure>;
     fn control(&self, control: Control);
@@ -393,8 +395,14 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
     }
     match &*status.borrow() {
         Status::Paused => "paused",
-        Status::Listening | Status::Done { .. } => "listening",
-        Status::KeyboardOnly => "keyboard",
+        Status::Listening
+        | Status::Done {
+            wake_words: true, ..
+        } => "listening",
+        Status::KeyboardOnly
+        | Status::Done {
+            wake_words: false, ..
+        } => "keyboard",
         Status::Starting { loading: true, .. } | Status::Loading { .. } => "loading",
         Status::Starting { .. } | Status::Capturing { .. } => "capturing",
         Status::Pending { .. } => "pending",
@@ -445,7 +453,7 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
 }
 
 /// The recognizer that handles the next dictation, and whether it can, as the Recognition page says.
-fn recognizer(config: &DesktopConfig, phase: &str) -> Value {
+fn recognizer(config: &DesktopConfig, phase: &str, rebuilding: bool) -> Value {
     let entry = config.stt.entries.active_live();
     let (kind, model) = match &entry.kind {
         LiveKind::Realtime(_) => ("realtime", None),
@@ -456,6 +464,7 @@ fn recognizer(config: &DesktopConfig, phase: &str) -> Value {
     };
     let ready = match phase {
         "paused" | "loading" | "failed" => phase,
+        _ if rebuilding => "loading",
         _ => "ready",
     };
     let mut recognizer = json!({"name": entry.name, "kind": kind, "status": ready});
@@ -476,7 +485,7 @@ fn state(running: &impl Running) -> String {
         "copy_error": running.last_error().is_some(),
         "feeding": *running.feeding().borrow(),
         "overlay": {"state": overlay_word(&status.borrow(), running.overlay_on())},
-        "recognizer": recognizer(&config, phase),
+        "recognizer": recognizer(&config, phase, *running.rebuilding().borrow()),
     });
     match &*status.borrow() {
         Status::Failed {
@@ -561,13 +570,26 @@ fn no_effect(running: &impl Running, why: &str) -> String {
     )
 }
 
-async fn pause(running: &impl Running, wait: Duration) -> String {
+/// Waits until the audio flag says whether listening is paused and, on resume, until the status
+/// has left Paused, so a reply never reports a state that lags the change it confirms. A pause
+/// waits for the flag alone: a model still loading keeps the status at Loading.
+async fn paused_is(running: &impl Running, wait: Duration, paused: bool) -> bool {
     let mut audio = running.audio();
-    if audio.borrow().paused {
+    let mut status = running.status();
+    reached(&mut audio, wait, |audio| audio.paused == paused).await
+        && (paused
+            || reached(&mut status, wait, |status| {
+                !matches!(status, Status::Paused)
+            })
+            .await)
+}
+
+async fn pause(running: &impl Running, wait: Duration) -> String {
+    if running.audio().borrow().paused {
         return no_effect(running, "Thalvi is already paused.");
     }
     running.control(Control::SetListening(false));
-    if reached(&mut audio, wait, |audio| audio.paused).await {
+    if paused_is(running, wait, true).await {
         took_effect(running)
     } else {
         no_effect(running, "Thalvi did not pause.")
@@ -575,12 +597,11 @@ async fn pause(running: &impl Running, wait: Duration) -> String {
 }
 
 async fn resume(running: &impl Running, wait: Duration) -> String {
-    let mut audio = running.audio();
-    if !audio.borrow().paused {
+    if !running.audio().borrow().paused {
         return no_effect(running, "Thalvi is already listening.");
     }
     running.control(Control::SetListening(true));
-    if reached(&mut audio, wait, |audio| !audio.paused).await {
+    if paused_is(running, wait, false).await {
         took_effect(running)
     } else {
         no_effect(running, "Thalvi did not resume.")
@@ -588,10 +609,9 @@ async fn resume(running: &impl Running, wait: Duration) -> String {
 }
 
 async fn toggle(running: &impl Running, wait: Duration) -> String {
-    let mut audio = running.audio();
-    let was = audio.borrow().paused;
+    let was = running.audio().borrow().paused;
     running.control(Control::ToggleListening);
-    if reached(&mut audio, wait, |audio| audio.paused != was).await {
+    if paused_is(running, wait, !was).await {
         took_effect(running)
     } else {
         no_effect(
@@ -641,7 +661,6 @@ async fn hold_start(running: &impl Running, kind: HoldKind, wait: Duration) -> S
     let mut status = running.status();
     let refusal = match &*status.borrow() {
         Status::Paused => Some("Thalvi is paused. Resume it first."),
-        Status::Loading { .. } => Some("Thalvi is still starting. Try again in a moment."),
         current if capturing(current) => Some("A capture is already running."),
         Status::Working { .. } => Some("The last text is still being delivered."),
         _ => None,
@@ -652,11 +671,22 @@ async fn hold_start(running: &impl Running, kind: HoldKind, wait: Duration) -> S
     if let Some(refusal) = refusal {
         return no_effect(running, refusal);
     }
-    if reached(&mut status, wait, |status| {
-        capturing(status) || matches!(status, Status::Working { .. })
+    // While Thalvi loads, only the engine knows whether it takes the press: it starts the capture
+    // or refuses the press, which fails the status.
+    let started = tokio::time::timeout(wait, async {
+        while status.changed().await.is_ok() {
+            let current = status.borrow_and_update();
+            if capturing(&current) || matches!(*current, Status::Working { .. }) {
+                return true;
+            }
+            if matches!(*current, Status::Failed { .. }) {
+                return false;
+            }
+        }
+        false
     })
-    .await
-    {
+    .await;
+    if started == Ok(true) {
         took_effect(running)
     } else {
         no_effect(running, "Thalvi did not start a capture.")
@@ -927,6 +957,7 @@ mod tests {
     struct Fake {
         status: watch::Sender<Status>,
         audio: watch::Sender<AudioStatus>,
+        rebuilding: watch::Sender<bool>,
         saves: SyncedConfig,
         /// A Settings save that lands just before the agent's next save.
         settings_save_first: Mutex<Option<Value>>,
@@ -948,6 +979,8 @@ mod tests {
         overlay: AtomicBool,
         copy_refused: AtomicBool,
         ignoring: AtomicBool,
+        /// Whether the engine takes a press while Thalvi is loading, rather than refusing it.
+        loading_takes_press: AtomicBool,
         keys: HoldInput,
         presses: Mutex<Presses>,
         folder: PathBuf,
@@ -980,6 +1013,7 @@ mod tests {
                 switches: Mutex::new(Vec::new()),
                 shown: AtomicUsize::new(0),
                 pages: Mutex::new(Vec::new()),
+                rebuilding: watch::channel(false).0,
                 feeding: watch::channel(false).0,
                 fed: Mutex::new(Vec::new()),
                 feed_release: Mutex::new(None),
@@ -990,6 +1024,7 @@ mod tests {
                 overlay: AtomicBool::new(true),
                 copy_refused: AtomicBool::new(false),
                 ignoring: AtomicBool::new(false),
+                loading_takes_press: AtomicBool::new(false),
                 keys,
                 presses: Mutex::new(Presses::new(state)),
                 folder,
@@ -1031,6 +1066,10 @@ mod tests {
 
         fn audio(&self) -> watch::Receiver<AudioStatus> {
             self.audio.subscribe()
+        }
+
+        fn rebuilding(&self) -> watch::Receiver<bool> {
+            self.rebuilding.subscribe()
         }
 
         fn last_error(&self) -> Option<Failure> {
@@ -1076,6 +1115,20 @@ mod tests {
                     committed: String::new(),
                     partial: None,
                     notice: None,
+                }),
+                (true, Status::Loading { .. })
+                    if self.loading_takes_press.load(Ordering::SeqCst) =>
+                {
+                    self.set_status(Status::Starting {
+                        target: Some("kitty".to_owned()),
+                        loading: true,
+                    });
+                }
+                (true, Status::Loading { .. }) => self.set_status(Status::Failed {
+                    notice: "The microphone is closed.".to_owned(),
+                    headline: "Microphone closed",
+                    causes: Vec::new(),
+                    kind: FailureKind::Other,
                 }),
                 (false, Status::Capturing { .. }) => self.set_status(Status::Working {
                     target: None,
@@ -1863,6 +1916,90 @@ mod tests {
         assert_eq!(rig.fake.shown.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_pause_while_a_model_loads_took_effect_once_listening_is_off() {
+        let fake = Fake::new("pause-loading", "{}");
+        fake.set_status(Status::Loading {
+            notice: String::new(),
+            downloading: false,
+        });
+        fake.ignoring.store(true, Ordering::SeqCst);
+        let reply = tokio::spawn({
+            let fake = Arc::clone(&fake);
+            async move { answer(&fake, Duration::from_secs(5), &Request::Pause.line()).await }
+        });
+
+        while !fake
+            .sent()
+            .contains(&format!("{:?}", Control::SetListening(false)))
+        {
+            tokio::task::yield_now().await;
+        }
+        fake.audio.send_modify(|audio| audio.paused = true);
+
+        let reply: Value = serde_json::from_str(&reply.await.unwrap()).unwrap();
+        assert_eq!(
+            reply,
+            json!({"ok": true, "took_effect": true, "state": "loading"})
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_reports_the_state_listening_has_once_the_status_has_left_paused() {
+        let fake = Fake::new("resume-lag", "{}");
+        fake.pause_audio(true);
+        fake.ignoring.store(true, Ordering::SeqCst);
+        let reply = tokio::spawn({
+            let fake = Arc::clone(&fake);
+            async move { answer(&fake, Duration::from_secs(5), &Request::Resume.line()).await }
+        });
+
+        while !fake
+            .sent()
+            .contains(&format!("{:?}", Control::SetListening(true)))
+        {
+            tokio::task::yield_now().await;
+        }
+        // The microphone reopens before the status is published.
+        fake.audio.send_modify(|audio| audio.paused = false);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!reply.is_finished(), "the reply waits for the status");
+        fake.set_status(Status::Listening);
+
+        let reply: Value = serde_json::from_str(&reply.await.unwrap()).unwrap();
+        assert_eq!(
+            reply,
+            json!({"ok": true, "took_effect": true, "state": "listening"})
+        );
+    }
+
+    #[test]
+    fn a_hold_while_loading_is_answered_by_what_the_engine_did_with_the_press() {
+        for (takes_press, expected) in [
+            (
+                true,
+                json!({"ok": true, "took_effect": true, "state": "loading"}),
+            ),
+            (
+                false,
+                json!({"ok": false, "took_effect": false, "state": "failed",
+                    "error": "Thalvi did not start a capture."}),
+            ),
+        ] {
+            let rig = Rig::new("hold-loading", "{}");
+            rig.fake.set_status(Status::Loading {
+                notice: String::new(),
+                downloading: false,
+            });
+            rig.fake
+                .loading_takes_press
+                .store(takes_press, Ordering::SeqCst);
+            assert_eq!(rig.ask(&Request::HoldStart), expected, "{takes_press}");
+        }
+    }
+
     #[test]
     fn writing_controls_use_the_write_key_and_writing_can_be_cancelled() {
         let rig = Rig::new("write-control", "{}");
@@ -1992,8 +2129,20 @@ mod tests {
                     target: Some("kitty".to_owned()),
                     route: CaptureRoute::Paste,
                     notice: "Pasted into kitty.".to_owned(),
+                    wake_words: true,
                 },
                 "listening",
+                "delivered",
+                "ready",
+            ),
+            (
+                Status::Done {
+                    target: Some("kitty".to_owned()),
+                    route: CaptureRoute::Paste,
+                    notice: "Pasted into kitty.".to_owned(),
+                    wake_words: false,
+                },
+                "keyboard",
                 "delivered",
                 "ready",
             ),
@@ -2025,6 +2174,32 @@ mod tests {
                 "loading",
             ),
         ]
+    }
+
+    #[test]
+    fn a_queued_rebuild_makes_the_next_recognizer_loading_while_the_capture_runs() {
+        let rig = Rig::new(
+            "queued",
+            &format!(
+                r#"{{"stt": {{"entries": [{}]}}}}"#,
+                entry("live", "realtime", true, None)
+            ),
+        );
+        rig.fake.set_status(capturing_status());
+        let both = |rig: &Rig| {
+            let state = rig.ask(&Request::State);
+            (
+                state["state"].clone(),
+                state["recognizer"]["status"].clone(),
+            )
+        };
+        assert_eq!(both(&rig), (json!("capturing"), json!("ready")));
+
+        rig.fake.rebuilding.send_replace(true);
+        assert_eq!(both(&rig), (json!("capturing"), json!("loading")));
+
+        rig.fake.rebuilding.send_replace(false);
+        assert_eq!(both(&rig), (json!("capturing"), json!("ready")));
     }
 
     #[test]
@@ -2796,6 +2971,7 @@ mod tests {
                 target: Some("kitty".to_owned()),
                 route: CaptureRoute::Paste,
                 notice: "Pasted into kitty.".to_owned(),
+                wake_words: true,
             },
             Status::Failed {
                 notice: "Nothing was delivered. Clipboard recovery failed: No clipboard. Your text follows:\nmy password is hunter2".to_owned(),

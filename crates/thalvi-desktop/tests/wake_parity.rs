@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use thalvi_desktop::engine::WakeDetector;
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::models::{Asset, ModelKind, ModelStore};
 use thalvi_desktop::wake::{WakeConfig, WakeEngine, WakeEvent, WakeFrame};
@@ -96,7 +97,7 @@ fn run(engine: &mut WakeEngine, frames: &[Frame], reset_before: &[usize]) -> Vec
         .enumerate()
         .map(|(index, frame)| {
             if reset_before.contains(&index) {
-                engine.reset();
+                WakeDetector::reset(engine);
             }
             engine.process(frame).expect("frame scores")
         })

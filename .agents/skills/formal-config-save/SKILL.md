@@ -168,6 +168,22 @@ publishes `Status::Loading` on the status watch; it writes neither `desktop.json
 `AppState::config` and takes no save lock, while `SyncedConfig::set` (`Apply`) and `Control::Apply`
 (`Send`) keep their exact order under the save lock, so the model and its three invariants are unchanged.
 
+Publishing a queued rebuild (#677) adds `commands::get_rebuilding`, `Running::rebuilding` and an
+event in `follow_engine`; they only read the publisher's watch, so no write, lock or order changes
+and the model is unchanged.
+
+Pause, resume and toggle replies in `agent.rs` (#668) now wait for the status as well as the audio flag
+before answering. They only read watch channels; no writer, lock or `settings_set` change, so the model
+and its three invariants are unchanged.
+
+A hold request in `agent.rs` (#672) now waits for the engine's answer to the press rather than refusing
+up front while Loading. It reads the status only and changes nothing `settings_set` covers.
+
+Cancelling command downloads on quit (#671) adds `ActiveDownloads` to `AppState` in `app.rs`, wraps
+`commands::download_wake`, `download_speech`, and `download_chat` in `commands.rs` with it, and
+signals/waits on it in `app::quit`. None of it writes `desktop.json` or `AppState::config` or takes
+the save lock, so the model and its three invariants are unchanged.
+
 | Code | Model action and boundary |
 | --- | --- |
 | `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window), `settings_patch` | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: `settings_patch` merges the window's patch (only what the user changed) over the config read under the lock, with `settings::merged`, which `plan_over` uses too; the Settings save sets its field (the look) and carries the others over. This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |
@@ -322,6 +338,9 @@ Read the diff: only writer `L` now snapshots before locking, so add
 refresh the source hash. The check must fail `EachFieldKeepsItsLastSave`.
 Restore the scratch files and confirm the faithful check passes. Removing the
 temporary-file cleanup alone is not a failing recipe with serialized writers.
+
+`agent.rs` changed only in `phase` and its tests, to report a delivered status as `keyboard` when wake
+words are off; no covered function changed, so the model is unchanged and only the hash moved.
 
 ## Scope
 

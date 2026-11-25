@@ -224,6 +224,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
     onLevel: (listener) => levelListeners.push(listener),
     getAudio: () => Promise.resolve(structuredClone(audioState)),
     onAudio: (listener) => audioListeners.push(listener),
+    getRebuilding: () => Promise.resolve(false),
+    onRebuilding: () => undefined,
     onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
     // Generated from what the desktop resolves; a Rust test keeps it in step.

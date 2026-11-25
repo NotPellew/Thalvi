@@ -34,6 +34,12 @@ export function tauriBackend(): Backend {
         listener(event.payload);
       });
     },
+    getRebuilding: () => invoke<boolean>("get_rebuilding"),
+    onRebuilding: (listener) => {
+      void listen<boolean>("thalvi://rebuilding", (event) => {
+        listener(event.payload);
+      });
+    },
     onSettingsChangedElsewhere: (listener) => {
       void listen("thalvi://settings-elsewhere", () => {
         listener();

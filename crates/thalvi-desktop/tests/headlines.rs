@@ -99,7 +99,7 @@ fn recognition() -> Cases {
                 kind: ModelKind::Speech,
                 file: "f".to_owned(),
                 failure: DownloadFailure::Timeout,
-                source: download(),
+                source: std::sync::Arc::new(download()),
             })),
             "Download timed out",
         ),
@@ -281,7 +281,7 @@ fn everything_else() -> Cases {
                 kind: ModelKind::Wake,
                 file: "f".to_owned(),
                 dir: "/tmp".into(),
-                source: std::io::Error::other("full"),
+                source: std::sync::Arc::new(std::io::Error::other("full")),
             }),
             "Can't save the model file",
         ),
@@ -347,7 +347,7 @@ fn each_download_failure_has_its_own_headline_that_fits_the_overlay() {
             kind: ModelKind::Speech,
             file: "f".to_owned(),
             failure,
-            source: download(),
+            source: std::sync::Arc::new(download()),
         }
         .headline();
         assert_eq!(headline, expected);

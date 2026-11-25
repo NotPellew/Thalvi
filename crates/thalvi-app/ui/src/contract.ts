@@ -359,6 +359,9 @@ export interface Backend {
   onLevel(listener: (level: number) => void): void;
   getAudio(): Promise<AudioStatus>;
   onAudio(listener: (audio: AudioStatus) => void): void;
+  /** Whether a saved change rebuilds the engine and the next dictation waits for it, even while a capture runs on the old one. */
+  getRebuilding(): Promise<boolean>;
+  onRebuilding(listener: (rebuilding: boolean) => void): void;
   /** An agent changed the saved settings or a switch the window reads from the OS; the window's own saves never fire this. */
   onSettingsChangedElsewhere(listener: () => void): void;
   getSettings(): Promise<Settings>;
