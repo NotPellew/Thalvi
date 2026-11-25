@@ -4858,6 +4858,30 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hold_kept_through_the_silence_limit_reports_the_silence_and_keeps_its_text() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Final("Hello world")).await;
+            rig.feed_until(60_900, Kind::Quiet).await;
+            assert!(!task.is_finished());
+            rig.feed_until(61_100, Kind::Quiet).await;
+            let error = CaptureError::HeldSilence(Duration::from_secs(60));
+            assert_eq!(error.to_string(), "Stopped after 1 minute of silence.");
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Failed {
+                    error,
+                    recoverable_text: Some("Hello world".to_owned())
+                }
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_hold_with_no_speech_or_under_the_minimum_pastes_nothing_and_says_why() {
     // (recognizer ready, speech, release, what the user is told)
     type Case = (bool, Option<(u64, Say)>, u64, CaptureError);

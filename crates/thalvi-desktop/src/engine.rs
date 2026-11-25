@@ -316,6 +316,8 @@ pub enum CaptureError {
         idle: Duration,
         listener: EndingListener,
     },
+    #[error("Stopped after {} of silence.", plain_duration(*.0))]
+    HeldSilence(Duration),
     #[error("Capture stopped after {} without an ending.", plain_duration(*.0))]
     TooLong(Duration),
     #[error(transparent)]
@@ -339,6 +341,7 @@ impl UserError for CaptureError {
             Self::HoldTooShort => "Key released too soon",
             Self::NothingHeard | Self::NoWords(_) => "No words heard",
             Self::NoEnding { .. } => "No ending heard",
+            Self::HeldSilence(_) => "Stopped after silence",
             Self::TooLong(_) => "Capture too long — not delivered",
             Self::SubmitPreview(_) => "Submit needs review",
             Self::Full(_) => "Capture full — finish or cancel",
@@ -382,6 +385,7 @@ impl CaptureError {
             Self::HoldTooShort => "hold_too_short",
             Self::NothingHeard => "hold_empty",
             Self::NoWords(_) | Self::NoEnding { .. } => "no_ending",
+            Self::HeldSilence(_) => "held_silence",
             Self::TooLong(_) => "too_long",
             Self::SubmitPreview(_) => "submit_preview",
             Self::Full(_) => "full",
@@ -775,10 +779,15 @@ struct QuietEnding {
 }
 
 impl<S: RecognizerSession> Live<S> {
+    /// Whether a dictation key opened this capture, so its release ends it.
+    fn is_hold(&self) -> bool {
+        !matches!(self.release, Release::Over)
+    }
+
     /// Whether a frame queued at `order` came after the key went up and is not the hold's to
     /// send.
     fn after_release(&self, order: Order) -> bool {
-        !matches!(self.release, Release::Over)
+        self.is_hold()
             && self
                 .cutoff
                 .as_ref()
@@ -1197,12 +1206,20 @@ fn nothing_delivered(outcome: &CaptureOutcome) -> Option<&'static str> {
     }
 }
 
-/// The capture heard no new words for `idle`: words were heard but never their ending, or none at all.
-fn idle_error(idle: Duration, text: &CaptureSession, listener: EndingListener) -> CaptureError {
-    if recoverable(text).is_some() {
-        CaptureError::NoEnding { idle, listener }
-    } else {
+/// The capture heard no new words for `idle`: words were heard but never their ending, or none at
+/// all. A hold needs no spoken ending, so it only reports the silence.
+fn idle_error(
+    idle: Duration,
+    text: &CaptureSession,
+    listener: EndingListener,
+    hold: bool,
+) -> CaptureError {
+    if recoverable(text).is_none() {
         CaptureError::NoWords(idle)
+    } else if hold {
+        CaptureError::HeldSilence(idle)
+    } else {
+        CaptureError::NoEnding { idle, listener }
     }
 }
 
@@ -2171,6 +2188,7 @@ where
                     self.limits.idle(),
                     &live.text,
                     self.ending_listener,
+                    live.is_hold(),
                 ))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
                 Step::Tail => Some(if live.session.buffers_audio() {
@@ -2679,6 +2697,7 @@ where
                         limits.idle(),
                         &live.text,
                         self.ending_listener,
+                        live.is_hold(),
                     )));
                 }
                 () = tokio::time::sleep_until(live.started + limits.max()) => {
