@@ -78,11 +78,11 @@ def transition(event, actor, id_):
     }
 
 
-def run(id_, number, status="completed", event="pull_request_target"):
+def run(id_, number, status="completed", event="pull_request_target", head=HEAD, base="main"):
     return {
         "id": id_,
         "run_number": id_,
-        "display_title": f"Hold PR #{number}",
+        "display_title": f"Hold PR #{number} {head} into {base}",
         "head_branch": "main",
         "event": event,
         "status": status,
@@ -246,7 +246,10 @@ class HoldTest(unittest.TestCase):
 
     def set_open_prs(self):
         def record(number, body, source_repo):
-            return {"number": number, "body": body, "head": {"ref": "same", "repo": {"full_name": source_repo}}}
+            return {
+                "number": number, "body": body, "base": {"ref": "main"},
+                "head": {"sha": HEAD, "ref": "same", "repo": {"full_name": source_repo}},
+            }
         self.data[PULLS] = [[
             [record(23, "Closes #17", "fork/Thalvi")],
             [record(24, "Refs #17", REPO), record(123, "Closes #17", REPO)],
@@ -269,6 +272,7 @@ class HoldTest(unittest.TestCase):
         self.set_open_prs()
         self.data[PULLS][0] = self.data[PULLS][0][:1]
         self.data[RUNS] = [
+            [{"workflow_runs": [run(790, 23, head="c" * 40), run(789, 23, base="other")]}],
             [{"workflow_runs": [run(790, 23), run(791, 23, "in_progress")]}],
             [{"workflow_runs": [run(791, 23), run(792, 23)]}],
         ]

@@ -1,6 +1,7 @@
 name: Hold
 run-name: >-
-  ${{ github.event_name == 'pull_request_target' && format('Hold PR #{0}', github.event.pull_request.number)
+  ${{ github.event_name == 'pull_request_target' && format('Hold PR #{0} {1} into {2}', github.event.pull_request.number,
+      github.event.pull_request.head.sha, github.event.pull_request.base.ref)
       || format('Hold issue #{0}', github.event.issue.number) }}
 
 on:
