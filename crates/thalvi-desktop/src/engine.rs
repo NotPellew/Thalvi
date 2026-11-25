@@ -712,19 +712,6 @@ impl LivePreview {
     }
 }
 
-async fn wait_preview(preview: Option<&mut LivePreview>) -> Presentation {
-    match preview {
-        Some(preview) => {
-            if preview.watch.changed().await.is_ok() {
-                *preview.watch.borrow_and_update()
-            } else {
-                Presentation::Failed(PreviewError::Unavailable)
-            }
-        }
-        None => std::future::pending().await,
-    }
-}
-
 /// What the ending spotter did during one capture.
 #[derive(Default)]
 struct SpotStats {
@@ -781,6 +768,12 @@ enum Release {
     Over,
 }
 
+struct QuietEnding {
+    request: Option<CaptureRequest>,
+    without_ending: bool,
+    pause: Option<Duration>,
+}
+
 impl<S: RecognizerSession> Live<S> {
     /// Whether a frame queued at `order` came after the key went up and is not the hold's to
     /// send.
@@ -803,6 +796,25 @@ impl<S: RecognizerSession> Live<S> {
                 },
             ),
             _ => None,
+        }
+    }
+
+    fn take_quiet_ending(&mut self) -> QuietEnding {
+        let now = Instant::now();
+        let pause = self
+            .text
+            .quiet_since()
+            .map(|since| now.duration_since(since));
+        let without_ending = self.text.pending().is_some_and(|p| p.without_ending);
+        let ended = self.text.ready_at();
+        let request = self.text.poll_ready(now);
+        if request.is_some() {
+            self.capture_end = self.capture_end.or(ended);
+        }
+        QuietEnding {
+            request,
+            without_ending,
+            pause,
         }
     }
 }
@@ -1039,18 +1051,19 @@ fn settled(joined: Result<Answer, JoinError>) -> Option<Answer> {
 /// The next answer of an extra the merge did not wait for; never ready while none is running.
 async fn next_recorded(sets: &mut Vec<JoinSet<Answer>>) -> Answer {
     std::future::poll_fn(|cx| {
-        let mut at = 0;
-        while let Some(set) = sets.get_mut(at) {
-            match set.poll_join_next(cx) {
-                Poll::Ready(None) => {
-                    sets.swap_remove(at);
-                }
-                Poll::Ready(Some(joined)) => {
-                    if let Some(answer) = settled(joined) {
-                        return Poll::Ready(answer);
+        for at in 0..sets.len() {
+            while let Some(set) = sets.get_mut(at) {
+                match set.poll_join_next(cx) {
+                    Poll::Ready(None) => {
+                        sets.swap_remove(at);
                     }
+                    Poll::Ready(Some(joined)) => {
+                        if let Some(answer) = settled(joined) {
+                            return Poll::Ready(answer);
+                        }
+                    }
+                    Poll::Pending => break,
                 }
-                Poll::Pending => at += 1,
             }
         }
         Poll::Pending
@@ -1452,6 +1465,8 @@ where
         let metrics = self.recorder.kinds().metrics;
         let mut key_open = true;
         loop {
+            // The biased key branch is polled first; spending budget lets frames and timers run even if it stays ready.
+            tokio::task::consume_budget().await;
             let frame = tokio::select! {
                 biased;
                 changed = self.key.changed(), if key_open => {
@@ -2089,6 +2104,8 @@ where
         }
         let mut key_open = true;
         loop {
+            // The biased branches are polled in order; spending budget lets the later ones and the timers run even if one stays ready.
+            tokio::task::consume_budget().await;
             let limit = if live.text.pending().is_some() {
                 MIC_WATCHDOG
             } else {
@@ -2099,17 +2116,19 @@ where
             let watchdog =
                 (!waiting_on_live_upload && live.cues.is_empty()).then(|| live.last_audio + limit);
             let tail = live.tail();
-            let preview_waiting = live
-                .submit_preview
-                .as_ref()
-                .is_some_and(LivePreview::waiting);
             let preview_deadline = live.submit_preview.as_ref().and_then(LivePreview::deadline);
-            let quiet_at = (!preview_waiting).then(|| live.text.ready_at()).flatten();
+            let quiet_at = live.text.ready_at().filter(|_| preview_deadline.is_none());
+            let preview_watch = live.submit_preview.as_mut().map(|p| &mut p.watch);
             let step = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => Step::Cancel,
                 changed = self.key.changed(), if key_open => Step::Key(changed.is_ok()),
-                preview = wait_preview(live.submit_preview.as_mut()) => Step::Preview(preview),
+                // Inline, so the branch is ready only when the overlay reports a change.
+                preview = async move {
+                    let Some(watch) = preview_watch else { return std::future::pending().await };
+                    let unavailable = Presentation::Failed(PreviewError::Unavailable);
+                    watch.changed().await.map_or(unavailable, |()| *watch.borrow_and_update())
+                } => Step::Preview(preview),
                 event = live.session.next_event() => Step::Event(event),
                 frame = frames.next() => Step::Frame(frame),
                 answer = next_recorded(&mut self.recorded_only) => Step::Recorded(answer),
@@ -2139,7 +2158,10 @@ where
                     self.record_late(answer);
                     None
                 }
-                Step::Quiet => self.on_quiet(live),
+                Step::Quiet => match Self::quiet_allowed(live) {
+                    Ok(()) => self.on_quiet(live.take_quiet_ending()),
+                    Err(held) => held,
+                },
                 Step::Disputed => {
                     self.on_disputed(live);
                     None
@@ -2391,7 +2413,7 @@ where
                 };
                 if pending.route == CaptureRoute::Submit && !settled && self.number_rules.as_digits
                 {
-                    pending.text = self.text_with_numbers(pending.route, &pending.text);
+                    pending.text = self.text_with_numbers(&pending.text);
                     if let Some(stored) = live.text.pending_mut() {
                         stored.text.clone_from(&pending.text);
                     }
@@ -2416,32 +2438,30 @@ where
         None
     }
 
-    fn on_quiet(&self, live: &mut Live<R::Session>) -> Option<Done> {
-        if let Some(preview) = &live.submit_preview {
-            match *preview.watch.borrow() {
-                Presentation::Shown => {}
-                Presentation::Waiting => return None,
-                Presentation::Failed(error) => return Some(Done::Failed(error.into())),
-            }
+    /// Whether a quiet ending may be taken: a waiting Submit preview holds it (`Err(None)`), and
+    /// a failed one ends the capture instead.
+    fn quiet_allowed(live: &Live<R::Session>) -> Result<(), Option<Done>> {
+        match live
+            .submit_preview
+            .as_ref()
+            .map(|preview| *preview.watch.borrow())
+        {
+            None | Some(Presentation::Shown) => Ok(()),
+            Some(Presentation::Waiting) => Err(None),
+            Some(Presentation::Failed(error)) => Err(Some(Done::Failed(error.into()))),
         }
-        let now = Instant::now();
-        let since = live.text.quiet_since();
-        let without_ending = live.text.pending().is_some_and(|p| p.without_ending);
-        let ended = live.text.ready_at();
-        let request = live.text.poll_ready(now)?;
-        live.capture_end = live.capture_end.or(ended);
-        self.ending_state(if without_ending {
+    }
+
+    fn on_quiet(&self, ending: QuietEnding) -> Option<Done> {
+        let request = ending.request?;
+        self.ending_state(if ending.without_ending {
             "accepted_without_ending"
         } else {
             "accepted"
         });
-        if let Some(since) = since {
-            self.recorder.metric(
-                Event::EndingPause,
-                "ok",
-                Some(now.duration_since(since)),
-                Value::Null,
-            );
+        if let Some(pause) = ending.pause {
+            self.recorder
+                .metric(Event::EndingPause, "ok", Some(pause), Value::Null);
         }
         Some(Done::Accepted(request))
     }
@@ -3381,7 +3401,7 @@ where
     fn delivered_with_numbers(&self, request: &CaptureRequest) -> CaptureRequest {
         CaptureRequest {
             route: request.route,
-            text: self.text_with_numbers(request.route, &request.text),
+            text: self.text_with_numbers(&request.text),
         }
     }
 
@@ -3393,10 +3413,8 @@ where
                 && self.submit_confirmation == SubmitConfirmation::Settled)
     }
 
-    fn text_with_numbers(&self, route: CaptureRoute, text: &str) -> String {
-        if !self.number_rules.as_digits || route == CaptureRoute::Task {
-            return text.to_owned();
-        }
+    /// `text` with its number words as digits; callers only pass formatted routes with digits on.
+    fn text_with_numbers(&self, text: &str) -> String {
         let formatted = numbers::format(text, self.language, &self.number_rules.words);
         if formatted.rewritten > 0 {
             self.recorder.metric(
@@ -3765,14 +3783,19 @@ where
         // An extra can hear the spoken ending twice ("Yes. Submit. Submit."); every trailing copy is the ending.
         loop {
             let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
-            match parser.on_final(&text, Instant::now(), false) {
-                Ok(FinalStep::Armed(pending))
-                    if pending.route == route && pending.text.len() < text.len() =>
-                {
-                    text = pending.text;
-                }
-                _ => break,
+            let Ok(FinalStep::Armed(PendingEnding {
+                route: ending_route,
+                text: stripped,
+                without_ending: false,
+                ..
+            })) = parser.on_final(&text, Instant::now(), false)
+            else {
+                break;
+            };
+            if ending_route != route {
+                break;
             }
+            text = stripped;
         }
         if require_ending {
             if let Some(before) = text
@@ -3853,10 +3876,18 @@ mod tests {
         feed.send([2_000; FRAME_SAMPLES]);
         feed.fail(AudioError::Closed);
 
-        assert!(matches!(
-            engine.listen(&mut frames).await,
-            Ok(WakeTrigger::Capture)
-        ));
+        let heard = tokio::time::timeout(Duration::from_secs(10), engine.listen(&mut frames))
+            .await
+            .expect("the queued frame is scored even while the hold key is idle");
+        assert!(matches!(heard, Ok(WakeTrigger::Capture)));
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(10), engine.capture(&mut frames, None))
+                .await
+                .expect("the closed microphone ends the capture even though no input stays quiet");
+        assert!(
+            matches!(outcome, CaptureOutcome::Failed { .. }),
+            "{outcome:?}"
+        );
     }
 
     #[tokio::test]

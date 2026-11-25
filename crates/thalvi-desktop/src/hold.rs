@@ -1365,16 +1365,26 @@ mod tests {
 
     #[test]
     fn the_modifier_release_ends_the_hold_even_while_windows_still_reports_the_modifier_down() {
-        let mut hook = HoldHook::new(HoldKey::alt_z());
-        let alt = |vk| vk == ALT;
-        let _ = hook.on_event(event(ALT, true), alt);
-        let _ = hook.on_event(event(Z, true), alt);
-        assert_eq!(hook.on_event(event(Z, false), alt), SWALLOW);
-        // Windows has not yet cleared the Alt this very event releases.
-        assert_eq!(
-            hook.on_event(event(ALT, false), alt),
-            decision(Verdict::Mask, Some(false))
-        );
+        for (key, modifier) in [("Alt+KeyZ", ALT), ("Win+KeyZ", RIGHT_WIN)] {
+            let mut hook = HoldHook::new(HoldKey::parse(key).unwrap());
+            let keyboard = |vk| vk == modifier;
+            assert_eq!(
+                hook.on_event(event(modifier, true), keyboard),
+                PASS,
+                "{key}"
+            );
+            assert_eq!(
+                hook.on_event(event(Z, true), keyboard),
+                decision(Verdict::Swallow, Some(true)),
+                "{key}"
+            );
+            assert_eq!(hook.on_event(event(Z, false), keyboard), SWALLOW, "{key}");
+            assert_eq!(
+                hook.on_event(event(modifier, false), keyboard),
+                decision(Verdict::Mask, Some(false)),
+                "{key}"
+            );
+        }
     }
 
     #[test]
@@ -1634,6 +1644,19 @@ mod tests {
         assert_eq!(presses.take_lost(), 0, "nothing was passed over yet");
         assert!(presses.take().is_none());
         assert_eq!(presses.take_lost(), 1, "the tap is counted once");
+    }
+
+    #[test]
+    fn a_refused_press_explains_why_in_one_line_for_the_overlay() {
+        for (refusal, headline) in [
+            (Refusal::Paused, "Paused — key ignored"),
+            (Refusal::MicrophoneClosed, "Microphone closed — key ignored"),
+            (Refusal::Delivering, "Delivering — key ignored"),
+            (Refusal::Capturing, "Dictating — key ignored"),
+            (Refusal::TooQuick, "Key released too quickly"),
+        ] {
+            assert_eq!(refusal.headline(), headline, "{refusal:?}");
+        }
     }
 
     proptest::proptest! {
