@@ -21,7 +21,7 @@ use thalvi_desktop::engine::{
     CaptureOutcome, CpalCuePlayer, CuePlayer, Engine, EngineHandle, EngineState, FrameSource,
     Parts, StreamingExtra, WakeDetector, WakeTrigger,
 };
-use thalvi_desktop::entries::LiveKind;
+use thalvi_desktop::entries::{Entries, FinalEntry, LiveEntry, LiveKind};
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
@@ -750,6 +750,15 @@ struct DesktopRig {
     whisper_helpers: PathBuf,
 }
 
+/// Live recognizers that need streaming construction before the engine starts.
+fn streaming_entries(entries: &Entries) -> Vec<&LiveEntry> {
+    match entries.final_pass() {
+        Some(FinalEntry::Live(entry)) if !matches!(entry.kind, LiveKind::OpenAi(_)) => vec![entry],
+        Some(_) => Vec::new(),
+        None => entries.streaming_extras().collect(),
+    }
+}
+
 impl Rig for DesktopRig {
     type Recognizer = Chosen;
     type Wake = WakeEngine;
@@ -800,16 +809,7 @@ impl Rig for DesktopRig {
             )
         };
         let entries = &config.stt.entries;
-        let streams: Vec<_> = match entries.final_pass() {
-            Some(thalvi_desktop::entries::FinalEntry::Live(entry))
-                if !matches!(entry.kind, LiveKind::OpenAi(_)) =>
-            {
-                vec![entry]
-            }
-            Some(_) => Vec::new(),
-            None => entries.streaming_extras().collect(),
-        };
-        let extras: Vec<_> = streams
+        let extras: Vec<_> = streaming_entries(entries)
             .into_iter()
             .map(|entry| StreamingExtra {
                 entry: entry.clone(),
@@ -1335,12 +1335,16 @@ impl<S: Rig> Runner<S> {
         if self.feed_only() && !*self.feeding.borrow() {
             self.end_unopened_feed();
         }
-        let listening = !self.paused
-            && self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.frames.is_some());
-        if !listening {
+        let feed_only = self.feed_only();
+        let (
+            false,
+            Some(Session {
+                engine,
+                frames: Some(frames),
+                ..
+            }),
+        ) = (self.paused, self.session.as_mut())
+        else {
             let retry = (!self.paused && self.session.is_some())
                 .then_some(self.reopen_failures)
                 .flatten()
@@ -1359,36 +1363,21 @@ impl<S: Rig> Runner<S> {
                     Flow::Continue
                 }
             };
-        }
-        let feed_only = self.feed_only();
+        };
         let woke = {
-            let Self {
-                session,
-                control,
-                feeding,
-                ..
-            } = &mut *self;
-            let mut file_ended = feeding.subscribe();
-            let Some(Session {
-                engine,
-                frames: Some(frames),
-                ..
-            }) = session.as_mut()
-            else {
-                return Flow::Continue;
-            };
+            let mut file_ended = self.feeding.subscribe();
             if feed_only {
                 // A ready wake is taken before the file ending; controls keep their turn over that ending.
                 tokio::select! {
                     biased;
                     trigger = engine.listen(frames) => Woke::Trigger(trigger),
-                    control = control.recv() => Woke::Control(control),
+                    control = self.control.recv() => Woke::Control(control),
                     _ = file_ended.changed() => Woke::FileEnded,
                 }
             } else {
                 tokio::select! {
                     trigger = engine.listen(frames) => Woke::Trigger(trigger),
-                    control = control.recv() => Woke::Control(control),
+                    control = self.control.recv() => Woke::Control(control),
                 }
             }
         };
@@ -2247,10 +2236,56 @@ mod tests {
     use crate::tray::title;
 
     #[test]
+    fn a_final_pass_only_builds_a_stream_for_a_streaming_recognizer() {
+        let extra = json!({
+            "kind": "realtime", "id": "extra", "name": "Extra",
+            "address": "ws://127.0.0.1:2", "model": "test", "extra": true
+        });
+        let cases = [
+            (Value::Null, vec!["extra"]),
+            (
+                json!({"kind": "on_device", "id": "final", "name": "Final"}),
+                vec!["final"],
+            ),
+            (
+                json!({"kind": "open_ai", "id": "final", "name": "Final",
+                       "address": "http://127.0.0.1:2/v1", "model": "test"}),
+                vec![],
+            ),
+            (
+                json!({"kind": "extra", "id": "final", "name": "Final",
+                       "address": "http://127.0.0.1:2/v1", "model": "test"}),
+                vec![],
+            ),
+        ];
+        for (mut final_pass, expected) in cases {
+            let mut entries = vec![
+                json!({"kind": "on_device", "id": "active", "name": "Active", "active": true}),
+                extra.clone(),
+            ];
+            if final_pass.is_object() {
+                final_pass["final_pass"] = json!(true);
+                entries.push(final_pass);
+            }
+            let config = DesktopConfig::from_json_str(
+                &json!({"stt": {"entries": entries, "merge": false}}).to_string(),
+            )
+            .unwrap();
+            let streaming: Vec<_> = streaming_entries(&config.stt.entries)
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect();
+            assert_eq!(streaming, expected);
+        }
+    }
+
+    #[test]
     fn stopped_is_not_reported_until_background_writes_finish() {
+        let (link, mut ends, stopped) = EngineLink::wire(&feed_config(), false);
         let (writing, started) = std_mpsc::channel();
         let (release, pending) = std_mpsc::channel();
-        let (stopped, status) = std_mpsc::channel();
+        let (quitting, quit) = std_mpsc::channel();
+        let (returned, status) = std_mpsc::channel();
         let closing = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
@@ -2262,9 +2297,17 @@ mod tests {
             finish_runtime(runtime, &stopped);
         });
         started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let caller = std::thread::spawn(move || {
+            quitting.send(()).unwrap();
+            link.quit();
+            returned.send(()).unwrap();
+        });
+        quit.recv_timeout(Duration::from_secs(5)).unwrap();
         let premature = status.recv_timeout(Duration::from_millis(100));
         release.send(()).unwrap();
         closing.join().unwrap();
+        caller.join().unwrap();
+        assert!(matches!(ends.control.try_recv(), Ok(Control::Quit)));
         assert!(
             matches!(premature, Err(std_mpsc::RecvTimeoutError::Timeout)),
             "quit acknowledged a pending write"
@@ -2277,6 +2320,7 @@ mod tests {
         let (out, mut status) = watch::channel(Status::Paused);
         let publisher = Publisher::new(out, EndingPauses::default());
         let cases = [
+            (Refusal::MicrophoneClosed, "Microphone closed — key ignored"),
             (Refusal::Paused, "Paused — key ignored"),
             (Refusal::Paused, "Paused — key ignored"),
             (Refusal::MicrophoneClosed, "Paused — key ignored"),
@@ -3016,6 +3060,9 @@ mod tests {
     fn desktop_only_settings_and_the_wake_switch_do_not_rebuild_the_engine() {
         let old = DesktopConfig::from_json_str("{}").unwrap();
         for (change, rebuilds) in [
+            ("{}", false),
+            // The runner reopens a newly chosen microphone itself.
+            (r#"{"microphone": "USB Mic"}"#, false),
             (r#"{"recordings": {"text": true}}"#, false),
             (r#"{"update_channel": "development"}"#, false),
             (r#"{"history": {"enabled": false}}"#, false),
@@ -3044,7 +3091,7 @@ mod tests {
             ),
         ] {
             let new = DesktopConfig::from_json_str(change).unwrap();
-            assert_eq!(!retunes_only(&old, &new), rebuilds, "{change}");
+            assert_eq!(needs_rebuild(&old, &new), rebuilds, "{change}");
         }
     }
 
@@ -3896,6 +3943,7 @@ mod tests {
             Box::pin(runner.handle(Control::HoldKeyFailed("Hyprland refused F9.".to_owned())))
                 .await;
             if show {
+                runner.open_microphone().await;
                 runner.show_hold_problem();
                 assert!(
                     matches!(&publisher.view().mode, Mode::Failed(f) if f.headline == "Hold key unavailable")
@@ -3929,6 +3977,13 @@ mod tests {
             causes: Vec::new(),
         });
         publisher.mode(other.clone());
+        Box::pin(runner.handle(Control::HoldKeyFailed("Hyprland refused F9.".to_owned()))).await;
+        runner.show_hold_problem();
+        assert_eq!(
+            publisher.view().mode,
+            other,
+            "a pending hold warning must wait while another failure is visible"
+        );
         Box::pin(runner.handle(Control::HoldKeyWorks)).await;
         assert_eq!(
             publisher.view().mode,
@@ -4198,22 +4253,91 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_native_input_reports_the_open_microphone_and_closes_it_on_pause() {
+        use std::io::Write;
+
+        const TEST: &str =
+            "runner::tests::the_native_input_reports_the_open_microphone_and_closes_it_on_pause";
+        const CHECKED: &str = "Checked the native input";
+        if std::env::var_os("THALVI_PRIVATE_ALSA_TEST").is_some() {
+            let microphone =
+                Microphone::new(InputGate::default(), None, Recorder::disabled().metrics());
+            assert_eq!(Input::active_name(&microphone), None);
+            let (mut microphone, frames) = Input::open(microphone).await.unwrap();
+            let _frames = frames.unwrap();
+            assert_eq!(
+                Input::active_name(&microphone),
+                Some("Default Audio Device")
+            );
+            Input::pause(&mut microphone);
+            assert_eq!(Input::active_name(&microphone), None);
+            assert!(!microphone.is_open());
+
+            Input::select(
+                &mut microphone,
+                Some("Thalvi test missing input".to_owned()),
+            );
+            let (_, frames) = Input::open(microphone).await.unwrap();
+            assert!(
+                frames.is_err(),
+                "the unavailable input must not open the default"
+            );
+            println!("{CHECKED}");
+            return;
+        }
+
+        // ALSA reads its configuration process-wide, so only the child gets a software input.
+        let config = std::env::temp_dir().join(format!("thalvi-alsa-{}.conf", std::process::id()));
+        std::fs::File::create_new(&config)
+            .unwrap()
+            .write_all(b"pcm.!default { type null }\n")
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env("ALSA_CONFIG_PATH", &config)
+                .env("THALVI_PRIVATE_ALSA_TEST", "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        std::fs::remove_file(config).unwrap();
+        let result = result.expect("the native input test finished").unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            result.status.success() && stdout.contains(CHECKED),
+            "{stdout}\n{stderr}"
+        );
+    }
+
     /// A microphone the test can leave missing, and the fakes the runner listens through.
     struct MicLab {
         opens: Rc<Cell<u32>>,
         missing: Rc<Cell<bool>>,
+        /// The open stream, so a test can fail the microphone under the runner.
+        feed: Rc<RefCell<Option<thalvi_desktop::engine::fakes::FrameFeed>>>,
         wake: RefCell<Option<thalvi_desktop::engine::fakes::FakeWake>>,
         recognizer: RefCell<Option<thalvi_desktop::recognizer::FakeRecognizer>>,
         cues: RefCell<Option<thalvi_desktop::engine::fakes::FakeCuePlayer>>,
+        local: Option<Arc<dyn Preload>>,
+        recorder: RefCell<Option<Recorder>>,
+        pause_on_rebuild: Option<mpsc::UnboundedSender<Control>>,
+        cancel_on_audio_error: Option<mpsc::UnboundedSender<Control>>,
     }
 
     struct LabMic {
         gate: InputGate,
         opens: Rc<Cell<u32>>,
         missing: Rc<Cell<bool>>,
-        opened: bool,
-        /// Holds the fake stream open; the test never sends room audio through it.
-        held: Option<thalvi_desktop::engine::fakes::FrameFeed>,
+        selected: Option<String>,
+        active: Option<String>,
+        /// Holds the fake stream open; no room audio goes through it.
+        feed: Rc<RefCell<Option<thalvi_desktop::engine::fakes::FrameFeed>>>,
+        cancel_on_audio_error: Option<mpsc::UnboundedSender<Control>>,
     }
 
     impl Rig for MicLab {
@@ -4229,47 +4353,74 @@ mod tests {
             _: &InputGate,
             _: &Arc<Publisher>,
         ) -> impl Future<Output = Result<Loaded<Self>, Failure>> {
-            let recognizer = self.recognizer.borrow_mut().take().unwrap();
-            let wake = self.wake.borrow_mut().take().unwrap();
-            let cues = self.cues.borrow_mut().take().unwrap();
+            use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeWake};
+            use thalvi_desktop::recognizer::FakeRecognizer;
+
+            let (recognizer, wake, cues) = if let Some(first) = self.recognizer.borrow_mut().take()
+            {
+                (
+                    first,
+                    self.wake.borrow_mut().take().unwrap(),
+                    self.cues.borrow_mut().take().unwrap(),
+                )
+            } else {
+                self.pause_on_rebuild
+                    .as_ref()
+                    .expect("unexpected rebuild")
+                    .send(Control::SetListening(false))
+                    .unwrap();
+                (
+                    FakeRecognizer::new().0,
+                    FakeWake::new().0,
+                    FakeCuePlayer::new().0,
+                )
+            };
             std::future::ready(Ok(Loaded {
                 recognizer,
                 wake,
                 cues,
-                recorder: Recorder::disabled(),
+                recorder: self
+                    .recorder
+                    .borrow_mut()
+                    .take()
+                    .unwrap_or_else(Recorder::disabled),
                 http: reqwest::Client::new(),
                 chat: None,
                 spotter: None,
                 spotter_off: None,
                 extras: Vec::new(),
-                local: None,
+                local: self.local.clone(),
                 extra_locals: Vec::new(),
             }))
         }
 
-        fn input(&self, gate: InputGate, _: Option<String>, _: Metrics) -> LabMic {
+        fn input(&self, gate: InputGate, selected: Option<String>, _: Metrics) -> LabMic {
             LabMic {
                 gate,
                 opens: Rc::clone(&self.opens),
                 missing: Rc::clone(&self.missing),
-                opened: false,
-                held: None,
+                selected,
+                active: None,
+                feed: Rc::clone(&self.feed),
+                cancel_on_audio_error: self.cancel_on_audio_error.clone(),
             }
         }
     }
 
     impl Input for LabMic {
-        type Frames = thalvi_desktop::engine::fakes::FakeFrames;
+        type Frames = LabFrames;
 
         fn active_name(&self) -> Option<&str> {
-            self.opened.then_some("Test microphone")
+            self.active.as_deref()
         }
 
-        fn select(&mut self, _: Option<String>) {}
+        fn select(&mut self, selected: Option<String>) {
+            self.selected = selected;
+        }
 
         fn pause(&mut self) {
-            self.opened = false;
-            self.held = None;
+            self.active = None;
+            *self.feed.borrow_mut() = None;
         }
 
         fn open(
@@ -4286,24 +4437,49 @@ mod tests {
     }
 
     impl LabMic {
-        fn open_stream(mut self) -> (Self, Result<FakeFramesSlot, Failure>) {
+        fn open_stream(mut self) -> (Self, Result<LabFrames, Failure>) {
             self.opens.set(self.opens.get() + 1);
             if self.missing.get() {
-                self.opened = false;
-                self.held = None;
+                self.active = None;
+                *self.feed.borrow_mut() = None;
                 return (
                     self,
                     Err(Failure::of(&thalvi_desktop::audio::AudioError::NoDevice)),
                 );
             }
             let (frames, feed) = thalvi_desktop::engine::fakes::FakeFrames::new(&self.gate);
-            self.opened = true;
-            self.held = Some(feed);
+            self.active = Some(
+                self.selected
+                    .clone()
+                    .unwrap_or_else(|| "Test microphone".to_owned()),
+            );
+            *self.feed.borrow_mut() = Some(feed);
+            let frames = LabFrames {
+                frames,
+                cancel_on_audio_error: self.cancel_on_audio_error.clone(),
+            };
             (self, Ok(frames))
         }
     }
 
-    type FakeFramesSlot = thalvi_desktop::engine::fakes::FakeFrames;
+    struct LabFrames {
+        frames: thalvi_desktop::engine::fakes::FakeFrames,
+        cancel_on_audio_error: Option<mpsc::UnboundedSender<Control>>,
+    }
+
+    impl FrameSource for LabFrames {
+        async fn next(
+            &mut self,
+        ) -> Result<thalvi_desktop::frame::Queued, thalvi_desktop::audio::AudioError> {
+            let next = self.frames.next().await;
+            if next.is_err()
+                && let Some(control) = self.cancel_on_audio_error.take()
+            {
+                control.send(Control::Cancel).unwrap();
+            }
+            next
+        }
+    }
 
     fn spoken_clip() -> Clip {
         use thalvi_desktop::frame::FRAME_SAMPLES;
@@ -4329,14 +4505,41 @@ mod tests {
         wake: thalvi_desktop::engine::fakes::WakeControl,
         server: thalvi_desktop::recognizer::FakeControl,
         opens: Rc<Cell<u32>>,
+        feed: Rc<RefCell<Option<thalvi_desktop::engine::fakes::FrameFeed>>>,
         texts: Arc<Mutex<Vec<String>>>,
         status: watch::Receiver<Status>,
         audio: watch::Receiver<AudioStatus>,
         feeding: watch::Receiver<bool>,
     }
 
+    struct FedOptions {
+        config: DesktopConfig,
+        history: Arc<History>,
+        recorder: Recorder,
+        local: Option<Arc<dyn Preload>>,
+        pause_on_rebuild: bool,
+        cancel_on_audio_error: bool,
+    }
+
+    impl Default for FedOptions {
+        fn default() -> Self {
+            Self {
+                config: feed_config(),
+                history: Arc::new(History::at("unused-scripted-feed")),
+                recorder: Recorder::disabled(),
+                local: None,
+                pause_on_rebuild: false,
+                cancel_on_audio_error: false,
+            }
+        }
+    }
+
     impl FedRun {
-        fn start(missing: bool) -> Self {
+        fn start(missing: bool, paused: bool) -> Self {
+            Self::configured(missing, paused, FedOptions::default())
+        }
+
+        fn configured(missing: bool, paused: bool, options: FedOptions) -> Self {
             use thalvi_desktop::cues::Cue;
             use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeWake};
             use thalvi_desktop::recognizer::FakeRecognizer;
@@ -4354,26 +4557,31 @@ mod tests {
                 cue_control.set_length(cue, Duration::ZERO);
             }
             let opens = Rc::new(Cell::new(0));
+            let feed = Rc::new(RefCell::new(None));
+            let (link, ends, _) = EngineLink::wire(&options.config, paused);
             let lab = MicLab {
                 opens: Rc::clone(&opens),
                 missing: Rc::new(Cell::new(missing)),
+                feed: Rc::clone(&feed),
                 wake: RefCell::new(Some(wake_detector)),
                 recognizer: RefCell::new(Some(recognizer)),
                 cues: RefCell::new(Some(cues)),
+                local: options.local,
+                recorder: RefCell::new(Some(options.recorder)),
+                pause_on_rebuild: options.pause_on_rebuild.then(|| link.control.clone()),
+                cancel_on_audio_error: options.cancel_on_audio_error.then(|| link.control.clone()),
             };
             let texts = Arc::new(Mutex::new(Vec::new()));
             let host = TestHost(Arc::new(Mutex::new(Vec::new())), Arc::clone(&texts));
-            let config = feed_config();
-            let (link, ends, _) = EngineLink::wire(&config, false);
             let status = link.status_updates();
             let audio = link.audio_updates();
             let feeding = link.feeding_updates();
             let running = tokio::task::spawn_local(ends.run(
-                config,
-                false,
+                options.config,
+                paused,
                 lab,
                 Arc::new(Delivery::new(host)),
-                Arc::new(History::at("unused-scripted-feed")),
+                options.history,
                 Arc::new(Drafts::default()),
             ));
             Self {
@@ -4382,11 +4590,21 @@ mod tests {
                 wake,
                 server,
                 opens,
+                feed,
                 texts,
                 status,
                 audio,
                 feeding,
             }
+        }
+
+        /// Fails the open microphone's stream, as a device unplugged while listening.
+        fn fail_microphone(&self, error: thalvi_desktop::audio::AudioError) {
+            self.feed
+                .borrow()
+                .as_ref()
+                .expect("the microphone was not open")
+                .fail(error);
         }
 
         fn missing_mic(&self) -> bool {
@@ -4400,9 +4618,25 @@ mod tests {
             self.texts.lock().unwrap().clone()
         }
 
+        async fn checkpoint(&self) {
+            let (reply, done) = oneshot::channel();
+            self.link.send(Control::RestartIfIdle(Restart::new(
+                |_| Err("Observation only.".to_owned()),
+                reply,
+            )));
+            let stopped = tokio::time::timeout(WAIT, done)
+                .await
+                .expect("the runner did not answer the checkpoint")
+                .unwrap();
+            assert!(matches!(stopped, Stop::Busy | Stop::Refused(_)));
+        }
+
         async fn stop(self) {
             self.link.send(Control::Quit);
-            self.running.await.unwrap();
+            tokio::time::timeout(WAIT, self.running)
+                .await
+                .expect("the runner did not stop after quit")
+                .unwrap();
         }
     }
 
@@ -4479,13 +4713,15 @@ mod tests {
             }))
         }
 
-        fn input(&self, gate: InputGate, _: Option<String>, _: Metrics) -> LabMic {
+        fn input(&self, gate: InputGate, selected: Option<String>, _: Metrics) -> LabMic {
             LabMic {
                 gate,
                 opens: Rc::clone(&self.opens),
                 missing: Rc::new(Cell::new(false)),
-                opened: false,
-                held: None,
+                selected,
+                active: None,
+                feed: Rc::new(RefCell::new(None)),
+                cancel_on_audio_error: None,
             }
         }
     }
@@ -4499,6 +4735,58 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("{what}"))
             .unwrap_or_else(|_| panic!("the runner stopped before {what}"));
+    }
+
+    #[tokio::test]
+    async fn lowering_the_history_limit_trims_saved_dictations_without_another_capture() {
+        LocalSet::new()
+            .run_until(async {
+                let dir = std::env::temp_dir()
+                    .join(format!("thalvi-runner-history-{}", std::process::id()));
+                let history = Arc::new(History::at(dir.join("history.json")));
+                let config = DesktopConfig::from_json_str("{}").unwrap();
+                for words in ["old dictation", "new dictation"] {
+                    let capture = Capture::of(
+                        &CaptureOutcome::Cancelled {
+                            dictated: Some(words.to_owned()),
+                        },
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                    history.record(config.history, capture).unwrap();
+                }
+                let script = FedRun::configured(
+                    false,
+                    false,
+                    FedOptions {
+                        config,
+                        history: Arc::clone(&history),
+                        ..FedOptions::default()
+                    },
+                );
+                let limited = DesktopConfig::from_json_str(r#"{"history":{"limit":1}}"#).unwrap();
+                script.link.send(Control::Apply(Box::new(limited)));
+                let remaining = tokio::time::timeout(WAIT, async {
+                    loop {
+                        let entries = history.list().unwrap();
+                        if entries.len() == 1 {
+                            break entries;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await;
+                script.stop().await;
+                std::fs::remove_dir_all(dir).unwrap();
+                assert_eq!(
+                    remaining.expect("lowering the history limit did not trim the saved history")
+                        [0]
+                    .text,
+                    "new dictation"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -4720,7 +5008,7 @@ mod tests {
             };
             LocalSet::new()
                 .run_until(async {
-                    let mut script = FedRun::start(true);
+                    let mut script = FedRun::start(true, false);
                     yield_until("the missing microphone was not reported", || {
                         script.missing_mic()
                     })
@@ -4801,6 +5089,23 @@ mod tests {
         Connected,
     }
 
+    async fn deliver_with_microphone(mut script: FedRun) {
+        deliver(&mut script).await;
+        assert_eq!(script.pasted(), ["Hello"]);
+        status_until(
+            &mut script.status,
+            "the paste was not reported as delivered",
+            |status| matches!(status, Status::Done { route, .. } if *route == CaptureRoute::Paste),
+        )
+        .await;
+        assert_eq!(
+            script.audio.borrow().active.as_deref(),
+            Some("Test microphone")
+        );
+        assert_eq!(script.opens.get(), 1);
+        script.stop().await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn scripted_feed_keeps_pause_keys_retry_and_a_connected_microphone() {
         for case in [
@@ -4818,7 +5123,7 @@ mod tests {
             LocalSet::new()
                 .run_until(async {
                     let missing = !matches!(case, KeptFeed::Connected);
-                    let mut script = FedRun::start(missing);
+                    let script = FedRun::start(missing, false);
                     if missing {
                         yield_until(
                             &format!("{label}: the missing microphone was not reported"),
@@ -4871,36 +5176,638 @@ mod tests {
                             script.stop().await;
                         }
                         KeptFeed::Retry => {
-                            assert_eq!(script.opens.get(), 1, "{label}");
-                            tokio::time::advance(Duration::from_millis(999)).await;
-                            for _ in 0..20 {
-                                tokio::task::yield_now().await;
+                            for (attempt, before_retry_ms) in
+                                [(1, 999), (2, 1_999), (3, 4_999), (4, 4_999)]
+                            {
+                                assert_eq!(script.opens.get(), attempt, "{label}");
+                                tokio::time::advance(Duration::from_millis(before_retry_ms)).await;
+                                for _ in 0..20 {
+                                    tokio::task::yield_now().await;
+                                }
+                                assert_eq!(script.opens.get(), attempt, "{label}: retried early");
+                                tokio::time::advance(Duration::from_millis(1)).await;
+                                yield_until("the microphone was not retried on schedule", || {
+                                    script.opens.get() == attempt + 1
+                                })
+                                .await;
+                                assert!(script.missing_mic(), "{label}");
+                                assert!(script.audio.borrow().active.is_none(), "{label}");
                             }
-                            assert_eq!(script.opens.get(), 1, "{label}: retried early");
-                            tokio::time::advance(Duration::from_millis(1)).await;
-                            yield_until("the microphone was not retried at one second", || {
-                                script.opens.get() == 2
-                            })
-                            .await;
-                            assert!(script.missing_mic(), "{label}");
-                            assert!(script.audio.borrow().active.is_none(), "{label}");
                             script.stop().await;
                         }
-                        KeptFeed::Connected => {
-                            deliver(&mut script).await;
-                            assert_eq!(script.pasted(), ["Hello"], "{label}");
-                            assert_eq!(
-                                script.audio.borrow().active.as_deref(),
-                                Some("Test microphone"),
-                                "{label}"
-                            );
-                            assert_eq!(script.opens.get(), 1, "{label}");
-                            script.stop().await;
-                        }
+                        KeptFeed::Connected => deliver_with_microphone(script).await,
                     }
                 })
                 .await;
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_keeps_the_saved_pause_and_leaves_the_microphone_closed() {
+        LocalSet::new()
+            .run_until(async {
+                let mut script = FedRun::start(false, true);
+                {
+                    let settled = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        script.status.wait_for(|status| {
+                            matches!(status, Status::Paused | Status::Listening)
+                        }),
+                    )
+                    .await
+                    .expect("the runner did not finish starting")
+                    .expect("the runner stopped");
+                    assert!(matches!(&*settled, Status::Paused));
+                }
+                assert_eq!(script.opens.get(), 0);
+                assert!(script.audio.borrow().paused);
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rebuild_shows_loading_until_it_is_applied_unless_paused() {
+        let config = |paste: u32, microphone: Option<&str>| DesktopConfig {
+            microphone: microphone.map(str::to_owned),
+            ..DesktopConfig::from_json_str(&format!(
+                r#"{{"ending_pause":{{"paste":{paste}}},"history":{{"enabled":false}}}}"#
+            ))
+            .unwrap()
+        };
+        // An unannounced rebuild is one the runner finds itself, after an earlier one failed.
+        for (paused, announced, pastes, microphone) in [
+            (false, true, &[1, 2][..], None),
+            (true, true, &[1, 2][..], None),
+            (false, false, &[1][..], Some("USB Mic")),
+        ] {
+            let case = format!("paused {paused}, announced {announced}, microphone {microphone:?}");
+            LocalSet::new()
+                .run_until(async {
+                    let (load_entered_tx, load_entered) = oneshot::channel();
+                    let (load_release, load_release_rx) = oneshot::channel();
+                    let (replace_entered_tx, replace_entered) = oneshot::channel();
+                    let (replace_release, replace_release_rx) = oneshot::channel();
+                    let lab = SwitchLab {
+                        recognizers: RefCell::new(
+                            (0..3)
+                                .map(|_| thalvi_desktop::recognizer::FakeRecognizer::new().0)
+                                .collect(),
+                        ),
+                        load_gate: RefCell::new(Some((load_entered_tx, load_release_rx))),
+                        open_gate: RefCell::new(None),
+                        replace_gate: RefCell::new(Some((replace_entered_tx, replace_release_rx))),
+                        loads: Cell::new(0),
+                    };
+                    let (link, ends, _) = EngineLink::wire(&config(0, None), paused);
+                    let mut status = link.status_updates();
+                    let running = tokio::task::spawn_local(ends.run(
+                        config(0, None),
+                        paused,
+                        lab,
+                        Arc::new(Delivery::new(TestHost::default())),
+                        Arc::new(History::at("unused-rebuild-history")),
+                        Arc::new(Drafts::default()),
+                    ));
+                    let settled = if paused {
+                        Status::Paused
+                    } else {
+                        Status::Listening
+                    };
+                    wait_status(&mut status, &case, |s| *s == settled).await;
+
+                    for &paste in pastes {
+                        if announced {
+                            link.begin_rebuild();
+                        }
+                        link.send(Control::Apply(Box::new(config(paste, microphone))));
+                    }
+                    tokio::time::timeout(Duration::from_secs(5), load_entered)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        matches!(link.status(), Status::Loading { .. }),
+                        !paused,
+                        "{case}: while building"
+                    );
+                    load_release.send(()).unwrap();
+                    if microphone.is_some() {
+                        tokio::time::timeout(Duration::from_secs(5), replace_entered)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert!(
+                            matches!(link.status(), Status::Loading { .. }),
+                            "{case}: while the chosen microphone opens"
+                        );
+                        replace_release.send(()).unwrap();
+                    }
+                    pump_until(&format!("{case}: the rebuilds did not end"), || {
+                        link.status() == settled && !link.publisher.view().rebuilding
+                    })
+                    .await;
+
+                    link.send(Control::Quit);
+                    running.await.unwrap();
+                })
+                .await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quitting_while_a_rebuild_builds_leaves_its_chosen_microphone_unopened() {
+        LocalSet::new()
+            .run_until(async {
+                let (load_entered_tx, load_entered) = oneshot::channel();
+                let (load_release, load_release_rx) = oneshot::channel::<()>();
+                let lab = SwitchLab {
+                    recognizers: RefCell::new(
+                        (0..2)
+                            .map(|_| thalvi_desktop::recognizer::FakeRecognizer::new().0)
+                            .collect(),
+                    ),
+                    load_gate: RefCell::new(Some((load_entered_tx, load_release_rx))),
+                    open_gate: RefCell::new(None),
+                    replace_gate: RefCell::new(None),
+                    loads: Cell::new(0),
+                };
+                let (link, ends, _) = EngineLink::wire(&feed_config(), false);
+                let mut status = link.status_updates();
+                let running = tokio::task::spawn_local(ends.run(
+                    feed_config(),
+                    false,
+                    lab,
+                    Arc::new(Delivery::new(TestHost::default())),
+                    Arc::new(History::at("unused-quit-rebuild-history")),
+                    Arc::new(Drafts::default()),
+                ));
+                wait_status(&mut status, "the runner started", |s| {
+                    *s == Status::Listening
+                })
+                .await;
+
+                link.begin_rebuild();
+                link.send(Control::Apply(Box::new(DesktopConfig {
+                    microphone: Some("USB Mic".to_owned()),
+                    ..DesktopConfig::from_json_str(
+                        r#"{"ending_pause":{"paste":1},"history":{"enabled":false}}"#,
+                    )
+                    .unwrap()
+                })));
+                tokio::time::timeout(Duration::from_secs(5), load_entered)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                link.stop();
+                tokio::time::timeout(Duration::from_secs(5), running)
+                    .await
+                    .expect("quitting ends the runner while the rebuild still builds")
+                    .unwrap();
+                assert_eq!(
+                    link.audio().selected,
+                    None,
+                    "quitting dropped the rebuild and its microphone"
+                );
+                drop(load_release);
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pausing_while_rebuilding_with_a_missing_microphone_keeps_the_key_refusal_visible() {
+        LocalSet::new()
+            .run_until(async {
+                let mut script = FedRun::configured(
+                    true,
+                    false,
+                    FedOptions {
+                        pause_on_rebuild: true,
+                        ..FedOptions::default()
+                    },
+                );
+                yield_until("the missing microphone was not reported", || {
+                    script.missing_mic()
+                })
+                .await;
+                script.link.send(Control::Apply(Box::new(
+                    DesktopConfig::from_json_str(r#"{"cues":{"wake":false}}"#).unwrap(),
+                )));
+                status_until(
+                    &mut script.status,
+                    "the rebuild did not pause listening",
+                    |status| matches!(status, Status::Paused),
+                )
+                .await;
+                let key = script.link.hold_input();
+                key.set(true);
+                status_until(
+                    &mut script.status,
+                    "the paused key press was not refused",
+                    |status| {
+                        matches!(
+                            status,
+                            Status::Failed {
+                                headline: "Paused — key ignored",
+                                ..
+                            }
+                        )
+                    },
+                )
+                .await;
+                script.status.borrow_and_update();
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(6), script.status.changed())
+                        .await
+                        .is_err(),
+                    "the scheduled microphone retry cleared the pause refusal"
+                );
+                assert_eq!(script.opens.get(), 1);
+                key.set(false);
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_press_while_paused_records_the_refusal() {
+        LocalSet::new()
+            .run_until(async {
+                let (dir, mut script) = recorded_run("refusal", true, feed_config(), false);
+                status_until(&mut script.status, "the runner did not pause", |status| {
+                    matches!(status, Status::Paused)
+                })
+                .await;
+                let key = script.link.hold_input();
+                key.set(true);
+                status_until(
+                    &mut script.status,
+                    "the paused press was not refused",
+                    |status| {
+                        matches!(
+                            status,
+                            Status::Failed {
+                                headline: "Paused — key ignored",
+                                ..
+                            }
+                        )
+                    },
+                )
+                .await;
+                key.set(false);
+                script.stop().await;
+                let metrics = recorded_events(&dir, Event::HoldStart);
+                assert_eq!(metrics.len(), 1, "one hold refusal must be recorded");
+                assert_eq!(metrics[0]["outcome"], "refused");
+                assert_eq!(metrics[0]["reason"], "paused");
+                assert_eq!(metrics[0]["count"], 1);
+            })
+            .await;
+    }
+
+    fn recorded_run(
+        name: &str,
+        paused: bool,
+        mut config: DesktopConfig,
+        cancel_on_audio_error: bool,
+    ) -> (PathBuf, FedRun) {
+        let dir = std::env::temp_dir().join(format!("thalvi-runner-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        config.recordings.metrics = true;
+        let recorder = Recorder::in_dir(config.recordings, &dir).unwrap();
+        let script = FedRun::configured(
+            false,
+            paused,
+            FedOptions {
+                config,
+                recorder,
+                cancel_on_audio_error,
+                ..FedOptions::default()
+            },
+        );
+        (dir, script)
+    }
+
+    fn recorded_events(dir: &std::path::Path, event: Event) -> Vec<Value> {
+        let log = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        log.lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|line| line["event"] == event.name())
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_pass_metrics_follow_the_runners_delivery_and_last_cancel() {
+        LocalSet::new()
+            .run_until(async {
+                // A loopback listener that never replies makes the final pass fall back.
+                let endpoint = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let config = || {
+                    DesktopConfig::from_json_str(
+                        &json!({
+                            "ending_pause": {"paste": 0},
+                            "history": {"enabled": false},
+                            "stt": {"entries": [
+                                {"kind":"on_device", "id":"live", "name":"Live", "active":true},
+                                {"kind":"extra", "id":"last", "name":"Final", "model":"test",
+                                 "address":format!("http://{}/v1", endpoint.local_addr().unwrap()),
+                                 "final_pass":true}
+                            ]}
+                        })
+                        .to_string(),
+                    )
+                    .unwrap()
+                };
+                let (dir, mut script) = recorded_run("final-paste", false, config(), false);
+                status_until(&mut script.status, "listening did not start", |status| {
+                    matches!(status, Status::Listening)
+                })
+                .await;
+                deliver(&mut script).await;
+                assert_eq!(script.pasted(), ["Hello"]);
+                script.stop().await;
+                let events = recorded_events(&dir, Event::FinalPass);
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0]["outcome"], "timeout");
+                assert!(
+                    events[0]["release_to_paste_ms"].is_number(),
+                    "the final pass must record the actual window paste"
+                );
+
+                let (dir, mut script) = recorded_run("final-cancel", false, config(), true);
+                script.server.ready();
+                yield_until("the microphone did not listen", || script.opens.get() == 1).await;
+                script.wake.fire(thalvi_desktop::wake::WakeEvent::Capture);
+                script
+                    .feed
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .send([2_000; thalvi_desktop::frame::FRAME_SAMPLES]);
+                status_until(&mut script.status, "dictation did not start", |status| {
+                    matches!(status, Status::Capturing { .. })
+                })
+                .await;
+                script.fail_microphone(thalvi_desktop::audio::AudioError::DeviceLost);
+                status_until(
+                    &mut script.status,
+                    "dictation did not settle after the error",
+                    |status| !matches!(status, Status::Capturing { .. } | Status::Starting { .. }),
+                )
+                .await;
+                assert_eq!(script.pasted(), Vec::<String>::new());
+                script.stop().await;
+                let events = recorded_events(&dir, Event::FinalPass);
+                assert_eq!(events.len(), 1);
+                assert_eq!(
+                    events[0]["outcome"], "cancelled",
+                    "a queued cancel wins over the microphone error"
+                );
+                assert!(events[0]["release_to_paste_ms"].is_null());
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_honors_a_queued_quit_before_opening_the_microphone() {
+        LocalSet::new()
+            .run_until(async {
+                let script = FedRun::start(false, false);
+                script.link.send(Control::Quit);
+                tokio::time::timeout(Duration::from_secs(3), script.running)
+                    .await
+                    .expect("the runner ignored the queued quit")
+                    .unwrap();
+                assert_eq!(script.opens.get(), 0);
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_runner_reports_an_overlay_failure_and_clears_it_on_recovery() {
+        LocalSet::new()
+            .run_until(async {
+                let script = FedRun::start(false, false);
+                yield_until("listening did not start", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                let overlay_failure = || Failure {
+                    kind: FailureKind::Other,
+                    headline: "Status overlay unavailable",
+                    notice: "The overlay surface closed.".to_owned(),
+                    causes: Vec::new(),
+                };
+                script.link.send(Control::Overlay(Some(overlay_failure())));
+                yield_until("the overlay failure was not reported", || {
+                    matches!(
+                        &*script.status.borrow(),
+                        Status::Failed { notice, .. } if notice == "The overlay surface closed."
+                    )
+                })
+                .await;
+                script.link.send(Control::Overlay(None));
+                yield_until("the overlay failure stayed after recovery", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                script
+                    .link
+                    .send(Control::HoldKeyFailed("Hold key refused.".to_owned()));
+                yield_until("the hold-key failure was not reported", || {
+                    matches!(
+                        &*script.status.borrow(),
+                        Status::Failed { notice, .. } if notice == "Hold key refused."
+                    )
+                })
+                .await;
+                script.link.send(Control::Overlay(Some(overlay_failure())));
+                script.link.send(Control::Overlay(None));
+                script.checkpoint().await;
+                assert!(
+                    matches!(
+                        &*script.status.borrow(),
+                        Status::Failed { notice, .. } if notice == "Hold key refused."
+                    ),
+                    "overlay recovery must leave the unrelated failure visible"
+                );
+                script.link.send(Control::HoldKeyWorks);
+                yield_until("the overlay failure replaced the hold-key failure", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_shows_the_speech_model_download_before_the_first_capture() {
+        LocalSet::new()
+            .run_until(async {
+                let (release, gate) = oneshot::channel();
+                let local = LocalRecognizer::new(
+                    Scripted {
+                        gate: std::sync::Mutex::new(Some(gate)),
+                        fails: false,
+                    },
+                    "test",
+                    Recorder::disabled().metrics(),
+                );
+                let mut script = FedRun::configured(
+                    false,
+                    false,
+                    FedOptions {
+                        local: Some(Arc::new(local)),
+                        ..FedOptions::default()
+                    },
+                );
+                let notice = load_notice(Step::Fetching(gpu_files()));
+                status_until(&mut script.status, "the download was not shown at startup", |status| {
+                    matches!(status, Status::Loading { notice: shown, downloading: true } if *shown == notice)
+                })
+                .await;
+                release.send(()).unwrap();
+                status_until(&mut script.status, "listening was not shown after loading", |status| {
+                    matches!(status, Status::Listening)
+                })
+                .await;
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_finished_download_of_the_active_speech_model_recovers_from_a_load_failure() {
+        LocalSet::new()
+            .run_until(async {
+                let local = LocalRecognizer::new(
+                    FailsOnce(std::sync::atomic::AtomicBool::new(true)),
+                    "test",
+                    Recorder::disabled().metrics(),
+                );
+                let mut script = FedRun::configured(
+                    false,
+                    false,
+                    FedOptions {
+                        local: Some(Arc::new(local)),
+                        ..FedOptions::default()
+                    },
+                );
+                status_until(
+                    &mut script.status,
+                    "the first model load did not fail",
+                    |status| {
+                        matches!(status, Status::Failed { notice, .. }
+                        if notice.starts_with("Could not download the speech model."))
+                    },
+                )
+                .await;
+                script
+                    .link
+                    .send(Control::ReloadSpeechModel(ListedSpeech::Catalog(
+                        CatalogSpeech::ALL[1],
+                    )));
+                script.checkpoint().await;
+                assert!(matches!(&*script.status.borrow(), Status::Failed { .. }));
+
+                script
+                    .link
+                    .send(Control::ReloadSpeechModel(ListedSpeech::Catalog(
+                        CatalogSpeech::ALL[0],
+                    )));
+                status_until(
+                    &mut script.status,
+                    "the active speech model download did not recover listening",
+                    |status| matches!(status, Status::Listening),
+                )
+                .await;
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn changed_settings_publish_the_selected_microphone() {
+        LocalSet::new()
+            .run_until(async {
+                let script = FedRun::start(false, false);
+                script.link.send(Control::Apply(Box::new(feed_config())));
+                yield_until("listening did not start", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                assert_eq!(
+                    script.audio.borrow().active.as_deref(),
+                    Some("Test microphone")
+                );
+                let neon = DesktopConfig {
+                    look: thalvi_desktop::config::Look::Neon,
+                    ..feed_config()
+                };
+                script.link.send(Control::Apply(Box::new(neon.clone())));
+                script.link.send(Control::Apply(Box::new(DesktopConfig {
+                    microphone: Some("USB Mic".to_owned()),
+                    ..neon
+                })));
+                yield_until("the microphone selection was not applied", || {
+                    script.audio.borrow().selected.as_deref() == Some("USB Mic")
+                })
+                .await;
+                assert_eq!(script.audio.borrow().active.as_deref(), Some("USB Mic"));
+                assert_eq!(
+                    script.opens.get(),
+                    2,
+                    "a retune leaves the open microphone alone"
+                );
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_microphone_that_stops_while_listening_is_closed_and_reported_not_taken_for_a_clip() {
+        LocalSet::new()
+            .run_until(async {
+                let script = FedRun::start(false, false);
+                yield_until("listening never started", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                assert_eq!(
+                    script.audio.borrow().active.as_deref(),
+                    Some("Test microphone")
+                );
+                script.fail_microphone(thalvi_desktop::audio::AudioError::DeviceLost);
+                pump_until("the microphone failure was not reported", || {
+                    matches!(
+                        &*script.status.borrow(),
+                        Status::Failed { notice, .. }
+                            if notice == "The microphone was disconnected. Capture stopped without delivery."
+                    )
+                })
+                .await;
+                assert!(
+                    script.audio.borrow().active.is_none(),
+                    "a microphone that stopped was left open"
+                );
+                pump_until("the microphone was not reopened", || {
+                    script.opens.get() == 2
+                })
+                .await;
+                pump_until("the reopened microphone did not listen again", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                assert_eq!(
+                    script.audio.borrow().active.as_deref(),
+                    Some("Test microphone"),
+                    "the reopened microphone is the active one"
+                );
+                script.stop().await;
+            })
+            .await;
     }
 
     struct SwitchMic {
@@ -4909,6 +5816,7 @@ mod tests {
         held: Option<thalvi_desktop::engine::fakes::FrameFeed>,
         entered: Option<oneshot::Sender<()>>,
         release: Option<oneshot::Receiver<()>>,
+        replacing: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
     }
 
     impl Input for SwitchMic {
@@ -4938,7 +5846,11 @@ mod tests {
             Ok((self, Ok(frames)))
         }
 
-        async fn replace(self) -> Result<(Self, Result<Self::Frames, Failure>), Failure> {
+        async fn replace(mut self) -> Result<(Self, Result<Self::Frames, Failure>), Failure> {
+            if let Some((entered, release)) = self.replacing.take() {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
             self.open().await
         }
     }
@@ -4948,6 +5860,7 @@ mod tests {
             RefCell<std::collections::VecDeque<thalvi_desktop::recognizer::FakeRecognizer>>,
         load_gate: RefCell<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
         open_gate: RefCell<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+        replace_gate: RefCell<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
         loads: Cell<u32>,
     }
 
@@ -5018,6 +5931,9 @@ mod tests {
                 held: None,
                 entered,
                 release,
+                replacing: (self.loads.get() == 2)
+                    .then(|| self.replace_gate.borrow_mut().take())
+                    .flatten(),
             }
         }
     }
@@ -5066,6 +5982,7 @@ mod tests {
                         recognizers: RefCell::new(VecDeque::from([first_rec, second_rec])),
                         load_gate: RefCell::new(Some((load_entered_tx, load_release_rx))),
                         open_gate: RefCell::new(Some((open_entered_tx, open_release_rx))),
+                        replace_gate: RefCell::new(None),
                         loads: Cell::new(0),
                     };
                     let (link, ends, _) = EngineLink::wire(&on_device, false);
@@ -5155,6 +6072,7 @@ mod tests {
                     recognizers: RefCell::new(VecDeque::from([first_rec, second_rec])),
                     load_gate: RefCell::new(Some((load_entered_tx, load_release_rx))),
                     open_gate: RefCell::new(None),
+                    replace_gate: RefCell::new(None),
                     loads: Cell::new(0),
                 };
                 let (link, ends, _) = EngineLink::wire(&initial, false);
