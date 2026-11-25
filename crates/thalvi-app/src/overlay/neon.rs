@@ -461,6 +461,7 @@ fn pill_words(view: &View) -> (Tone, String, Option<&str>) {
             target,
             route,
             notice,
+            ..
         } => (
             Tone::Done,
             done_message(*route, target.as_deref(), notice),
@@ -1106,6 +1107,7 @@ mod tests {
             target: None,
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
+            wake_words: true,
         };
         let failed = Status::Failed {
             kind: crate::status::FailureKind::Other,
@@ -1201,6 +1203,7 @@ mod tests {
             target: None,
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
+            wake_words: true,
         };
         let (listening, finished) = (width(look(capturing())), width(look(done)));
         assert!(listening > finished + 20, "{listening} {finished}");

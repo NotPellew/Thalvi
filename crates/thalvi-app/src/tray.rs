@@ -45,8 +45,14 @@ impl Icon {
     pub fn of(status: &Status) -> Self {
         match status {
             Status::Paused => Self::Paused,
-            Status::Listening | Status::Done { .. } => Self::Listening,
-            Status::KeyboardOnly => Self::Keyboard,
+            Status::Listening
+            | Status::Done {
+                wake_words: true, ..
+            } => Self::Listening,
+            Status::KeyboardOnly
+            | Status::Done {
+                wake_words: false, ..
+            } => Self::Keyboard,
             Status::Starting { .. } | Status::Capturing { .. } => Self::Capturing,
             Status::Pending { .. } => Self::Pending,
             Status::Working { .. }
@@ -156,8 +162,14 @@ fn seconds(milliseconds: u64) -> String {
 pub fn title(status: &Status) -> String {
     let state = match status {
         Status::Paused => "paused".to_owned(),
-        Status::Listening | Status::Done { .. } => "listening".to_owned(),
-        Status::KeyboardOnly => "listening (hold keys only)".to_owned(),
+        Status::Listening
+        | Status::Done {
+            wake_words: true, ..
+        } => "listening".to_owned(),
+        Status::KeyboardOnly
+        | Status::Done {
+            wake_words: false, ..
+        } => "listening (hold keys only)".to_owned(),
         Status::Starting { .. } | Status::Capturing { .. } => "capturing".to_owned(),
         Status::Pending {
             route, pause_ms, ..
@@ -474,9 +486,20 @@ mod tests {
                     target: Some(kitty()),
                     route: CaptureRoute::Paste,
                     notice: "Delivered secret words.".to_owned(),
+                    wake_words: true,
                 },
                 Icon::Listening,
                 "Thalvi: listening",
+            ),
+            (
+                Status::Done {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Paste,
+                    notice: "Delivered secret words.".to_owned(),
+                    wake_words: false,
+                },
+                Icon::Keyboard,
+                "Thalvi: listening (hold keys only)",
             ),
             (
                 Status::Failed {
