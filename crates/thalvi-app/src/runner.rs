@@ -5316,6 +5316,65 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn quitting_while_a_rebuild_builds_leaves_its_chosen_microphone_unopened() {
+        LocalSet::new()
+            .run_until(async {
+                let (load_entered_tx, load_entered) = oneshot::channel();
+                let (load_release, load_release_rx) = oneshot::channel::<()>();
+                let lab = SwitchLab {
+                    recognizers: RefCell::new(
+                        (0..2)
+                            .map(|_| thalvi_desktop::recognizer::FakeRecognizer::new().0)
+                            .collect(),
+                    ),
+                    load_gate: RefCell::new(Some((load_entered_tx, load_release_rx))),
+                    open_gate: RefCell::new(None),
+                    replace_gate: RefCell::new(None),
+                    loads: Cell::new(0),
+                };
+                let (link, ends, _) = EngineLink::wire(&feed_config(), false);
+                let mut status = link.status_updates();
+                let running = tokio::task::spawn_local(ends.run(
+                    feed_config(),
+                    false,
+                    lab,
+                    Arc::new(Delivery::new(TestHost::default())),
+                    Arc::new(History::at("unused-quit-rebuild-history")),
+                    Arc::new(Drafts::default()),
+                ));
+                wait_status(&mut status, "the runner started", |s| {
+                    *s == Status::Listening
+                })
+                .await;
+
+                link.begin_rebuild();
+                link.send(Control::Apply(Box::new(DesktopConfig {
+                    microphone: Some("USB Mic".to_owned()),
+                    ..DesktopConfig::from_json_str(
+                        r#"{"ending_pause":{"paste":1},"history":{"enabled":false}}"#,
+                    )
+                    .unwrap()
+                })));
+                tokio::time::timeout(Duration::from_secs(5), load_entered)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                link.stop();
+                tokio::time::timeout(Duration::from_secs(5), running)
+                    .await
+                    .expect("quitting ends the runner while the rebuild still builds")
+                    .unwrap();
+                assert_eq!(
+                    link.audio().selected,
+                    None,
+                    "quitting dropped the rebuild and its microphone"
+                );
+                drop(load_release);
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn pausing_while_rebuilding_with_a_missing_microphone_keeps_the_key_refusal_visible() {
         LocalSet::new()
             .run_until(async {
@@ -5683,15 +5742,25 @@ mod tests {
                     script.audio.borrow().active.as_deref(),
                     Some("Test microphone")
                 );
+                let neon = DesktopConfig {
+                    look: thalvi_desktop::config::Look::Neon,
+                    ..feed_config()
+                };
+                script.link.send(Control::Apply(Box::new(neon.clone())));
                 script.link.send(Control::Apply(Box::new(DesktopConfig {
                     microphone: Some("USB Mic".to_owned()),
-                    ..feed_config()
+                    ..neon
                 })));
                 yield_until("the microphone selection was not applied", || {
                     script.audio.borrow().selected.as_deref() == Some("USB Mic")
                 })
                 .await;
                 assert_eq!(script.audio.borrow().active.as_deref(), Some("USB Mic"));
+                assert_eq!(
+                    script.opens.get(),
+                    2,
+                    "a retune leaves the open microphone alone"
+                );
                 script.stop().await;
             })
             .await;

@@ -2117,6 +2117,8 @@ where
         }
         let mut key_open = true;
         loop {
+            // The biased branches are polled in order; spending budget lets the later ones and the timers run even if one stays ready.
+            tokio::task::consume_budget().await;
             let limit = if live.text.pending().is_some() {
                 MIC_WATCHDOG
             } else {
@@ -3889,6 +3891,14 @@ mod tests {
             .await
             .expect("the queued frame is scored even while the hold key is idle");
         assert!(matches!(heard, Ok(WakeTrigger::Capture)));
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(10), engine.capture(&mut frames, None))
+                .await
+                .expect("the closed microphone ends the capture even though no input stays quiet");
+        assert!(
+            matches!(outcome, CaptureOutcome::Failed { .. }),
+            "{outcome:?}"
+        );
     }
 
     #[tokio::test]
