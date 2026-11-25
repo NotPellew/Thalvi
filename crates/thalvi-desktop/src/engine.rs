@@ -80,6 +80,9 @@ const RELEASE_SILENCE_FRAMES: usize = 10;
 /// Measured on the server recognizer, the last word was in the text by 200 ms in every run.
 const RELEASE_LIMIT: Duration = Duration::from_millis(250);
 
+/// How long Submit waits for the overlay to confirm that the full review text is on screen.
+const PREVIEW_WAIT: Duration = Duration::from_secs(1);
+
 static RELEASE_SILENCE: [Frame; RELEASE_SILENCE_FRAMES] =
     [[0i16; FRAME_SAMPLES]; RELEASE_SILENCE_FRAMES];
 
@@ -236,6 +239,8 @@ pub enum EngineState {
         text: String,
         /// The quiet pause has not started because the user is still speaking.
         waiting_for_quiet: bool,
+        /// For Submit, the overlay's report that the full text is on screen.
+        preview: Option<SubmitPreview>,
     },
     /// The finished text is being shown before Submit can send it.
     ConfirmingSubmit {
@@ -676,6 +681,48 @@ struct Live<S> {
     spot: SpotStats,
     /// Shown with the capture until the next words are heard.
     notice: Option<String>,
+    /// For a live Submit, the overlay's confirmation that the full review text is visible.
+    submit_preview: Option<LivePreview>,
+}
+
+/// What a live Submit waits for from the overlay before the quiet pause can commit.
+struct LivePreview {
+    preview: SubmitPreview,
+    watch: watch::Receiver<Presentation>,
+    deadline: Instant,
+}
+
+impl LivePreview {
+    fn new(now: Instant) -> Self {
+        let preview = SubmitPreview::default();
+        let watch = preview.watch();
+        Self {
+            preview,
+            watch,
+            deadline: now + PREVIEW_WAIT,
+        }
+    }
+
+    fn waiting(&self) -> bool {
+        *self.watch.borrow() == Presentation::Waiting
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.waiting().then_some(self.deadline)
+    }
+}
+
+async fn wait_preview(preview: Option<&mut LivePreview>) -> Presentation {
+    match preview {
+        Some(preview) => {
+            if preview.watch.changed().await.is_ok() {
+                *preview.watch.borrow_and_update()
+            } else {
+                Presentation::Failed(PreviewError::Unavailable)
+            }
+        }
+        None => std::future::pending().await,
+    }
 }
 
 /// What the ending spotter did during one capture.
@@ -830,6 +877,10 @@ enum Step {
     Tail,
     /// The dictation key changed; false when it can no longer change.
     Key(bool),
+    /// The overlay reported on a live Submit preview.
+    Preview(Presentation),
+    /// A live Submit preview was not reported shown in time.
+    PreviewTimeout,
     /// An extra that was not waited for finished.
     Recorded(Answer),
 }
@@ -1774,6 +1825,10 @@ where
                 route: pending.route,
                 text: pending.text.clone(),
                 waiting_for_quiet: pending.window == QuietWindow::WaitingForQuiet,
+                preview: live
+                    .submit_preview
+                    .as_ref()
+                    .map(|live| live.preview.clone()),
             },
             None => EngineState::Capturing {
                 committed: live.text.text(),
@@ -1983,6 +2038,7 @@ where
             watch: Self::watch_for(&mut self.spotter, self.pauses, held.is_some()),
             spot: SpotStats::default(),
             notice: held.is_none().then(|| self.spotter_off.take()).flatten(),
+            submit_preview: None,
         };
         self.publish(&live);
         Ok((live, backlog, released))
@@ -1999,6 +2055,54 @@ where
             || buffers_audio
     }
 
+    /// Sends frames buffered while connecting and any hold release that happened before ready.
+    async fn start_drive(
+        &mut self,
+        live: &mut Live<R::Session>,
+        backlog: Vec<Queued>,
+        held: Option<&Held>,
+        released: Option<Instant>,
+    ) -> Option<Done> {
+        for queued in backlog {
+            if let Err(stop) = self.on_frame(live, &queued).await {
+                return Some(stop.into());
+            }
+        }
+        if let (Some(at), Some(held)) = (released, held) {
+            self.held_for = Some(at.duration_since(held.at));
+            if live.session.buffers_audio() {
+                self.streams.send(&RELEASE_SILENCE);
+                if let Err(error) = live.session.finish_audio().await {
+                    return Some(Done::Failed(error.into()));
+                }
+                self.set_state(EngineState::TranscribingLive {
+                    route: held.route(),
+                });
+            } else if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                return Some(stop.into());
+            }
+            live.release = Release::Tail(Instant::now());
+        }
+        None
+    }
+
+    fn on_preview(live: &mut Live<R::Session>, presentation: Presentation) -> Option<Done> {
+        match presentation {
+            Presentation::Shown => {
+                if let Some(pending) = live.text.pending_mut()
+                    && matches!(pending.window, QuietWindow::CountingDown { .. })
+                {
+                    pending.window = QuietWindow::CountingDown {
+                        since: Instant::now(),
+                    };
+                }
+                None
+            }
+            Presentation::Failed(error) => Some(Done::Failed(error.into())),
+            Presentation::Waiting => None,
+        }
+    }
+
     /// Runs the capture until it ends.
     async fn drive(
         &mut self,
@@ -2008,25 +2112,8 @@ where
         held: Option<&Held>,
         released: Option<Instant>,
     ) -> (Done, Instant) {
-        for queued in backlog {
-            if let Err(stop) = self.on_frame(live, &queued).await {
-                return (stop.into(), Instant::now());
-            }
-        }
-        if let (Some(at), Some(held)) = (released, held) {
-            self.held_for = Some(at.duration_since(held.at));
-            if live.session.buffers_audio() {
-                self.streams.send(&RELEASE_SILENCE);
-                if let Err(error) = live.session.finish_audio().await {
-                    return (Done::Failed(error.into()), Instant::now());
-                }
-                self.set_state(EngineState::TranscribingLive {
-                    route: held.route(),
-                });
-            } else if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
-                return (stop.into(), Instant::now());
-            }
-            live.release = Release::Tail(Instant::now());
+        if let Some(done) = self.start_drive(live, backlog, held, released).await {
+            return (done, Instant::now());
         }
         let mut key_open = true;
         loop {
@@ -2040,15 +2127,23 @@ where
             let watchdog =
                 (!waiting_on_live_upload && live.cues.is_empty()).then(|| live.last_audio + limit);
             let tail = live.tail();
+            let preview_waiting = live
+                .submit_preview
+                .as_ref()
+                .is_some_and(LivePreview::waiting);
+            let preview_deadline = live.submit_preview.as_ref().and_then(LivePreview::deadline);
+            let quiet_at = (!preview_waiting).then(|| live.text.ready_at()).flatten();
             let step = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => Step::Cancel,
                 changed = self.key.changed(), if key_open => Step::Key(changed.is_ok()),
+                preview = wait_preview(live.submit_preview.as_mut()) => Step::Preview(preview),
                 event = live.session.next_event() => Step::Event(event),
                 frame = frames.next() => Step::Frame(frame),
                 answer = next_recorded(&mut self.recorded_only) => Step::Recorded(answer),
                 Some(end) = live.cues.next() => Step::Cue(end),
-                () = until(live.text.ready_at()) => Step::Quiet,
+                () = until(quiet_at) => Step::Quiet,
+                () = until(preview_deadline) => Step::PreviewTimeout,
                 () = until(live.watch.as_ref().and_then(Watch::ready_at)) => Step::Disputed,
                 () = until(watchdog) => Step::Silent,
                 () = until(tail) => Step::Tail,
@@ -2057,6 +2152,8 @@ where
             };
             let done = match step {
                 Step::Cancel => Some(Done::Stopped),
+                Step::Preview(presentation) => Self::on_preview(live, presentation),
+                Step::PreviewTimeout => Some(Done::Failed(PreviewError::Unavailable.into())),
                 Step::Event(event) => self.on_event(live, held, event),
                 Step::Frame(Err(error)) => Some(Done::Failed(error.into())),
                 Step::Frame(Ok(queued)) => self.on_frame(live, &queued).await.err().map(Done::from),
@@ -2070,7 +2167,10 @@ where
                     self.record_late(answer);
                     None
                 }
-                Step::Quiet => self.on_quiet(live.take_quiet_ending()),
+                Step::Quiet => match Self::quiet_allowed(live) {
+                    Ok(()) => self.on_quiet(live.take_quiet_ending()),
+                    Err(held) => held,
+                },
                 Step::Disputed => {
                     self.on_disputed(live);
                     None
@@ -2271,6 +2371,7 @@ where
             self.spot_resolved(&done);
         }
         if live.text.on_partial(&text) {
+            live.submit_preview = None;
             self.ending_state("partial_cancelled");
             self.queue_cue(live, Cue::Cancelled);
         }
@@ -2299,11 +2400,13 @@ where
             Ok(FinalStep::Cancelled { dictated }) => return Some(Done::NeverMind(dictated)),
             Ok(FinalStep::Continue { cancelled_pending }) => {
                 if cancelled_pending {
+                    live.submit_preview = None;
                     self.ending_state("final_cancelled");
                     self.queue_cue(live, Cue::Cancelled);
                 }
             }
             Ok(FinalStep::Armed(mut pending)) => {
+                live.submit_preview = None;
                 // A Submit whose text only exists after the merge or final pass is formatted and
                 // cleaned when it settles, and confirmed then. An ordinary submit's confirmation
                 // shows its formatted text, which is sent as shown.
@@ -2337,17 +2440,25 @@ where
                         text: pending.text,
                     }));
                 }
-                self.ending_state(match (pending.window, pending.without_ending) {
-                    (QuietWindow::WaitingForQuiet, false) => "waiting_for_quiet",
-                    (QuietWindow::WaitingForQuiet, true) => "waiting_for_quiet_without_ending",
-                    (QuietWindow::CountingDown { .. }, false) => "pending",
-                    (QuietWindow::CountingDown { .. }, true) => "pending_without_ending",
-                });
-                self.queue_cue(live, Cue::Provisional);
+                self.arm_pending(live);
             }
         }
         self.publish(live);
         None
+    }
+
+    /// Whether a quiet ending may be taken: a waiting Submit preview holds it (`Err(None)`), and
+    /// a failed one ends the capture instead.
+    fn quiet_allowed(live: &Live<R::Session>) -> Result<(), Option<Done>> {
+        match live
+            .submit_preview
+            .as_ref()
+            .map(|preview| *preview.watch.borrow())
+        {
+            None | Some(Presentation::Shown) => Ok(()),
+            Some(Presentation::Waiting) => Err(None),
+            Some(Presentation::Failed(error)) => Err(Some(Done::Failed(error.into()))),
+        }
     }
 
     fn on_quiet(&self, ending: QuietEnding) -> Option<Done> {
@@ -3250,7 +3361,7 @@ where
             result = presentation.wait_for(|state| *state != Presentation::Waiting) => {
                 result.map_or(Presentation::Failed(PreviewError::Unavailable), |state| *state)
             }
-            () = tokio::time::sleep(Duration::from_secs(1)) => Presentation::Failed(PreviewError::Unavailable),
+            () = tokio::time::sleep(PREVIEW_WAIT) => Presentation::Failed(PreviewError::Unavailable),
         };
         let failure = match shown {
             Presentation::Failed(error) => error,
@@ -3276,9 +3387,16 @@ where
     /// Records and announces an armed ending. The caller publishes afterwards.
     fn arm_pending(&self, live: &mut Live<R::Session>) {
         let Some(pending) = live.text.pending() else {
+            live.submit_preview = None;
             return;
         };
-        self.ending_state(match (pending.window, pending.without_ending) {
+        let route = pending.route;
+        let window = pending.window;
+        let without_ending = pending.without_ending;
+        live.submit_preview = (route == CaptureRoute::Submit
+            && self.submit_confirmation == SubmitConfirmation::Live)
+            .then(|| LivePreview::new(Instant::now()));
+        self.ending_state(match (window, without_ending) {
             (QuietWindow::WaitingForQuiet, false) => "waiting_for_quiet",
             (QuietWindow::WaitingForQuiet, true) => "waiting_for_quiet_without_ending",
             (QuietWindow::CountingDown { .. }, false) => "pending",

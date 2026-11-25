@@ -991,6 +991,7 @@ mod tests {
             route,
             text: "run it".to_owned(),
             waiting_for_quiet: false,
+            preview: None,
         };
         assert_eq!(
             submit_notice(&pending(CaptureRoute::Submit), "firefox").as_deref(),
