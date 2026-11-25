@@ -712,19 +712,6 @@ impl LivePreview {
     }
 }
 
-async fn wait_preview(preview: Option<&mut LivePreview>) -> Presentation {
-    match preview {
-        Some(preview) => {
-            if preview.watch.changed().await.is_ok() {
-                *preview.watch.borrow_and_update()
-            } else {
-                Presentation::Failed(PreviewError::Unavailable)
-            }
-        }
-        None => std::future::pending().await,
-    }
-}
-
 /// What the ending spotter did during one capture.
 #[derive(Default)]
 struct SpotStats {
@@ -2129,17 +2116,19 @@ where
             let watchdog =
                 (!waiting_on_live_upload && live.cues.is_empty()).then(|| live.last_audio + limit);
             let tail = live.tail();
-            let preview_waiting = live
-                .submit_preview
-                .as_ref()
-                .is_some_and(LivePreview::waiting);
             let preview_deadline = live.submit_preview.as_ref().and_then(LivePreview::deadline);
-            let quiet_at = (!preview_waiting).then(|| live.text.ready_at()).flatten();
+            let quiet_at = live.text.ready_at().filter(|_| preview_deadline.is_none());
+            let preview_watch = live.submit_preview.as_mut().map(|p| &mut p.watch);
             let step = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => Step::Cancel,
                 changed = self.key.changed(), if key_open => Step::Key(changed.is_ok()),
-                preview = wait_preview(live.submit_preview.as_mut()) => Step::Preview(preview),
+                // Inline, so the branch is ready only when the overlay reports a change.
+                preview = async move {
+                    let Some(watch) = preview_watch else { return std::future::pending().await };
+                    let unavailable = Presentation::Failed(PreviewError::Unavailable);
+                    watch.changed().await.map_or(unavailable, |()| *watch.borrow_and_update())
+                } => Step::Preview(preview),
                 event = live.session.next_event() => Step::Event(event),
                 frame = frames.next() => Step::Frame(frame),
                 answer = next_recorded(&mut self.recorded_only) => Step::Recorded(answer),
