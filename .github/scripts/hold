@@ -228,28 +228,35 @@ def latest_runs(pending):
     return latest
 
 
-def rerun(number):
+def affected_runs(number):
     pulls = records(api("pulls?state=open&per_page=100", paginate=True))
-    pending = {
-        f"Hold PR #{pr['number']} {pr['head']['sha']} into {pr['base']['ref']}"
+    return {
+        pr["number"]: f"Hold PR #{pr['number']} {pr['head']['sha']} into {pr['base']['ref']}"
         for pr in pulls if number in closing_refs(pr["body"])
     }
+
+
+def rerun(number):
+    pending = affected_runs(number)
     deadline = time.monotonic() + RERUN_WAIT
     failures = []
     while pending:
-        latest = latest_runs(pending)
-        for title, run in latest.items():
-            if run["status"] != "completed":
+        latest = latest_runs(set(pending.values()))
+        current = affected_runs(number)
+        pending = {pr: current[pr] for pr in pending.keys() & current.keys()}
+        for pr, title in list(pending.items()):
+            run = latest.get(title)
+            if run is None or run["status"] != "completed":
                 continue
             try:
                 api(f"actions/runs/{run['id']}/rerun", post=True)
                 print(f"Requested {title} rerun ({run['id']}).")
             except HoldError as error:
                 failures.append(str(error))
-            pending.remove(title)
+            del pending[pr]
         if pending:
             if time.monotonic() >= deadline:
-                failures.append(f"no completed latest run for {', '.join(sorted(pending))}")
+                failures.append(f"no completed latest run for {', '.join(sorted(pending.values()))}")
                 break
             time.sleep(2)
     if failures:

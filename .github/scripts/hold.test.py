@@ -281,6 +281,21 @@ class HoldTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.posts.read_text().splitlines(), ["actions/runs/792/rerun"])
 
+    def test_issue_refresh_tracks_a_revision_change_while_waiting(self):
+        self.set_open_prs()
+        old = self.data[PULLS][0][0][0]
+        new = dict(old, head={"sha": "c" * 40}, base={"ref": "release"})
+        self.data[PULLS] = [[[old]], [[new]]]
+        self.data[RUNS] = [
+            [{"workflow_runs": [run(791, 23, "in_progress")]}],
+            [{"workflow_runs": [run(791, 23), run(792, 23, head="c" * 40, base="release")]}],
+        ]
+        for id_ in (791, 792):
+            self.data[f"actions/runs/{id_}/rerun"] = [None]
+        result = self.invoke("rerun", "17")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.posts.read_text().splitlines(), ["actions/runs/792/rerun"])
+
     def test_issue_event_api_errors_fail_without_claiming_rerun_success(self):
         self.set_open_prs()
         self.data[PULLS][0] = self.data[PULLS][0][:1]
