@@ -289,6 +289,7 @@ mod tests {
             target: None,
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
+            wake_words: true,
         };
         let failed = Status::Failed {
             kind: FailureKind::Other,
@@ -561,6 +562,7 @@ mod tests {
             target: None,
             route: CaptureRoute::Paste,
             notice: String::new(),
+            wake_words: true,
         };
         for look in [Look::Gunmetal, Look::Holo, Look::Neon] {
             let mut painter = painter(1.0, look, true);
@@ -624,6 +626,7 @@ mod tests {
                     target: None,
                     route: CaptureRoute::Paste,
                     notice: "Delivered.".to_owned(),
+                    wake_words: true,
                 },
             ),
             (
