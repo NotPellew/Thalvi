@@ -6921,3 +6921,5 @@ dependencies = [
  "syn 3.0.9",
  "winnow 1.0.4",
 ]
+
+# Temporary issue 693 dependency fixture.
