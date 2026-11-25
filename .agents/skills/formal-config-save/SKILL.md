@@ -332,6 +332,9 @@ refresh the source hash. The check must fail `EachFieldKeepsItsLastSave`.
 Restore the scratch files and confirm the faithful check passes. Removing the
 temporary-file cleanup alone is not a failing recipe with serialized writers.
 
+`agent.rs` changed only in `phase` and its tests, to report a delivered status as `keyboard` when wake
+words are off; no covered function changed, so the model is unchanged and only the hash moved.
+
 ## Scope
 
 Three writers that each save once: a Settings save on the main thread, and an

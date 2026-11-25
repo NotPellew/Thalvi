@@ -96,6 +96,9 @@ pub enum Status {
         target: Option<String>,
         route: CaptureRoute,
         notice: String,
+        /// Whether the wake word starts the next capture, for the resting indicator.
+        #[serde(skip)]
+        wake_words: bool,
     },
     Failed {
         notice: String,
@@ -345,6 +348,7 @@ impl View {
                 target,
                 route: *route,
                 notice: notice.clone(),
+                wake_words: self.wake_words,
             },
             (Mode::Failed(failure), EngineState::Listening) => Status::Failed {
                 notice: failure.notice.clone(),
@@ -516,6 +520,7 @@ mod tests {
                     target: Some(kitty()),
                     route: CaptureRoute::Paste,
                     notice: "Pasted.".to_owned(),
+                    wake_words: false,
                 },
             ),
         ];
@@ -696,6 +701,7 @@ mod tests {
                     target: Some(kitty()),
                     route: CaptureRoute::Paste,
                     notice: "Delivered.".to_owned(),
+                    wake_words: true,
                 },
             ),
             (
@@ -986,6 +992,7 @@ mod tests {
                     target: Some(kitty()),
                     route: CaptureRoute::Paste,
                     notice: "Delivered.".to_owned(),
+                    wake_words: true,
                 },
                 json!({"state": "done", "target": "kitty", "route": "paste", "notice": "Delivered."}),
             ),

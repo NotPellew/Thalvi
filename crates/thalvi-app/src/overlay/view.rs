@@ -257,6 +257,7 @@ impl View {
                 target: Some("kitty".to_owned()),
                 route: CaptureRoute::Paste,
                 notice: "Pasted.".to_owned(),
+                wake_words: true,
             },
             Sample::Failed => Status::Failed {
                 kind: FailureKind::Other,
@@ -892,6 +893,7 @@ mod tests {
             target: None,
             route: CaptureRoute::Paste,
             notice: String::new(),
+            wake_words: true,
         };
         for (status, animating) in [
             (
