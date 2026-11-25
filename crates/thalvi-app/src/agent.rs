@@ -452,6 +452,23 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
     }
 }
 
+/// `phase`, except that a failure of something other than the recognizer leaves it ready.
+fn recognizer_phase(status: &watch::Receiver<Status>, phase: &'static str) -> &'static str {
+    let recognizer_failed = status.has_changed().is_err()
+        || matches!(
+            &*status.borrow(),
+            Status::Failed {
+                kind: FailureKind::Recognizer,
+                ..
+            }
+        );
+    if phase == "failed" && !recognizer_failed {
+        "ready"
+    } else {
+        phase
+    }
+}
+
 /// The recognizer that handles the next dictation, and whether it can, as the Recognition page says.
 fn recognizer(config: &DesktopConfig, phase: &str, rebuilding: bool) -> Value {
     let entry = config.stt.entries.active_live();
@@ -485,7 +502,7 @@ fn state(running: &impl Running) -> String {
         "copy_error": running.last_error().is_some(),
         "feeding": *running.feeding().borrow(),
         "overlay": {"state": overlay_word(&status.borrow(), running.overlay_on())},
-        "recognizer": recognizer(&config, phase, *running.rebuilding().borrow()),
+        "recognizer": recognizer(&config, recognizer_phase(&status, phase), *running.rebuilding().borrow()),
     });
     match &*status.borrow() {
         Status::Failed {
@@ -495,7 +512,7 @@ fn state(running: &impl Running) -> String {
             ..
         } => {
             reply["failure"] = match kind {
-                FailureKind::Delivery => json!({"headline": headline}),
+                FailureKind::Delivery | FailureKind::Recognizer => json!({"headline": headline}),
                 FailureKind::Other => {
                     json!({"headline": headline, "reason": scrub(notice, &secrets)})
                 }
@@ -2242,7 +2259,7 @@ mod tests {
             failed["overlay"],
             json!({"state": "error", "headline": "Recognition failed"})
         );
-        assert_eq!(failed["recognizer"]["status"], "failed");
+        assert_eq!(failed["recognizer"]["status"], "ready");
         rig.fake.overlay.store(false, Ordering::SeqCst);
         assert_eq!(
             rig.ask(&Request::State)["overlay"],
@@ -2254,6 +2271,26 @@ mod tests {
             "The recognizer refused the key (a key)."
         );
         assert!(!failed.to_string().contains(SECRET));
+    }
+
+    #[test]
+    fn only_a_recognizer_failure_makes_the_recognizer_failed() {
+        let rig = Rig::new("recognizer-health", "{}");
+        for (kind, expected) in [
+            (FailureKind::Recognizer, "failed"),
+            (FailureKind::Delivery, "ready"),
+            (FailureKind::Other, "ready"),
+        ] {
+            rig.fake.set_status(Status::Failed {
+                notice: "It failed.".to_owned(),
+                headline: "Failed",
+                causes: Vec::new(),
+                kind,
+            });
+            let state = rig.ask(&Request::State);
+            assert_eq!(state["state"], "failed", "{kind:?}");
+            assert_eq!(state["recognizer"]["status"], expected, "{kind:?}");
+        }
     }
 
     #[test]

@@ -1326,7 +1326,7 @@ function speech(context: PageContext): SpeechRows {
       case "paused":
         return "Paused — resume to dictate";
       case "failed":
-        return status.headline;
+        return status.kind === "recognizer" ? status.headline : "Ready";
     }
   }
 
@@ -1338,10 +1338,11 @@ function speech(context: PageContext): SpeechRows {
     }
     const how = entry.kind === "on_device" ? modelTitleFor(entry) : ARRIVES[entry.kind];
     nextDictation.textContent = `Next dictation: ${entry.name} · ${how} · ${statusState(currentStatus)}`;
-    const preparing = entry.kind === "on_device" && (currentStatus.state === "loading" || currentStatus.state === "failed");
+    const recognizerFailed = currentStatus.state === "failed" && currentStatus.kind === "recognizer";
+    const preparing = entry.kind === "on_device" && (currentStatus.state === "loading" || recognizerFailed);
     summaryActions.hidden = !preparing;
     // Only a catalog model can be downloaded again; a folder of the user's own is fixed on disk.
-    retry.hidden = currentStatus.state !== "failed" || (entry.kind === "on_device" && isModelFolder(entry.model ?? SPEECH_MODEL));
+    retry.hidden = !recognizerFailed || (entry.kind === "on_device" && isModelFolder(entry.model ?? SPEECH_MODEL));
     if (!preparing) say(retryProblem, "");
   }
 

@@ -151,6 +151,8 @@ it as `any_extra`, as the loader does. That is the refusal `Store::check` alread
 `write_atomically`, under the save lock. `agent.rs` changes only in its tests module. No writer, lock
 or temporary file changes, so the model and its three invariants are unchanged.
 
+The recognizer health fix (#673) changes `agent.rs`'s `state` reply only (`recognizer_phase` and the failure kind it reads) and one test. `settings_set`, `plan` and `plan_over` are unchanged, and no writer, lock or temporary file is added, so the model and its three invariants are unchanged.
+
 The shared private-file module (#528) moves `settings.rs`'s `write_private` and the rename into
 `thalvi_desktop::private::write_atomically`, which history also uses for its own file. The steps,
 their order, the shared `desktop.json.tmp` name and the cleanup on error are unchanged, and

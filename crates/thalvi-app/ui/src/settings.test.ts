@@ -2058,7 +2058,8 @@ describe("the next dictation summary and state words", () => {
     ["done", { state: "done", target: null, route: "paste", notice: "Pasted" }, "Ready"],
     ["loading", { state: "loading", notice: "Loading the speech model." }, "Loading the speech model."],
     ["paused", { state: "paused" }, "Paused — resume to dictate"],
-    ["failed", { state: "failed", notice: "n", headline: "Can't reach speech server — Settings", causes: [], kind: "other" }, "Can't reach speech server — Settings"],
+    ["failed", { state: "failed", notice: "n", headline: "Can't reach speech server — Settings", causes: [], kind: "recognizer" }, "Can't reach speech server — Settings"],
+    ["failed delivery", { state: "failed", notice: "n", headline: "Nothing was pasted — Settings", causes: [], kind: "delivery" }, "Ready"],
   ] as const)("shows %s as the summary state pushed through onStatus", async (_name, status, state) => {
     const stub = await open(several());
     goTo("recognition");
@@ -2100,7 +2101,7 @@ describe("the next dictation summary and state words", () => {
 
   describe("the summary's actions while the recognizer is being prepared", () => {
     const LOADING: Status = { state: "loading", notice: "Downloading the speech model — 42%" };
-    const FAILED: Status = { state: "failed", notice: "n", headline: "Download failed", causes: [], kind: "other" };
+    const FAILED: Status = { state: "failed", notice: "n", headline: "Download failed", causes: [], kind: "recognizer" };
     const actions = (): string[] => {
       const row = root.querySelector(".next-dictation + div");
       return row === null || (row as HTMLElement).hidden
@@ -2118,6 +2119,7 @@ describe("the next dictation summary and state words", () => {
       ["on this computer, paused", local, { state: "paused" }, []],
       ["a server, loading", several, LOADING, []],
       ["a server, failed", several, FAILED, []],
+      ["on this computer, a delivery failed", local, { ...FAILED, kind: "delivery" }, []],
     ] as [string, () => Settings, Status, string[]][])("offers the right actions for %s", async (_name, settings, status, expected) => {
       const stub = await open(settings());
       goTo("recognition");

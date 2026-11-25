@@ -24,6 +24,11 @@ waiting for an on-device load. Their mapped actions remain below. Microphone
 switching happens after capture; notices, metrics and endpoint payload changes
 add no delivery path. `Control::Overlay` (8df760f) returns false from `Requests::ends`, so it never sets `ended` and neither admits nor blocks delivery, the same as `Apply` for this property; it is not one of the modeled controls. No product promise or bound changed in this maintenance.
 
+`Runner::capture` now also tells a capture that failed in the recognizer from one
+that failed in delivery (`undelivered`) when it sets the status's failure kind,
+after `Settling::settle` has already decided what reaches the host. That is a
+label on the status, not a delivery path, so the mapped actions are unchanged.
+
 `Engine::capture` now also records the delivery route on a delivered capture's
 metrics line, after `set_state(Listening)` and after the outcome has already
 been decided. That write is not a delivery path and adds no cancellation or
