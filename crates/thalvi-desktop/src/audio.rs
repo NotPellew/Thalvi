@@ -1,4 +1,4 @@
-//! Owns the microphone: cpal capture, 16 kHz framing and the input gate.
+//! Owns microphone capture, 16 kHz framing and the input gate.
 
 mod error;
 mod framer;
