@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""Evaluate Thalvi's owner hold from current GitHub API data."""
+
+import argparse
+from dataclasses import dataclass
+from html import escape
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+OWNER = "NotPellew"
+APPROVAL = "owner-ok"
+HOLD_PATHS = {
+    "repository tooling": (".github/", ".githooks/", ".cargo/"),
+    "verify skill": (".agents/skills/verify-thalvi/",),
+}
+ROOT_FILES = {
+    "decision records and agent rules": {"DECISIONS.md", "AGENTS.md", "CLAUDE.md"},
+    "toolchain, lint and security settings": {
+        "deny.toml", "rust-toolchain.toml", "clippy.toml", ".gitleaks.toml", ".node-version",
+        ".python-version",
+    },
+}
+DEPENDENCY_FILES = {"Cargo.toml", "package.json", "package-lock.json"}
+SCRIPTS = Path(__file__).resolve().parent
+TITLE_TYPE = re.compile(r"^([a-z]+)(?:\([^()\r\n]+\))?!?:")
+RUNS = "actions/workflows/hold.yml/runs?per_page=100"
+RERUN_WAIT = 180
+
+
+class HoldError(Exception):
+    """An incomplete or stale response prevents a decision."""
+
+
+def api(endpoint, *, paginate=False, post=False):
+    args = ["gh", "api"]
+    if paginate:
+        args += ["--paginate", "--slurp"]
+    if post:
+        args += ["--method", "POST"]
+    repo = os.environ["GITHUB_REPOSITORY"]
+    result = subprocess.run(
+        [*args, f"repos/{repo}/{endpoint}"], text=True, capture_output=True, check=False,
+    )
+    if result.returncode:
+        raise HoldError(f"{endpoint}: {result.stderr.strip() or 'GitHub API request failed'}")
+    if post:
+        return
+    response = json.loads(result.stdout)
+    if paginate and (not isinstance(response, list) or not response):
+        raise HoldError(f"{endpoint}: missing response pages")
+    return response
+
+
+def records(pages):
+    for page in pages:
+        if not isinstance(page, list):
+            raise HoldError("expected a list in each GitHub API page")
+        yield from page
+
+
+def closing_refs(body):
+    result = subprocess.run(
+        [str(SCRIPTS / "issue-refs.sh"), "closes", os.environ["GITHUB_REPOSITORY"]],
+        input=body or "", text=True, capture_output=True, check=True,
+    )
+    return dict.fromkeys(int(number) for number in result.stdout.split())
+
+
+def label_names(response):
+    return frozenset(label["name"] for label in response["labels"])
+
+
+def code(value):
+    return f"<code>{escape(' '.join(value.splitlines()))}</code>"
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    body: str | None
+    author: str
+    labels: frozenset[str]
+    state: str
+    updated: str
+    head_sha: str
+    base_sha: str
+    base_ref: str
+    changed_files: int
+
+    @classmethod
+    def read(cls, number):
+        pr = api(f"pulls/{number}")
+        return cls(
+            pr["body"], pr["user"]["login"], label_names(pr), pr["state"], pr["updated_at"],
+            pr["head"]["sha"], pr["base"]["sha"], pr["base"]["ref"], pr["changed_files"],
+        )
+
+
+def approval_warning(number):
+    events = records(api(f"issues/{number}/events?per_page=100", paginate=True))
+    transitions = (
+        event for event in events
+        if event["event"] in {"labeled", "unlabeled"} and event["label"]["name"] == APPROVAL
+    )
+    latest = max(transitions, key=lambda event: (event["created_at"], event["id"]), default=None)
+    if latest and latest["event"] == "labeled":
+        actor = latest["actor"]
+        if actor and actor["login"] == OWNER:
+            return None
+        if actor:
+            return f"owner-ok added by {code(actor['login'])}. Only {OWNER} can approve."
+    return f"owner-ok has no current approval from {OWNER}."
+
+
+def issue_reason(number):
+    issue = api(f"issues/{number}")
+    if "pull_request" in issue:
+        return f"#{number} is a pull request."
+    labels = label_names(issue)
+    conventional = TITLE_TYPE.match(issue["title"])
+    kind = conventional[1] if conventional else None
+    if labels & {"bug", "ci-regression"} or kind == "fix":
+        return None
+    label_text = ", ".join(code(label) for label in sorted(labels)) or "none"
+    reason = "is a feature" if kind == "feat" else "requires owner review"
+    return f"#{number} {reason} (labels: {label_text}, title type: {kind or 'none'})."
+
+
+def changed_paths(number, expected):
+    if type(expected) is not int or not 0 <= expected <= 3000:
+        raise HoldError("changed file list exceeds API coverage or has an invalid count")
+    files = records(api(f"pulls/{number}/files?per_page=100", paginate=True))
+    current = set()
+    previous = set()
+    for file in files:
+        path = file["filename"]
+        status = file["status"]
+        if not isinstance(path, str) or not path or path in current:
+            raise HoldError("changed file list has a missing or duplicate filename")
+        if not isinstance(status, str) or not status:
+            raise HoldError("changed file list has a file without a status")
+        current.add(path)
+        if status == "renamed":
+            old = file.get("previous_filename")
+            if not isinstance(old, str) or not old:
+                raise HoldError("changed file list has a rename without its previous filename")
+            previous.add(old)
+    if len(current) != expected:
+        raise HoldError(f"incomplete changed file list: expected {expected}, got {len(current)}")
+    return current | previous
+
+
+def path_reasons(paths):
+    groups = {}
+    for path in sorted(paths):
+        category = next((group for group, prefixes in HOLD_PATHS.items() if path.startswith(prefixes)), None)
+        if not category:
+            category = next((group for group, names in ROOT_FILES.items() if path in names), None)
+        if not category and (path == "Cargo.lock" or path.rsplit("/", 1)[-1] in DEPENDENCY_FILES):
+            category = "dependency files"
+        if category:
+            groups.setdefault(category, []).append(code(path))
+    return [f"touches {', '.join(names)} ({group})." for group, names in groups.items()]
+
+
+def evaluate(number, head, base):
+    pr = PullRequest.read(number)
+    if pr.state != "open" or pr.head_sha != head or pr.base_ref != base:
+        raise HoldError("PR changed since this workflow run was created")
+    if pr.author == OWNER:
+        return True, ["The owner authored this PR."]
+
+    notes = []
+    if APPROVAL in pr.labels:
+        warning = approval_warning(number)
+        if PullRequest.read(number) != pr:
+            raise HoldError("PR changed while checking owner approval")
+        if warning is None:
+            return True, ["The owner approved this PR."]
+        notes.append(warning)
+
+    refs = closing_refs(pr.body)
+    reasons = [] if refs else ["closes no issue."]
+    for ref in refs:
+        if reason := issue_reason(ref):
+            reasons.append(reason)
+    reasons.extend(path_reasons(changed_paths(number, pr.changed_files)))
+    if PullRequest.read(number) != pr:
+        raise HoldError("PR changed while checking the policy")
+    if reasons:
+        return False, notes + reasons
+    issues = ", ".join(f"#{ref}" for ref in refs)
+    return True, notes + [f"Closes qualifying fixes ({issues}) and changes no protected paths."]
+
+
+def check(number, head, base):
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SCRIPTS, text=True).strip()
+    try:
+        passed, reasons = evaluate(number, head, base)
+        heading = "hold: passed" if passed else "hold: waiting for the owner"
+        summary = [heading, "", *(f"- {reason}" for reason in reasons)]
+        if not passed:
+            summary.extend(("", "The owner can release this PR by adding the owner-ok label."))
+    except (HoldError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as error:
+        print(f"hold: {error}", file=sys.stderr)
+        passed = False
+        summary = ["hold: error", "", code(str(error))]
+    summary.extend(("", f"Policy commit: {sha}"))
+    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
+        print("\n".join(summary), file=file)
+    return 0 if passed else 1
+
+
+def latest_runs(pending):
+    pages = api(RUNS, paginate=True)
+    latest = {}
+    for run in records(page["workflow_runs"] for page in pages):
+        title = run["display_title"]
+        if run["event"] != "pull_request_target" or title not in pending:
+            continue
+        previous = latest.get(title)
+        if previous is None or run["run_number"] > previous["run_number"]:
+            latest[title] = run
+    return latest
+
+
+def rerun(number):
+    pulls = records(api("pulls?state=open&per_page=100", paginate=True))
+    pending = {f"Hold PR #{pr['number']}" for pr in pulls if number in closing_refs(pr["body"])}
+    deadline = time.monotonic() + RERUN_WAIT
+    failures = []
+    while pending:
+        latest = latest_runs(pending)
+        for title, run in latest.items():
+            if run["status"] != "completed":
+                continue
+            try:
+                api(f"actions/runs/{run['id']}/rerun", post=True)
+                print(f"Requested {title} rerun ({run['id']}).")
+            except HoldError as error:
+                failures.append(str(error))
+            pending.remove(title)
+        if pending:
+            if time.monotonic() >= deadline:
+                failures.append(f"no completed latest run for {', '.join(sorted(pending))}")
+                break
+            time.sleep(2)
+    if failures:
+        raise HoldError("\n".join(failures))
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    decision = commands.add_parser("check")
+    decision.add_argument("number", type=int)
+    decision.add_argument("head")
+    decision.add_argument("base")
+    refresh = commands.add_parser("rerun")
+    refresh.add_argument("number", type=int)
+    args = parser.parse_args()
+    if args.command == "check":
+        return check(args.number, args.head, args.base)
+    try:
+        return rerun(args.number)
+    except (HoldError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as error:
+        print(f"hold: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,62 @@
+name: Hold
+run-name: >-
+  ${{ github.event_name == 'pull_request_target' && format('Hold PR #{0}', github.event.pull_request.number)
+      || format('Hold issue #{0}', github.event.issue.number) }}
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+  issues:
+    types: [labeled, unlabeled, edited]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  hold:
+    name: hold
+    if: github.event_name == 'pull_request_target'
+    concurrency:
+      group: hold-pr-${{ github.event.pull_request.number }}
+      # A rerun discovered by an issue event must let a newer PR run finish.
+      cancel-in-progress: ${{ github.run_attempt == 1 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: /.github/scripts/
+          sparse-checkout-cone-mode: false
+      - name: evaluate the current pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+        run: .github/scripts/hold check "$PR_NUMBER" "$PR_HEAD" "$PR_BASE"
+
+  refresh:
+    name: refresh affected PR holds
+    if: github.event_name == 'issues'
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: /.github/scripts/
+          sparse-checkout-cone-mode: false
+      - name: rerun holds for PRs closing the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: .github/scripts/hold rerun "$ISSUE_NUMBER"
