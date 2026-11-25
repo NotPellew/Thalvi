@@ -44,6 +44,12 @@ pub fn get_status(state: State<'_, AppState>) -> Status {
     state.link.status()
 }
 
+/// Whether the next dictation waits for a rebuilt engine, as `thalvi://rebuilding` says when it changes.
+#[tauri::command]
+pub fn get_rebuilding(state: State<'_, AppState>) -> bool {
+    *state.link.rebuilding_updates().borrow()
+}
+
 #[tauri::command]
 pub fn get_audio(state: State<'_, AppState>) -> AudioStatus {
     state.link.audio()

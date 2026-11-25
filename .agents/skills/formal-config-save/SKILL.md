@@ -168,6 +168,10 @@ publishes `Status::Loading` on the status watch; it writes neither `desktop.json
 `AppState::config` and takes no save lock, while `SyncedConfig::set` (`Apply`) and `Control::Apply`
 (`Send`) keep their exact order under the save lock, so the model and its three invariants are unchanged.
 
+Publishing a queued rebuild (#677) adds `commands::get_rebuilding`, `Running::rebuilding` and an
+event in `follow_engine`; they only read the publisher's watch, so no write, lock or order changes
+and the model is unchanged.
+
 Pause, resume and toggle replies in `agent.rs` (#668) now wait for the status as well as the audio flag
 before answering. They only read watch channels; no writer, lock or `settings_set` change, so the model
 and its three invariants are unchanged.

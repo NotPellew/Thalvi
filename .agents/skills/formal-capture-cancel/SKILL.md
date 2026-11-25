@@ -193,6 +193,9 @@ between `EngineLink` and `Runner`, tracks rebuild sequence numbers in `Runner::a
 `Runner::capture`, `Settling::settle`, and `Runner::apply_engine` keep the same cancellation
 writes, await boundaries, and delivery admission fence, so the model actions are unchanged.
 
+Publishing a queued rebuild to the UI and `state` (#677) makes `Publisher::mutate` also update a
+separate `rebuilding` watch. No mapped function changed, so the model actions are unchanged.
+
 Cancelling engine builds on quit (#671) adds `Runner::build_interruptible` and `build_session` in
 `runner.rs`: `Runner::start` and `Runner::rebuild` select the build against a quit watch that
 `EngineLink::quit` sets before it sends `Control::Quit`, and drop the in-flight load. That runs

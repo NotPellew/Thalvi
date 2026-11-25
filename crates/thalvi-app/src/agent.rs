@@ -196,6 +196,8 @@ impl Switch {
 pub trait Running {
     fn status(&self) -> watch::Receiver<Status>;
     fn audio(&self) -> watch::Receiver<AudioStatus>;
+    /// Whether the next dictation waits for the engine a saved change rebuilds.
+    fn rebuilding(&self) -> watch::Receiver<bool>;
     /// The latest failure shown, which `copy-error` can report.
     fn last_error(&self) -> Option<Failure>;
     fn control(&self, control: Control);
@@ -451,7 +453,7 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
 }
 
 /// The recognizer that handles the next dictation, and whether it can, as the Recognition page says.
-fn recognizer(config: &DesktopConfig, phase: &str) -> Value {
+fn recognizer(config: &DesktopConfig, phase: &str, rebuilding: bool) -> Value {
     let entry = config.stt.entries.active_live();
     let (kind, model) = match &entry.kind {
         LiveKind::Realtime(_) => ("realtime", None),
@@ -462,6 +464,7 @@ fn recognizer(config: &DesktopConfig, phase: &str) -> Value {
     };
     let ready = match phase {
         "paused" | "loading" | "failed" => phase,
+        _ if rebuilding => "loading",
         _ => "ready",
     };
     let mut recognizer = json!({"name": entry.name, "kind": kind, "status": ready});
@@ -482,7 +485,7 @@ fn state(running: &impl Running) -> String {
         "copy_error": running.last_error().is_some(),
         "feeding": *running.feeding().borrow(),
         "overlay": {"state": overlay_word(&status.borrow(), running.overlay_on())},
-        "recognizer": recognizer(&config, phase),
+        "recognizer": recognizer(&config, phase, *running.rebuilding().borrow()),
     });
     match &*status.borrow() {
         Status::Failed {
@@ -954,6 +957,7 @@ mod tests {
     struct Fake {
         status: watch::Sender<Status>,
         audio: watch::Sender<AudioStatus>,
+        rebuilding: watch::Sender<bool>,
         saves: SyncedConfig,
         /// A Settings save that lands just before the agent's next save.
         settings_save_first: Mutex<Option<Value>>,
@@ -1009,6 +1013,7 @@ mod tests {
                 switches: Mutex::new(Vec::new()),
                 shown: AtomicUsize::new(0),
                 pages: Mutex::new(Vec::new()),
+                rebuilding: watch::channel(false).0,
                 feeding: watch::channel(false).0,
                 fed: Mutex::new(Vec::new()),
                 feed_release: Mutex::new(None),
@@ -1061,6 +1066,10 @@ mod tests {
 
         fn audio(&self) -> watch::Receiver<AudioStatus> {
             self.audio.subscribe()
+        }
+
+        fn rebuilding(&self) -> watch::Receiver<bool> {
+            self.rebuilding.subscribe()
         }
 
         fn last_error(&self) -> Option<Failure> {
@@ -2165,6 +2174,32 @@ mod tests {
                 "loading",
             ),
         ]
+    }
+
+    #[test]
+    fn a_queued_rebuild_makes_the_next_recognizer_loading_while_the_capture_runs() {
+        let rig = Rig::new(
+            "queued",
+            &format!(
+                r#"{{"stt": {{"entries": [{}]}}}}"#,
+                entry("live", "realtime", true, None)
+            ),
+        );
+        rig.fake.set_status(capturing_status());
+        let both = |rig: &Rig| {
+            let state = rig.ask(&Request::State);
+            (
+                state["state"].clone(),
+                state["recognizer"]["status"].clone(),
+            )
+        };
+        assert_eq!(both(&rig), (json!("capturing"), json!("ready")));
+
+        rig.fake.rebuilding.send_replace(true);
+        assert_eq!(both(&rig), (json!("capturing"), json!("loading")));
+
+        rig.fake.rebuilding.send_replace(false);
+        assert_eq!(both(&rig), (json!("capturing"), json!("ready")));
     }
 
     #[test]
