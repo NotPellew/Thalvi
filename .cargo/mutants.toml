@@ -18,6 +18,8 @@ exclude_re = [
     "^crates/thalvi-app/src/runner.rs:\\d+:\\d+: replace \\|\\| with && in Runner<S>::end_unopened_feed$",
     # The native output adapter's drop hook calls CueEngine::stop, which is tested with a fake speaker.
     "^crates/thalvi-desktop/src/engine.rs:\\d+:\\d+: replace <impl Drop for StopOnDrop>::drop with \\(\\)$",
+    # The quiet step fires only with no waiting preview, and a failed one ends the capture through its own branch first; only a preview another thread changes between those two polls reaches this guard.
+    "^crates/thalvi-desktop/src/engine.rs:\\d+:\\d+: replace Engine<R, W, C>::quiet_allowed -> Result<\\(\\), Option<Done>> with Ok\\(\\(\\)\\)$",
     # Equivalent: keeping frames no consumer reads changes memory use, not what a capture delivers or records.
     "^crates/thalvi-desktop/src/engine.rs:\\d+:\\d+: replace Engine<R, W, C>::keeps_sent -> bool with true$",
     # Equivalent: frame and release orders come from one process-wide counter, so they are equal only after it wraps.
