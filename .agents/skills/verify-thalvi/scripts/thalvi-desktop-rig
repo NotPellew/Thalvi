@@ -10,9 +10,10 @@ GNOME_HELPER=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/thalvi-gnome-rig.py
 
 usage() {
   cat <<'EOF'
-up [--size WxH] [--gnome] [--mic] [--offline] [--software]
-                           start the compositors (or headless GNOME Shell); prints RUN_DIR=<R> last. --mic gives a
-                           Hyprland run the private microphone a --gnome run always has; --offline puts every sandbox
+up [--size WxH] [--gnome] [--mic] [--offline] [--software] [--models NAME,...]
+                           start the compositors (or headless GNOME Shell); prints RUN_DIR=<R> last. --models hardlinks
+                           cached NAME or NAME.* files from $BASE/models into the run, stopping if any is missing;
+                           --mic gives a Hyprland run the private microphone a --gnome run always has; --offline puts every sandbox
                            of the run in a network namespace with only loopback; --software is only for a --gnome run
                            and draws it without a GPU node
 bind R SRC DST             ro-bind the directory SRC at DST in every later sandbox of this run
@@ -32,7 +33,7 @@ say R WAV                  runs with a microphone: play WAV into it, in real tim
 gnome R ARGS...            --gnome runs: windows | focus | key NAME | type TEXT | clip | victim LOG (what holds focus, keys, clipboard)
 sh R CMD...                run any command in a sandbox joined to the same private dirs
 proof R                    write R/out/isolation.txt: what the sandbox cannot reach
-down R                     stop everything started by this run; evidence stays in R/out
+down R                     stop everything started by this run; evidence stays in R/out until a later up prunes it (24 h)
 EOF
 }
 
@@ -243,8 +244,44 @@ cmd_bind() {
   printf '%s\n%s\n' "$src" "$dst" > "$r/ro-bind"
 }
 
+prune() {
+  local base=$1 d f pid app used live real
+  while IFS= read -r -d '' d; do
+    live=0
+    for f in "$d/compositor.pid" "$d/app.pid"; do
+      pid=
+      [ ! -s "$f" ] || IFS= read -r pid < "$f" || true
+      [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || live=1
+    done
+    [ "$live" = 0 ] || continue
+    if rm -rf -- "$d"; then echo "up: pruned $d" >&2; else echo "up: could not prune $d" >&2; fi
+  done < <(find "$base" -mindepth 1 -maxdepth 1 -type d -name 'run-*' -mmin +1440 -print0)
+  [ -d "$base/bin" ] || return 0
+  while IFS= read -r -d '' d; do
+    used=0
+    real=$(readlink -f -- "$d")
+    for app in "$base"/run-*/app.bin; do
+      [ -s "$app" ] || continue
+      case $(readlink -m -- "$(cat "$app")") in "$real"/*) used=1; break ;; esac
+    done
+    [ "$used" = 0 ] || continue
+    [ -z "$(find "$d" \( -mmin -1440 -o -amin -1440 \) -print -quit)" ] || continue
+    if rm -rf -- "$d"; then echo "up: pruned $d" >&2; else echo "up: could not prune $d" >&2; fi
+  done < <(find "$base/bin" -mindepth 1 -maxdepth 1 -type d -print0)
+}
+
+# The cache stays read-only: the run gets hardlinks, or reflinks if the cache is on another filesystem.
+link_models() {
+  local f dest=$1/home/.local/share/thalvi/models
+  mkdir -p "$dest"
+  shift
+  for f in "$@"; do
+    cp -l -- "$f" "$dest/" 2>/dev/null || cp --reflink=auto -- "$f" "$dest/" || die "up: could not link model $f"
+  done
+}
+
 cmd_up() {
-  local size=1920x1080 gnome=0 mic=0 offline=0 software=0
+  local size=1920x1080 gnome=0 mic=0 offline=0 software=0 models=
   while [ $# -gt 0 ]; do
     case $1 in
       --size) size=$2; shift 2 ;;
@@ -252,18 +289,35 @@ cmd_up() {
       --mic) mic=1; shift ;;
       --offline) offline=1; shift ;;
       --software) software=1; shift ;;
+      --models) models=$2; shift 2 ;;
       *) die "up: unknown argument $1" ;;
     esac
   done
   [ "$software" = 0 ] || [ "$gnome" = 1 ] || die "up: --software is only for a --gnome run"
+  mkdir -p "$BASE"
+  prune "$BASE"
+  local -a names=() model_files=()
+  IFS=, read -r -a names <<< "$models"
+  local name
+  for name in "${names[@]}"; do
+    [ -n "$name" ] || continue
+    if [ -e "$BASE/models/$name" ]; then
+      model_files+=("$BASE/models/$name")
+    else
+      local -a matches=()
+      mapfile -t matches < <(compgen -G "$BASE/models/$name.*" || true)
+      [ ${#matches[@]} -gt 0 ] || die "up: no model file $BASE/models/$name or $BASE/models/$name.* in the cache (seed it with install -D -m 444 -t $BASE/models FILE...)"
+      model_files+=("${matches[@]}")
+    fi
+  done
   if [ "$software" = 0 ]; then
     local node
     node=$(render_node)
     render_source "$node" > /dev/null  # dies here, in the main shell, on a bad THALVI_RIG_RENDER or an unusable primary node
   fi
-  mkdir -p "$BASE"
   local r
   r=$(mktemp -d "$BASE/run-XXXXXX")
+  [ ${#model_files[@]} -eq 0 ] || link_models "$r" "${model_files[@]}"
   mkdir -p "$r/rt" "$r/home/.config" "$r/home/.local/share" "$r/home/.cache" "$r/out"
   chmod 700 "$r/rt"
   [ "$offline" = 0 ] || touch "$r/offline"
@@ -384,6 +438,7 @@ cmd_app_start() {
     esac
   done
   [ -x "$bin" ] || die "no executable $bin"
+  bin=$(readlink -f -- "$bin")
   # The app computes on the NVIDIA GPU, which the compositors never touch. NVIDIA's Vulkan driver fails to load
   # while the Mesa-only EGL vendor list of the sandbox is set.
   if [ "$nvidia" = 1 ]; then
