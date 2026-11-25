@@ -44,3 +44,5 @@ pub mod wake;
 pub mod wake_stats;
 pub mod whisper;
 pub mod writing;
+
+// Temporary issue 693 relabel fixture.
