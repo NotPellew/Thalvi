@@ -196,10 +196,11 @@ fn accept(
                 let _ = connection.set_read_timeout(Some(read_timeout));
                 let read = read_line(&connection, MAX_REQUEST);
                 let answer = match &read {
-                    Ok(request) => handler(request),
+                    Ok(Some(request)) => handler(request),
+                    // A connection that ended before any byte, or failed to read, sent nothing.
+                    Ok(None) | Err(LineError::Io(_)) => return,
                     Err(LineError::TooLong) => refusal("That request is too long."),
                     Err(LineError::NotText) => refusal("That request is not text."),
-                    Err(LineError::Io(_)) => return,
                 };
                 let _ = reply(&connection, &answer);
                 if read == Err(LineError::TooLong) {
@@ -292,16 +293,23 @@ fn ask_in(
     stream.set_read_timeout(Some(timeout)).map_err(failed)?;
     stream.set_write_timeout(Some(timeout)).map_err(failed)?;
     writeln!(&stream, "{request}").map_err(failed)?;
-    match read_line(&stream, MAX_REPLY) {
-        Ok(reply) if reply.is_empty() => Err(unsupported(
+    let reply = match read_line(&stream, MAX_REPLY) {
+        Ok(Some(reply)) => reply,
+        // A connection that ended without an answer at all.
+        Ok(None) => String::new(),
+        Err(LineError::Io(kind)) => return Err(failed(kind.into())),
+        Err(_) => {
+            return Err(unsupported(
+                "Thalvi answered with something that is not a reply.",
+            ));
+        }
+    };
+    if reply.is_empty() {
+        return Err(unsupported(
             "Thalvi closed the connection without answering.",
-        )),
-        Ok(reply) => Ok(Some(reply)),
-        Err(LineError::Io(kind)) => Err(failed(kind.into())),
-        Err(_) => Err(unsupported(
-            "Thalvi answered with something that is not a reply.",
-        )),
+        ));
     }
+    Ok(Some(reply))
 }
 
 #[cfg(test)]
