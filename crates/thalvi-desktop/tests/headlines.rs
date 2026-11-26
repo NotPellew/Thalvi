@@ -112,7 +112,7 @@ fn recognition() -> Cases {
                 model: "Nemotron 160ms".to_owned(),
                 lag: seconds,
             }),
-            "Can't keep up with Nemotron 160ms",
+            "Nemotron 160ms is too slow",
         ),
         (
             Box::new(CaptureError::NotReady {

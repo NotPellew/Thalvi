@@ -131,13 +131,20 @@ struct Shared<S: ModelSource> {
     running: Mutex<Option<watch::Receiver<Outcome<S::Model>>>>,
     steps: watch::Sender<Step>,
     name: String,
+    /// How the user knows the model, for the notice when it falls behind; `name` labels metrics.
+    title: String,
     metrics: Metrics,
 }
 
 impl<S: ModelSource> LocalRecognizer<S> {
-    /// `name` labels the model in metrics.
+    /// `name` labels the model in metrics; `title` is how the user knows it.
     #[must_use]
-    pub fn new(source: S, name: impl Into<String>, metrics: Metrics) -> Self {
+    pub fn new(
+        source: S,
+        name: impl Into<String>,
+        title: impl Into<String>,
+        metrics: Metrics,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 source,
@@ -145,6 +152,7 @@ impl<S: ModelSource> LocalRecognizer<S> {
                 running: Mutex::new(None),
                 steps: watch::channel(Step::Reading).0,
                 name: name.into(),
+                title: title.into(),
                 metrics,
             }),
             loads: Mutex::new(JoinSet::new()),
@@ -302,7 +310,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
             events: events_rx,
             cancelled,
             backlog,
-            model: self.shared.name.clone(),
+            model: self.shared.title.clone(),
         })
     }
 

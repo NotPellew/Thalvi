@@ -2556,6 +2556,7 @@ mod tests {
                     fails,
                 },
                 "test",
+                "test",
                 Recorder::disabled().metrics(),
             );
             let (out, status) = watch::channel(Status::Paused);
@@ -2627,6 +2628,7 @@ mod tests {
         let local = LocalRecognizer::new(
             FailsOnce(std::sync::atomic::AtomicBool::new(true)),
             "test",
+            "test",
             Recorder::disabled().metrics(),
         );
         let (out, status) = watch::channel(Status::Paused);
@@ -2659,6 +2661,7 @@ mod tests {
             let local = LocalRecognizer::new(
                 FailsOnce(std::sync::atomic::AtomicBool::new(true)),
                 "test",
+                "test",
                 Recorder::disabled().metrics(),
             );
             let (out, _status) = watch::channel(Status::Paused);
@@ -2676,11 +2679,13 @@ mod tests {
         let loaded = LocalRecognizer::new(
             FailsOnce(std::sync::atomic::AtomicBool::new(false)),
             "test",
+            "test",
             Recorder::disabled().metrics(),
         );
         loaded.load().await.unwrap();
         let unloaded = LocalRecognizer::new(
             FailsOnce(std::sync::atomic::AtomicBool::new(false)),
+            "test",
             "test",
             Recorder::disabled().metrics(),
         );
@@ -2760,6 +2765,7 @@ mod tests {
         let (steps, received) = mpsc::unbounded_channel();
         let local = Arc::new(LocalRecognizer::new(
             Streamed(std::sync::Mutex::new(Some(received))),
+            "test",
             "test",
             Recorder::disabled().metrics(),
         ));
@@ -5761,6 +5767,7 @@ mod tests {
                         fails: false,
                     },
                     "test",
+                    "test",
                     Recorder::disabled().metrics(),
                 );
                 let mut script = FedRun::configured(
@@ -5792,6 +5799,7 @@ mod tests {
             .run_until(async {
                 let local = LocalRecognizer::new(
                     FailsOnce(std::sync::atomic::AtomicBool::new(true)),
+                    "test",
                     "test",
                     Recorder::disabled().metrics(),
                 );

@@ -3692,7 +3692,7 @@ async fn a_capture_that_falls_behind_the_microphone_names_the_model_and_stops() 
                 error.to_string(),
                 "This computer can't keep up with Nemotron 160ms. Nothing was delivered."
             );
-            assert_eq!(error.headline(), "Can't keep up with Nemotron 160ms");
+            assert_eq!(error.headline(), "Nemotron 160ms is too slow");
             assert!(rig.gate.is_enabled(), "listening goes on");
             let lines = read_lines(&dir.join("metrics.jsonl"));
             let flow = lines

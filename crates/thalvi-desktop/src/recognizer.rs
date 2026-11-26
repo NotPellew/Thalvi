@@ -235,7 +235,7 @@ impl UserError for RecognizerError {
                 TranscriptionFailure::HttpStatus => "Speech server error — Settings",
                 TranscriptionFailure::BadReply => "Bad speech server reply — Settings",
             },
-            Self::Behind { model, .. } => return format!("Can't keep up with {model}"),
+            Self::Behind { model, .. } => return format!("{model} is too slow"),
         }
         .to_owned()
     }

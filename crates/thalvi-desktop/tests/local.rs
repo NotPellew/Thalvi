@@ -197,6 +197,7 @@ fn rig_on(
                 started: AtomicUsize::new(0),
             },
             "fake-model",
+            "fake-model",
             recorder.metrics(),
         ),
         recorder,
@@ -427,6 +428,18 @@ async fn a_model_three_seconds_behind_stops_the_recognition_and_names_itself() {
     let rig = rig("behind", |_| Ok(vec![]), Some(gate), 0);
     let seen = Arc::clone(&rig.seen);
     let mut session = rig.recognizer.connect().await.expect("connects");
+    session.send_frame(&FRAME).await.expect("sends");
+    for _ in 0..1_000 {
+        if seen.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the model starts on the first frame"
+    );
     let mut stopped = None;
     for _ in 0..40 {
         match session.send_frame(&FRAME).await {
