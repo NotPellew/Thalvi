@@ -61,6 +61,14 @@ impl Backlog {
             .pop_front();
     }
 
+    /// The hold's key came up: the frames sent so far are its last.
+    fn hold_released(&self) {}
+
+    /// Whether audio from before the hold's release is still unanswered.
+    fn behind(&self) -> bool {
+        self.pending()
+    }
+
     /// The model has frames it has not finished.
     fn pending(&self) -> bool {
         !self
@@ -70,7 +78,8 @@ impl Backlog {
             .is_empty()
     }
 
-    fn behind(&self) -> Option<Duration> {
+    /// The lag this recognition stopped at, once the model fell further behind than a capture may.
+    fn lag_stop(&self) -> Option<Duration> {
         *self
             .fell_behind
             .lock()
@@ -356,7 +365,11 @@ impl RecognizerSession for LocalSession {
     }
 
     fn behind(&self) -> bool {
-        self.backlog.pending()
+        self.backlog.behind()
+    }
+
+    fn hold_released(&mut self) {
+        self.backlog.hold_released();
     }
 
     fn send_frame(
@@ -444,7 +457,7 @@ impl<S: SpeechStream> Work<S> {
         if outcome == "ok" && self.cancelled.load(Ordering::Relaxed) {
             outcome = "cancelled";
         }
-        let behind = self.backlog.behind();
+        let behind = self.backlog.lag_stop();
         if behind.is_some() {
             outcome = "cant_keep_up";
         }
@@ -472,6 +485,35 @@ impl<S: SpeechStream> Work<S> {
             outcome,
             Some(tally.model),
             self.device.tag(fields),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_release_flush_is_never_owed_a_result_but_the_audio_before_it_is() {
+        let backlog = Backlog::default();
+        backlog.send("model").unwrap();
+        backlog.send("model").unwrap();
+        backlog.hold_released();
+        assert!(
+            backlog.behind(),
+            "both frames from before the release are not answered yet"
+        );
+        backlog.took();
+        assert!(backlog.behind(), "one of the two is still unanswered");
+        backlog.took();
+        assert!(
+            !backlog.behind(),
+            "every frame sent before the release has its result"
+        );
+        backlog.send("model").unwrap();
+        assert!(
+            !backlog.behind(),
+            "the 800 ms release flush is not owed a result, so it does not keep a hold waiting"
         );
     }
 }

@@ -291,6 +291,10 @@ pub trait RecognizerSession: Send {
         false
     }
 
+    /// The hold's key came up after the audio sent so far: only that audio is owed a result, not
+    /// the release flush that follows it.
+    fn hold_released(&mut self) {}
+
     /// Signals that all audio for a buffered capture has arrived.
     fn finish_audio(&mut self) -> impl Future<Output = Result<(), RecognizerError>> + Send {
         std::future::ready(Ok(()))
