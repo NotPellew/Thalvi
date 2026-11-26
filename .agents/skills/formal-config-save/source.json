@@ -59,13 +59,13 @@
       ]
     },
     "crates/thalvi-desktop/src/host/channel.rs": {
-      "sha256": "7de9d847b6dc0f5082c12edf3b8aafeefdcb7a621355bb8153cd13b437a0623c",
+      "sha256": "34368c7b0b56ff9600d5a6ed716d30ffdc4a3081971e29e93230f89c211b9277",
       "functions": [
         "accept"
       ]
     },
     "crates/thalvi-desktop/src/host/windows/pipe.rs": {
-      "sha256": "1d0c258d60ec413f3652500d718022419193afd746e99ed5f5d38f43a44332f9",
+      "sha256": "934720f94b3eea600031155d009f972d7fdd57a0fd54dab994a75a6adb6825f0",
       "functions": [
         "accept",
         "answer"
