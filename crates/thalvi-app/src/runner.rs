@@ -599,6 +599,21 @@ impl Publisher {
             .offer
     }
 
+    /// Shows the opened microphone listening, unless the status shows the speech model load failure.
+    fn microphone_opened(&self) {
+        let load_failure = self
+            .load_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        self.update(|view| {
+            if load_failure.is_none_or(|failure| view.mode != Mode::Failed(failure)) {
+                view.mode = Mode::Idle;
+                view.offer = None;
+            }
+        });
+    }
+
     /// Takes the speech model load failure off the status, if it still shows it, so the next load shows its progress.
     fn load_retried(&self) {
         let Some(failure) = self
@@ -1322,7 +1337,7 @@ impl<S: Rig> Runner<S> {
             Ok(()) => {
                 self.reopen_failures = None;
                 self.open_failure = None;
-                self.publisher.mode(Mode::Idle);
+                self.publisher.microphone_opened();
             }
             Err(failure) => self.microphone_failed(failure),
         }
@@ -4540,6 +4555,8 @@ mod tests {
         recorder: RefCell<Option<Recorder>>,
         pause_on_rebuild: Option<mpsc::UnboundedSender<Control>>,
         cancel_on_audio_error: Option<mpsc::UnboundedSender<Control>>,
+        /// Holds the first open of the microphone until the test sends.
+        first_open: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
     }
 
     struct LabMic {
@@ -4551,6 +4568,7 @@ mod tests {
         /// Holds the fake stream open; no room audio goes through it.
         feed: Rc<RefCell<Option<thalvi_desktop::engine::fakes::FrameFeed>>>,
         cancel_on_audio_error: Option<mpsc::UnboundedSender<Control>>,
+        first_open: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
     }
 
     impl Rig for MicLab {
@@ -4616,6 +4634,7 @@ mod tests {
                 active: None,
                 feed: Rc::clone(&self.feed),
                 cancel_on_audio_error: self.cancel_on_audio_error.clone(),
+                first_open: Rc::clone(&self.first_open),
             }
         }
     }
@@ -4636,10 +4655,12 @@ mod tests {
             *self.feed.borrow_mut() = None;
         }
 
-        fn open(
-            self,
-        ) -> impl Future<Output = Result<(Self, Result<Self::Frames, Failure>), Failure>> {
-            std::future::ready(Ok(self.open_stream()))
+        async fn open(self) -> Result<(Self, Result<Self::Frames, Failure>), Failure> {
+            let held = self.first_open.borrow_mut().take();
+            if let Some(held) = held {
+                held.await.unwrap();
+            }
+            Ok(self.open_stream())
         }
 
         fn replace(
@@ -4732,6 +4753,7 @@ mod tests {
         local: Option<Arc<dyn Preload>>,
         pause_on_rebuild: bool,
         cancel_on_audio_error: bool,
+        first_open: Option<oneshot::Receiver<()>>,
     }
 
     impl Default for FedOptions {
@@ -4743,6 +4765,7 @@ mod tests {
                 local: None,
                 pause_on_rebuild: false,
                 cancel_on_audio_error: false,
+                first_open: None,
             }
         }
     }
@@ -4783,6 +4806,7 @@ mod tests {
                 recorder: RefCell::new(Some(options.recorder)),
                 pause_on_rebuild: options.pause_on_rebuild.then(|| link.control.clone()),
                 cancel_on_audio_error: options.cancel_on_audio_error.then(|| link.control.clone()),
+                first_open: Rc::new(RefCell::new(options.first_open)),
             };
             let texts = Arc::new(Mutex::new(Vec::new()));
             let host = TestHost(Arc::new(Mutex::new(Vec::new())), Arc::clone(&texts));
@@ -4935,6 +4959,7 @@ mod tests {
                 active: None,
                 feed: Rc::new(RefCell::new(None)),
                 cancel_on_audio_error: None,
+                first_open: Rc::new(RefCell::new(None)),
             }
         }
     }
@@ -6043,6 +6068,45 @@ mod tests {
                     matches!(status, Status::Listening)
                 })
                 .await;
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_model_load_that_fails_while_the_microphone_opens_stays_shown() {
+        LocalSet::new()
+            .run_until(async {
+                let (open, first_open) = oneshot::channel();
+                let mut script = FedRun::configured(
+                    false,
+                    false,
+                    FedOptions {
+                        local: Some(Arc::new(LocalRecognizer::new(
+                            FailsOnce(std::sync::atomic::AtomicBool::new(true)),
+                            "test",
+                            "test",
+                            Recorder::disabled().metrics(),
+                        ))),
+                        first_open: Some(first_open),
+                        ..FedOptions::default()
+                    },
+                );
+                status_until(
+                    &mut script.status,
+                    "the model load did not fail",
+                    |status| matches!(status, Status::Failed { .. }),
+                )
+                .await;
+                open.send(()).unwrap();
+                script.checkpoint().await;
+                assert_eq!(script.opens.get(), 1, "the microphone opened");
+                assert!(
+                    matches!(&*script.status.borrow(), Status::Failed { notice, .. }
+                        if notice.starts_with("Could not download the speech model.")),
+                    "{:?}",
+                    *script.status.borrow()
+                );
                 script.stop().await;
             })
             .await;
