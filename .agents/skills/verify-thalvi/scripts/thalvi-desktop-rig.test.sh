@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Observable checks for the rig's read-only model cache, hardlinks and stale-run pruning.
+# Observable checks for the rig's read-only model cache, hardlinks, stale-run pruning and Whisper helpers.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../../.." && pwd)
@@ -188,8 +188,41 @@ test_prune_keeps_build_named_by_relative_path() {
   fi
 }
 
+test_whisper_helpers() {
+  fresh_base
+  local base=$THALVI_RIG_BASE stub r
+  stub=$(mktemp -d)
+  stubs+=("$stub")
+  cat > "$stub/bwrap" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
+STUB
+  chmod +x "$stub/bwrap"
+  r=$base/run-w
+  mkdir -p "$base/bin/w" "$base/helpers/cpu" "$r/home" "$r/out"
+  printf '#!/bin/sh\n' | tee "$base/bin/w/thalvi-desktop" > "$base/helpers/cpu/whisper-server"
+  chmod +x "$base/bin/w/thalvi-desktop" "$base/helpers/cpu/whisper-server"
+  touch "$r/software"
+  PATH="$stub:$PATH" "$rig" app-start "$r" "$base/bin/w/thalvi-desktop" --whisper "$base/helpers" > /dev/null 2>&1 || true
+  for _ in $(seq 50); do [ -s "$stub/bwrap.args" ] && break; sleep 0.1; done
+  if [ ! -x "$r/home/appdir/usr/lib/Thalvi/whisper/cpu/whisper-server" ]; then
+    fail 'whisper: --whisper DIR puts DIR/cpu/whisper-server under the run'"'"'s APPDIR'
+    return
+  fi
+  if ! grep -qx APPDIR "$stub/bwrap.args" || ! grep -qx /home/rig/appdir "$stub/bwrap.args"; then
+    fail "whisper: the app is started with APPDIR=/home/rig/appdir ($(tr '\n' ' ' < "$stub/bwrap.args"))"
+    return
+  fi
+  if PATH="$stub:$PATH" "$rig" app-start "$r" "$base/bin/w/thalvi-desktop" --whisper "$base/bin" > /dev/null 2>&1; then
+    fail 'whisper: a DIR without helpers stops app-start'
+    return
+  fi
+  pass 'whisper: --whisper DIR copies the helpers to APPDIR/usr/lib/Thalvi/whisper and sets APPDIR; a DIR without them stops'
+}
+
 test_missing_model
 test_prune
 test_prune_keeps_build_named_by_relative_path
 test_models_are_hardlinked
+test_whisper_helpers
 exit "$status"

@@ -17,8 +17,9 @@ up [--size WxH] [--gnome] [--mic] [--offline] [--software] [--models NAME,...]
                            of the run in a network namespace with only loopback; --software is only for a --gnome run
                            and draws it without a GPU node
 bind R SRC DST             ro-bind the directory SRC at DST in every later sandbox of this run
-app-start R BIN [--config F] [--env K=V]... [--tag NAME] [--trace] [--hosted] [--nvidia]
+app-start R BIN [--config F] [--env K=V]... [--tag NAME] [--trace] [--hosted] [--nvidia] [--whisper DIR]
                            start BIN (a thalvi-desktop binary) in its own sandbox; stdout/stderr go to R/out/app-NAME.log;
+                           --whisper gives the app the Whisper helpers in DIR/cpu and DIR/vulkan (as whisper-helper builds them);
                            --trace records every socket the app and its children open to R/out/trace-NAME.txt (strace);
                            --hosted starts it from Hyprland, in the compositor's PID namespace, so its windows have
                            PIDs the compositor reports: needed for Thalvi to find a window to type into
@@ -423,7 +424,7 @@ lib_binds() {
 
 cmd_app_start() {
   local r=$1 bin=$2; shift 2
-  local config="" tag trace=0 hosted=0 nvidia=0
+  local config="" tag trace=0 hosted=0 nvidia=0 whisper=""
   tag=$(date +%H%M%S)
   local -a envs=() plain=() wrap=() gpu=()
   while [ $# -gt 0 ]; do
@@ -434,6 +435,7 @@ cmd_app_start() {
       --trace) trace=1; shift ;;
       --hosted) hosted=1; shift ;;
       --nvidia) nvidia=1; shift ;;
+      --whisper) whisper=$2; shift 2 ;;
       *) die "app-start: unknown argument $1" ;;
     esac
   done
@@ -450,6 +452,14 @@ cmd_app_start() {
     done
   fi
   [ -z "$config" ] || { mkdir -p "$r/home/.config/thalvi"; cp "$config" "$r/home/.config/thalvi/desktop.json"; }
+  # Tauri's resource dir is $APPDIR/usr/lib/Thalvi when APPDIR is set; without it, /usr/lib/Thalvi, which the sandbox lacks.
+  if [ -n "$whisper" ]; then
+    [ -x "$whisper/cpu/whisper-server" ] || [ -x "$whisper/vulkan/whisper-server" ] || die "app-start: no $whisper/cpu/whisper-server or $whisper/vulkan/whisper-server"
+    rm -rf "$r/home/appdir"
+    mkdir -p "$r/home/appdir/usr/lib/Thalvi"
+    cp -r -- "$whisper" "$r/home/appdir/usr/lib/Thalvi/whisper"
+    envs+=(--setenv APPDIR /home/rig/appdir); plain+=(APPDIR=/home/rig/appdir)
+  fi
   local -a args extra libs
   mapfile -d '' args < <(sandbox_args "$r")
   mapfile -d '' extra < <(inner_env "$r")
