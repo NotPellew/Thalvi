@@ -1,57 +1,40 @@
 stateDiagram-v2
-  state "dictation cleanup before the review" as s1
-  state "dictation cleanup of a submit" as s2
-  state "ending cue plays, recognizer releases" as s3
-  state "explicit write request" as s4
-  state "listening [a stop was seen]" as s5
-  state "listening, model still loading" as s6
-  state "merging the streaming texts" as s7
-  state "nothing goes out" as s8
-  state "reading controls queued before the capture" as s9
-  state "settling [a stop was seen]" as s10
-  state "showing the submit text for approval" as s11
-  state "text goes out" as s12
-  state "waiting for the final recognizer" as s13
-  state "waiting for the full Submit preview" as s14
-  [*] --> s9
-  s1 --> settling: cleanup returns
-  s1 --> s10: cleanup returns
-  s1 --> s14: cleanup returns
-  s2 --> listening: cleanup returns
-  s2 --> s10: cleanup returns
-  s3 --> s4: recognizer released
-  s3 --> s7: recognizer released
-  s3 --> settling: recognizer released
-  s3 --> s10: recognizer released
-  s3 --> s13: recognizer released
-  s4 --> settling: write request returns
-  s4 --> s10: write request returns
-  listening --> s5: reads a control
-  listening --> s2: submit needs cleanup
-  listening --> s3: user ends the dictation
-  s5 --> s10: capture cancelled
-  s6 --> s10: capture cancelled
-  s6 --> settling: load fails
-  s6 --> listening: model ready
-  s7 --> s1: merge returns
-  s7 --> s4: merge returns
-  s7 --> settling: merge returns
-  s7 --> s10: merge returns
-  s7 --> s14: merge returns
-  s9 --> listening: no controls left
-  s9 --> s6: no controls left
-  s9 --> s8: no controls left
-  settling --> s8: no controls left
-  settling --> s12: no controls left
-  settling --> s10: reads a queued control
-  s10 --> s8: no controls left
-  s11 --> settling: confirmation ends
-  s11 --> s10: confirmation ends
-  s13 --> s1: final pass settles
-  s13 --> s4: final pass settles
-  s13 --> settling: final pass settles
-  s13 --> s10: final pass settles
-  s13 --> s14: final pass settles
-  s14 --> settling: preview is shown or unavailable
-  s14 --> s10: preview is shown or unavailable
-  s14 --> s11: preview is shown or unavailable
+  state "dictation cleanup before Enter" as s1
+  state "ending cue plays, recognizer releases" as s2
+  state "explicit write request" as s3
+  state "listening [a stop was seen]" as s4
+  state "listening, model still loading" as s5
+  state "nothing goes out" as s6
+  state "reading controls queued before the capture" as s7
+  state "settling [a stop was seen]" as s8
+  state "showing the text for approval" as s9
+  state "text goes out" as s10
+  state "waiting for the full text on screen" as s11
+  [*] --> s7
+  s1 --> listening: cleanup returns
+  s1 --> s8: cleanup returns
+  s2 --> s3: recognizer released
+  s2 --> settling: recognizer released
+  s2 --> s8: recognizer released
+  s2 --> s11: recognizer released
+  s3 --> settling: write request returns
+  s3 --> s8: write request returns
+  listening --> s1: Enter ending needs cleanup
+  listening --> s4: reads a control
+  listening --> s2: user ends the dictation
+  s4 --> s8: capture cancelled
+  s5 --> s8: capture cancelled
+  s5 --> settling: load fails
+  s5 --> listening: model ready
+  s7 --> listening: no controls left
+  s7 --> s5: no controls left
+  s7 --> s6: no controls left
+  settling --> s6: no controls left
+  settling --> s10: no controls left
+  settling --> s8: reads a queued control
+  s8 --> s6: no controls left
+  s9 --> settling: confirmation ends
+  s9 --> s8: confirmation ends
+  s11 --> settling: preview is shown or unavailable
+  s11 --> s8: preview is shown or unavailable
+  s11 --> s9: preview is shown or unavailable
