@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wav_becomes_frames_converted_like_microphone_input() {
+    fn a_wav_becomes_frames_converted_like_microphone_input_and_pads_the_last_one() {
         let ramp: Vec<i16> = (0..3 * FRAME_SAMPLES)
             .map(|n| i16::try_from(n % 2_000).unwrap() - 1_000)
             .collect();
@@ -508,10 +508,7 @@ mod tests {
         let mut extra = b"LIST\x03\0\0\0abc\0".to_vec();
         extra.extend(b"junk\0\0\0\0");
         assert_eq!(clip(wav(1, 1, 16_000, 16, &extra, &pcm(&ramp))), same);
-    }
 
-    #[test]
-    fn the_last_partial_frame_is_padded_with_silence() {
         let samples = vec![1_000_i16; FRAME_SAMPLES + 10];
         let frames = Clip::from_reader(mono(16_000, &samples).as_slice(), MAX)
             .unwrap()

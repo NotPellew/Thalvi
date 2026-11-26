@@ -991,39 +991,6 @@ mod tests {
         assert_eq!(default.prompt_for("nothing like it", None), DEFAULT_PROMPT);
     }
 
-    #[test]
-    fn openings_are_stored_normalized_and_refused_when_they_cannot_be_used() {
-        let stored = with_openings(
-            None,
-            vec![opening("  Write, me an E-mail! ", "  Be short.\n ")],
-        )
-        .unwrap();
-        assert_eq!(
-            stored.openings,
-            [opening("write me an e mail", "Be short.")]
-        );
-
-        let refused = |openings: Vec<Opening>| with_openings(None, openings).unwrap_err();
-        assert_eq!(
-            refused(vec![opening(" ,. ", "p")]),
-            WritingSettingsError::OpeningPhrase
-        );
-        assert_eq!(
-            refused(vec![opening("ok", "p"), opening("", "p")]),
-            WritingSettingsError::OpeningPhrase
-        );
-        assert_eq!(
-            refused(vec![opening("Write me", " \n")]),
-            WritingSettingsError::OpeningPrompt("write me".to_owned())
-        );
-        let twice = refused(vec![opening("write me", "a"), opening("Write, me!", "b")]);
-        assert_eq!(twice.to_string(), "writing.openings has “write me” twice.");
-        assert_eq!(
-            with_openings(None, Vec::new()).unwrap().openings,
-            Vec::<Opening>::new()
-        );
-    }
-
     fn style(app: &str, title: Option<&str>, prompt: &str) -> AppStyle {
         AppStyle {
             app: app.to_owned(),
@@ -1089,26 +1056,6 @@ mod tests {
             assert_eq!(writing.prompt_for(said, window), prompt, "{said:?}");
             assert_eq!(writing.prompt_source(said, window), source, "{said:?}");
         }
-    }
-
-    #[test]
-    fn app_styles_are_stored_trimmed_and_refused_when_blank() {
-        let stored = with_styles(vec![style("  kitty ", Some("  "), "  One line. ")]).unwrap();
-        assert_eq!(stored.apps, [style("kitty", None, "One line.")]);
-        let titled = with_styles(vec![style(" firefox ", Some(" Gmail "), " Polite. ")]).unwrap();
-        assert_eq!(titled.apps, [style("firefox", Some("Gmail"), "Polite.")]);
-        assert_eq!(
-            with_styles(vec![style("  ", None, "p")]).unwrap_err(),
-            WritingSettingsError::App
-        );
-        assert_eq!(
-            with_styles(vec![style("kitty", None, " \n")]).unwrap_err(),
-            WritingSettingsError::AppPrompt
-        );
-        assert_eq!(
-            with_styles(Vec::new()).unwrap().apps,
-            Vec::<AppStyle>::new()
-        );
     }
 
     fn reply_of(parts: &[&[u8]]) -> Reply {

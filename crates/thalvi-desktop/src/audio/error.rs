@@ -157,15 +157,11 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_chosen_microphone_is_named_in_the_notice() {
+    fn notices_are_plain_words_without_backend_detail_and_name_a_missing_microphone() {
         assert_eq!(
             AudioError::DeviceMissing("USB Mic".to_owned()).to_string(),
             "The microphone \"USB Mic\" is not connected. Plug it in or choose another under Settings → Listening."
         );
-    }
-
-    #[test]
-    fn notices_are_plain_words_without_backend_detail() {
         let detail = cpal::Error::with_message(ErrorKind::BackendError, "snd_pcm_readi EIO");
         for error in [
             AudioError::OpenFailed(detail.clone()),

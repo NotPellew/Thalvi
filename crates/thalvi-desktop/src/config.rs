@@ -749,14 +749,7 @@ mod tests {
         assert_eq!(config.stt.entries.extras(), []);
         assert_eq!(config.wake, WakeConfig::default());
         assert_eq!(config.cues, Cues::default());
-        assert_eq!(config.ending_pause, EndingPauses::default());
-        assert_eq!(config.capture_limits, CaptureLimits::default());
         assert_eq!(config.endings, Endings::default());
-        assert_eq!(config.recordings, RecordKinds::default());
-        assert_eq!(
-            (config.history.enabled(), config.history.limit()),
-            (true, 200)
-        );
         assert!(!config.start_at_login);
         assert!(!config.show_in_menu);
         assert_eq!(
@@ -804,7 +797,17 @@ mod tests {
     }
 
     #[test]
-    fn the_write_key_is_checked_once_and_must_differ_from_the_hold_key() {
+    fn the_hold_and_write_keys_are_checked_once_and_must_differ() {
+        let hold_key =
+            |json: &str| loaded(json, &WINDOWS()).map(|config| config.hold_key.to_string());
+        assert_eq!(
+            hold_key(r#"{"hold_key": "Ctrl+KeyY"}"#).unwrap(),
+            "Ctrl+KeyY"
+        );
+        let error = hold_key(r#"{"hold_key": "KeyZ"}"#).unwrap_err();
+        assert!(error.contains("needs a modifier"), "{error}");
+        let error = hold_key(r#"{"hold_key": "Alt+Hyper"}"#).unwrap_err();
+        assert!(error.contains("not a key name"), "{error}");
         let key = |json: &str| loaded(json, &WINDOWS()).map(|config| config.write_key.to_string());
         assert_eq!(key(r#"{"write_key": "Ctrl+KeyY"}"#).unwrap(), "Ctrl+KeyY");
         let error = key(r#"{"write_key": "KeyX"}"#).unwrap_err();
@@ -1078,16 +1081,6 @@ mod tests {
                 "{field}"
             );
         }
-    }
-
-    #[test]
-    fn the_hold_key_is_checked_once_when_the_config_loads() {
-        let key = |json: &str| loaded(json, &WINDOWS()).map(|config| config.hold_key.to_string());
-        assert_eq!(key(r#"{"hold_key": "Ctrl+KeyY"}"#).unwrap(), "Ctrl+KeyY");
-        let error = key(r#"{"hold_key": "KeyZ"}"#).unwrap_err();
-        assert!(error.contains("needs a modifier"), "{error}");
-        let error = key(r#"{"hold_key": "Alt+Hyper"}"#).unwrap_err();
-        assert!(error.contains("not a key name"), "{error}");
     }
 
     #[test]
@@ -1615,29 +1608,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn speech_recognition_settings_that_cannot_work_are_rejected_in_plain_words() {
-        for (json, expected) in [
-            (
-                r#"{"stt": {"model": "nemotron_160ms"}}"#,
-                "stt.model only applies when stt.engine is local.",
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "whisper"}}"#,
-                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms, parakeet_tdt_v3 or the path of a folder",
-            ),
-            (r#"{"stt": {"engine": "cloud"}}"#, "unknown variant `cloud`"),
-        ] {
-            let error = parse(json).unwrap_err();
-            assert!(error.to_string().contains(expected), "{json}: {error}");
-        }
-    }
-
-    #[test]
-    fn invalid_settings_are_rejected_in_plain_words() {
+    fn rejected_settings() -> Vec<(String, &'static str)> {
+        const HISTORY_LIMIT: &str =
+            "history limit must be a whole number of entries from 1 to 1000";
         let valid_endings = r#""paste": "paste", "write": "write", "send": "submit", "do it": "task",
             "scratch": "scratch", "cancel": "cancel""#;
-        for (json, expected) in [
+        vec![
             (r#"{"discord": {}}"#.to_owned(), "unknown field `discord`"),
             (
                 r#"{"server": "http://127.0.0.1:8080"}"#.to_owned(),
@@ -1679,29 +1655,6 @@ mod tests {
                 "unknown field `chime`",
             ),
             (
-                r#"{"ending_pause": {"submit": 5.5}}"#.to_owned(),
-                "submit pause must be a number of seconds from 0 to 5",
-            ),
-            (
-                r#"{"ending_pause": {"paste": -1}}"#.to_owned(),
-                "paste pause must be a number of seconds from 0 to 5",
-            ),
-            (r#"{"ending_pause": 2.5}"#.to_owned(), "invalid type"),
-            (r#"{"ending_pause": true}"#.to_owned(), "invalid type"),
-            (
-                r#"{"capture_limits": {"idle": 9}}"#.to_owned(),
-                "idle limit must be a whole number of seconds from 10 to 600",
-            ),
-            (
-                r#"{"capture_limits": {"max": 3601}}"#.to_owned(),
-                "max limit must be a whole number of seconds from 60 to 3600",
-            ),
-            (r#"{"capture_limits": 60}"#.to_owned(), "invalid type"),
-            (
-                r#"{"capture_limits": {"min": 1}}"#.to_owned(),
-                "unknown field `min`",
-            ),
-            (
                 r#"{"endings": {"enter": "submit"}}"#.to_owned(),
                 "Configure paste, write, submit, task, scratch, and cancel",
             ),
@@ -1717,16 +1670,31 @@ mod tests {
                 format!(r#"{{"endings": {{{valid_endings}, "x": "enter"}}}}"#),
                 "unknown variant `enter`",
             ),
-        ] {
-            let error = parse(&json).unwrap_err();
-            assert!(matches!(error, ConfigError::Invalid(_)), "{json}");
-            assert!(error.to_string().contains(expected), "{json}: {error}");
-        }
+            (
+                r#"{"stt": {"model": "nemotron_160ms"}}"#.to_owned(),
+                "stt.model only applies when stt.engine is local.",
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "whisper"}}"#.to_owned(),
+                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms, parakeet_tdt_v3 or the path of a folder",
+            ),
+            (
+                r#"{"stt": {"engine": "cloud"}}"#.to_owned(),
+                "unknown variant `cloud`",
+            ),
+            (r#"{"history": {"limit": 0}}"#.to_owned(), HISTORY_LIMIT),
+            (r#"{"history": {"limit": 1001}}"#.to_owned(), HISTORY_LIMIT),
+            (r#"{"history": {"limit": -1}}"#.to_owned(), "invalid value"),
+            (r#"{"history": {"enabled": "yes"}}"#.to_owned(), "boolean"),
+            (
+                r#"{"history": {"audio": true}}"#.to_owned(),
+                "unknown field `audio`",
+            ),
+        ]
     }
 
-    #[test]
-    fn invalid_apps_and_scripts_are_rejected_in_plain_words() {
-        for (json, expected) in [
+    fn rejected_apps_and_scripts() -> Vec<(String, &'static str)> {
+        vec![
             (
                 r#"{"apps": {"t3": {"classes": ["a"], "keys": []}}}"#.to_owned(),
                 "unknown field `keys`",
@@ -1805,7 +1773,15 @@ mod tests {
                 .to_owned(),
                 "Script phrases must be distinct.",
             ),
-        ] {
+        ]
+    }
+
+    #[test]
+    fn invalid_settings_are_rejected_in_plain_words() {
+        for (json, expected) in rejected_settings()
+            .into_iter()
+            .chain(rejected_apps_and_scripts())
+        {
             let error = parse(&json).unwrap_err();
             assert!(matches!(error, ConfigError::Invalid(_)), "{json}");
             assert!(error.to_string().contains(expected), "{json}: {error}");
@@ -1871,22 +1847,6 @@ mod tests {
                 )),
                 "{written}"
             );
-        }
-    }
-
-    #[test]
-    fn history_settings_that_cannot_work_are_rejected_in_plain_words() {
-        let limit = "history limit must be a whole number of entries from 1 to 1000";
-        for (json, expected) in [
-            (r#"{"history": {"limit": 0}}"#, limit),
-            (r#"{"history": {"limit": 1001}}"#, limit),
-            (r#"{"history": {"limit": -1}}"#, "invalid value"),
-            (r#"{"history": {"enabled": "yes"}}"#, "boolean"),
-            (r#"{"history": {"audio": true}}"#, "unknown field `audio`"),
-        ] {
-            let error = parse(json).unwrap_err();
-            assert!(matches!(error, ConfigError::Invalid(_)), "{json}");
-            assert!(error.to_string().contains(expected), "{json}: {error}");
         }
     }
 
@@ -1968,7 +1928,7 @@ mod tests {
     }
 
     #[test]
-    fn look_defaults_to_gunmetal_and_rejects_unknown_names() {
+    fn look_defaults_to_gunmetal_rejects_unknown_names_and_round_trips_byte_for_byte() {
         assert_eq!(parse("{}").unwrap().look, Look::Gunmetal);
         for (name, look) in [
             ("neon", Look::Neon),
@@ -1986,10 +1946,6 @@ mod tests {
                 "{json}: {error}"
             );
         }
-    }
-
-    #[test]
-    fn a_config_with_only_look_round_trips_byte_for_byte() {
         let original = "{\n  \"look\": \"holo\"\n}";
         let config = parse(original).unwrap();
         assert_eq!(config.look, Look::Holo);

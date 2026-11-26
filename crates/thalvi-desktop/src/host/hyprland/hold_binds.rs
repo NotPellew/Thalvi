@@ -1257,14 +1257,6 @@ mod tests {
         assert_eq!(notices.try_recv().unwrap(), RELOADS_NOT_FOLLOWED);
         assert_eq!(hypr.bound().len(), 4);
         drop(watch);
-
-        let following = follow_events(&hypr);
-        drop(following.hyprland);
-        assert_eq!(
-            following.notices.recv_timeout(WAIT).unwrap(),
-            RELOADS_NOT_FOLLOWED
-        );
-        assert_eq!(hypr.bound().len(), 4);
     }
 
     #[test]

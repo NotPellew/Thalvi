@@ -2196,44 +2196,51 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_version_keeps_the_original_json_and_resolves_to_the_built_in_look() {
-        let json =
-            r##"{"version":9,"holo":{"colors":{"dark":{"accent":"#ffffff"}},"future":true}}"##;
-        let loaded = themes(json);
-        assert!(loaded.of(Look::Holo).is_none(), "no look is invented");
-        let style = Style::resolve(Look::Holo, loaded.of(Look::Holo));
-        assert_eq!(style.dark.accent.to_hex(), "#6bf8ff");
-        let written = loaded.to_value();
-        assert_eq!(written, serde_json::from_str::<Value>(json).unwrap());
-        assert_eq!(loaded.notices().len(), 1);
-        assert_eq!(
-            loaded.notices()[0],
-            "Your look customizations could not be read (themes.version 9 is newer than this Thalvi)."
-        );
-        assert!(!loaded.notices()[0].contains("Holo"));
-    }
-
-    #[test]
-    fn a_themes_value_that_is_not_an_object_is_kept_and_names_no_look() {
-        for json in [r#""bad""#, "[]", "1", "true"] {
+    fn an_unreadable_themes_value_is_kept_and_names_no_look() {
+        for (json, notice) in [
+            (
+                r##"{"version":9,"holo":{"colors":{"dark":{"accent":"#ffffff"}},"future":true}}"##,
+                "Your look customizations could not be read (themes.version 9 is newer than this Thalvi).",
+            ),
+            (
+                r#""bad""#,
+                "Your look customizations could not be read (themes must be an object).",
+            ),
+            (
+                "[]",
+                "Your look customizations could not be read (themes must be an object).",
+            ),
+            (
+                "1",
+                "Your look customizations could not be read (themes must be an object).",
+            ),
+            (
+                "true",
+                "Your look customizations could not be read (themes must be an object).",
+            ),
+        ] {
             let loaded = themes(json);
-            assert!(loaded.of(Look::Gunmetal).is_none());
-            assert!(loaded.of(Look::Holo).is_none());
-            assert!(loaded.of(Look::Neon).is_none());
+            assert!(loaded.of(Look::Gunmetal).is_none(), "{json}");
+            assert!(
+                loaded.of(Look::Holo).is_none(),
+                "{json}: no look is invented"
+            );
+            assert!(loaded.of(Look::Neon).is_none(), "{json}");
             assert_eq!(
                 loaded.to_value(),
-                serde_json::from_str::<Value>(json).unwrap()
+                serde_json::from_str::<Value>(json).unwrap(),
+                "{json}"
             );
-            assert!(!loaded.is_empty());
-            assert_eq!(loaded.notices().len(), 1);
-            assert_eq!(
-                loaded.notices()[0],
-                "Your look customizations could not be read (themes must be an object)."
-            );
+            assert!(!loaded.is_empty(), "{json}");
+            assert_eq!(loaded.notices().len(), 1, "{json}");
+            assert_eq!(loaded.notices()[0], notice, "{json}");
+            assert!(!loaded.notices()[0].contains("Holo"), "{json}");
             for look in [Look::Neon, Look::Holo, Look::Gunmetal] {
                 let style = Style::resolve(look, loaded.of(look));
-                assert_eq!(style, Style::resolve(look, None));
+                assert_eq!(style, Style::resolve(look, None), "{json}");
             }
+            let holo = Style::resolve(Look::Holo, loaded.of(Look::Holo));
+            assert_eq!(holo.dark.accent.to_hex(), "#6bf8ff", "{json}");
         }
     }
 

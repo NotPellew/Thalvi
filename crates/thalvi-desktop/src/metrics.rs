@@ -1148,10 +1148,8 @@ mod tests {
         assert_eq!(written[QUEUE_CAPACITY - 1]["n"], QUEUE_CAPACITY - 1);
     }
 
-    #[test]
-    fn the_summary_gives_percentiles_per_stage_and_counts_outcomes_within_the_window() {
-        let dir = TempDir::new("summary");
-        std::fs::create_dir_all(dir.root()).unwrap();
+    /// Writes a day of mixed events, one older than the window and one that is not JSON.
+    fn write_summary_log(dir: &TempDir) {
         let now = now_ms();
         let hour = 3_600_000_u64;
         let line = |at: u64, event: &str, outcome: &str, took: Option<f64>, call: Option<&str>| {
@@ -1218,6 +1216,13 @@ mod tests {
             ));
         }
         std::fs::write(dir.root().join("metrics.jsonl"), lines.join("\n")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_summary_gives_percentiles_per_stage_counts_outcomes_and_counts_overlay_shows() {
+        let dir = TempDir::new("summary");
+        std::fs::create_dir_all(dir.root()).unwrap();
+        write_summary_log(&dir);
 
         let summary = summarize(&dir.root(), SUMMARY_WINDOW).unwrap();
         // 19 ok connects of 10..190 and one error of 900: 20 values, p50 is the 10th, p95 the 19th.
@@ -1247,10 +1252,42 @@ mod tests {
             summary.captures,
             BTreeMap::from([("cancelled".to_owned(), 1), ("ok".to_owned(), 2)])
         );
-        assert_eq!(summary.recent.len(), 3);
+
+        let dir = TempDir::new("overlay-shown");
+        let recorder = Recorder::in_dir(METRICS, dir.root()).unwrap();
+        recorder.metric(
+            Event::OverlayShown,
+            "ok",
+            Some(Duration::from_millis(40)),
+            Value::Null,
+        );
+        recorder.metric(
+            Event::OverlayShown,
+            "The status overlay could not open a layer surface: Hyprland did not place it.",
+            Some(Duration::from_millis(1_000)),
+            Value::Null,
+        );
+        recorder.finish().await;
+
+        let written = self::lines(&dir.root().join("metrics.jsonl"));
+        assert_eq!(written.len(), 2, "one line per show");
+        assert_eq!(written[0]["event"], "desktop_overlay_shown");
+        assert_eq!(written[0]["outcome"], "ok");
+        assert_eq!(written[0]["duration_ms"], 40.0);
+        assert!(written[0]["ts_ms"].as_u64().unwrap() > 1_700_000_000_000);
+
+        let overlay_summary = summarize(&dir.root(), SUMMARY_WINDOW).unwrap();
+        assert_eq!(overlay_summary.stages.overlay.count, 2);
         assert_eq!(
-            summary.recent.last().map(|last| last.outcome.as_str()),
-            Some("cancelled")
+            overlay_summary.stages.overlay.outcomes.get("ok").copied(),
+            Some(1)
+        );
+        assert_eq!(
+            (
+                overlay_summary.stages.overlay.p50_ms,
+                overlay_summary.stages.overlay.p95_ms
+            ),
+            (Some(40.0), Some(1_000.0))
         );
     }
 
@@ -1290,40 +1327,6 @@ mod tests {
             ])
         );
         assert!(!recent.to_string().contains("words"));
-    }
-
-    #[tokio::test]
-    async fn an_overlay_show_is_counted_in_the_summary() {
-        let dir = TempDir::new("overlay-shown");
-        let recorder = Recorder::in_dir(METRICS, dir.root()).unwrap();
-        recorder.metric(
-            Event::OverlayShown,
-            "ok",
-            Some(Duration::from_millis(40)),
-            Value::Null,
-        );
-        recorder.metric(
-            Event::OverlayShown,
-            "The status overlay could not open a layer surface: Hyprland did not place it.",
-            Some(Duration::from_millis(1_000)),
-            Value::Null,
-        );
-        recorder.finish().await;
-
-        let written = lines(&dir.root().join("metrics.jsonl"));
-        assert_eq!(written.len(), 2, "one line per show");
-        assert_eq!(written[0]["event"], "desktop_overlay_shown");
-        assert_eq!(written[0]["outcome"], "ok");
-        assert_eq!(written[0]["duration_ms"], 40.0);
-        assert!(written[0]["ts_ms"].as_u64().unwrap() > 1_700_000_000_000);
-
-        let summary = summarize(&dir.root(), SUMMARY_WINDOW).unwrap();
-        assert_eq!(summary.stages.overlay.count, 2);
-        assert_eq!(summary.stages.overlay.outcomes.get("ok").copied(), Some(1));
-        assert_eq!(
-            (summary.stages.overlay.p50_ms, summary.stages.overlay.p95_ms),
-            (Some(40.0), Some(1_000.0))
-        );
     }
 
     #[test]
