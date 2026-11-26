@@ -218,7 +218,7 @@ impl Scale {
     fn parse(value: f64, min: f32, max: f32) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
+            reason = "the range check rejects finite extremes (including rounded f32::MAX) and the finite check rejects overflow"
         )]
         let value = value as f32;
         if value.is_finite() && (min..=max).contains(&value) {
@@ -283,7 +283,7 @@ impl Tracking {
     fn parse(value: f64) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
+            reason = "the range check rejects finite extremes (including rounded f32::MAX) and the finite check rejects overflow"
         )]
         let value = value as f32;
         if value.is_finite() && (0.0..=0.4).contains(&value) {
@@ -308,7 +308,7 @@ impl Opacity {
     fn parse(value: f64) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
+            reason = "the range check rejects finite extremes (including rounded f32::MAX) and the finite check rejects overflow"
         )]
         let value = value as f32;
         if value.is_finite() && (0.6..=1.0).contains(&value) {
@@ -333,7 +333,7 @@ impl Strength {
     fn parse(value: f64) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
+            reason = "the range check rejects finite extremes (including rounded f32::MAX) and the finite check rejects overflow"
         )]
         let value = value as f32;
         if value.is_finite() && (0.0..=1.5).contains(&value) {
@@ -358,7 +358,7 @@ impl Mesh {
     fn parse(value: f64) -> Result<Self, String> {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "an f64 past the f32 range becomes infinite, which the finite check rejects"
+            reason = "the range check rejects finite extremes (including rounded f32::MAX) and the finite check rejects overflow"
         )]
         let value = value as f32;
         if value.is_finite() && (0.0..=0.15).contains(&value) {
@@ -1905,7 +1905,6 @@ impl Look {
 }
 
 #[cfg(test)]
-#[expect(clippy::too_many_lines, reason = "one assertion per theme case")]
 mod tests {
     use super::*;
 
@@ -1948,8 +1947,24 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the table keeps the accepted and rejected input cases alongside their expected errors"
+    )]
     fn leaves_accept_their_bounds_and_refuse_injection_and_what_does_not_apply() {
         let cases: &[(&str, Look, bool, &str)] = &[
+            (
+                r#"{"version":1,"holo":{"font":{"scale":3.402823466385289e38}}}"#,
+                Look::Holo,
+                false,
+                "themes.holo.font.scale: use a number",
+            ),
+            (
+                r#"{"version":1,"holo":{"font":{"scale":1e100}}}"#,
+                Look::Holo,
+                false,
+                "themes.holo.font.scale: use a number",
+            ),
             (
                 r##"{"version":1,"holo":{"colors":{"dark":{"accent":"#6bf8ff"}}}}"##,
                 Look::Holo,

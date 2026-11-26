@@ -22,7 +22,7 @@
       ]
     },
     "crates/thalvi-app/src/commands.rs": {
-      "sha256": "cc5b87c24e2ad83e74297b7bfd0bb572b06c9a80c0d9e8fb6b5aa31feb51594c",
+      "sha256": "f58c49c86ccfabda04f95e58fa8e5dda8d4199f68828a179565934425fcf5b77",
       "functions": [
         "save_settings",
         "save",
@@ -63,7 +63,7 @@
       ]
     },
     "crates/thalvi-desktop/src/host/windows/pipe.rs": {
-      "sha256": "934720f94b3eea600031155d009f972d7fdd57a0fd54dab994a75a6adb6825f0",
+      "sha256": "fda1a3bd87cfbd681ce1fae052e20a09a1f853245f8862d19f0e7373582c064c",
       "functions": [
         "accept",
         "answer"

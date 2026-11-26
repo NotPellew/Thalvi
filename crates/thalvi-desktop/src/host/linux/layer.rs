@@ -89,7 +89,7 @@ impl Layer {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "the overlay's size in points"
+            reason = "the overlay is 460 by 200 integral points, both positive and within u32"
         )]
         let size = (width.round() as u32, height.round() as u32);
         #[expect(clippy::cast_sign_loss, reason = "a scale of at least 1")]

@@ -92,10 +92,13 @@ struct Fft {
 }
 
 impl Fft {
-    #[expect(clippy::cast_precision_loss, reason = "indices are far below 2^24")]
     fn new() -> Self {
         let twiddles = (0..FFT_SIZE / 2)
             .map(|k| {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "k is below 256 and FFT_SIZE is 512, both exact in f32"
+                )]
                 let angle = -2.0 * PI * k as f32 / FFT_SIZE as f32;
                 (angle.cos(), angle.sin())
             })
@@ -143,8 +146,11 @@ struct Tables {
 }
 
 impl Tables {
-    #[expect(clippy::cast_precision_loss, reason = "indices are far below 2^24")]
     fn new() -> Arc<Self> {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Hann indices are below WINDOW (400); the period is 399 or 400"
+        )]
         let hann = |period: usize| {
             std::array::from_fn(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / period as f32).cos())
         };
@@ -337,8 +343,11 @@ impl Default for KaldiFbank {
 
 impl KaldiFbank {
     #[must_use]
-    #[expect(clippy::cast_precision_loss, reason = "indices are far below 2^24")]
     pub fn new() -> Self {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "window indices and period are at most 399, exact in f32"
+        )]
         let window = std::array::from_fn(|i| {
             (0.5 - 0.5 * (2.0 * PI * i as f32 / (WINDOW - 1) as f32).cos()).powf(0.85)
         });
@@ -424,11 +433,6 @@ impl WindowMel {
     /// The features `NeMo`'s preprocessor makes of `speech` followed by silence: one frame per
     /// [`HOP`] samples, each mel bin normalized over those frames alone.
     #[must_use]
-    #[expect(
-        clippy::cast_possible_wrap,
-        clippy::cast_precision_loss,
-        reason = "positions and counts stay far below 2^24"
-    )]
     pub fn features(&self, speech: &[f32]) -> Vec<MelFrame> {
         let emphasized: Vec<f32> = speech
             .iter()
@@ -442,18 +446,17 @@ impl WindowMel {
                     }
             })
             .collect();
-        let at = |index: isize| -> f32 {
-            usize::try_from(index)
-                .ok()
-                .and_then(|index| emphasized.get(index))
-                .copied()
-                .unwrap_or(0.0)
-        };
         let count = speech.len() / HOP;
         let mut frames: Vec<MelFrame> = (0..count)
             .map(|number| {
-                let start = (number * HOP) as isize - (WINDOW / 2) as isize;
-                let wave: [f32; WINDOW] = std::array::from_fn(|i| at(start + i as isize));
+                let center = number * HOP;
+                let wave: [f32; WINDOW] = std::array::from_fn(|i| {
+                    (center + i)
+                        .checked_sub(WINDOW / 2)
+                        .and_then(|index| emphasized.get(index))
+                        .copied()
+                        .unwrap_or(0.0)
+                });
                 self.tables.mel(&wave, &self.tables.symmetric, |energy| {
                     (energy + NEMO_LOG_GUARD).ln()
                 })
@@ -462,6 +465,11 @@ impl WindowMel {
         if frames.is_empty() {
             return frames;
         }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a desktop capture is at most 3600 s (360000 hops); larger offline counts round to f32"
+        )]
+        let (mean_divisor, variance_divisor) = (count as f32, (count - 1) as f32);
         for bin in 0..MEL_BINS {
             // Centred on the first frame so that a constant bin has exactly no deviation.
             let reference = frames[0][bin];
@@ -470,13 +478,13 @@ impl WindowMel {
                     .iter()
                     .map(|frame| frame[bin] - reference)
                     .sum::<f32>()
-                    / count as f32;
+                    / mean_divisor;
             let variance = if count > 1 {
                 frames
                     .iter()
                     .map(|frame| (frame[bin] - mean).powi(2))
                     .sum::<f32>()
-                    / (count - 1) as f32
+                    / variance_divisor
             } else {
                 0.0
             };

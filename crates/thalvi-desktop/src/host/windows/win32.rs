@@ -2,7 +2,7 @@
 
 #![expect(
     unsafe_code,
-    reason = "raw Win32 calls; each block says why it is sound"
+    reason = "platform: desktop window, clipboard and input operations rely on Win32 FFI; each block states its safety conditions"
 )]
 
 use std::cell::RefCell;

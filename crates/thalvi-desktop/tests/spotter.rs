@@ -1,6 +1,6 @@
 //! The real ending phrase model hears a configured phrase in a recorded clip where sherpa-onnx does.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 

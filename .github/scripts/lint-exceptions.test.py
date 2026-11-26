@@ -27,7 +27,7 @@ class LintExceptions(unittest.TestCase):
         result = run_check(
             '"clippy::too_many_lines" = 2\n"clippy::unused_self" = 1\n"unsafe_code" = 1\n',
             demo='''\
-#![expect(unsafe_code, reason = "ffi")]
+#![expect(unsafe_code, reason = "platform: ffi")]
 #[cfg_attr(not(test), r#cfg_attr(feature = "demo", r#expect(
     clippy::too_many_lines, clippy::unused_self, reason = "both",
 )))]
@@ -40,9 +40,47 @@ fn outer() {}
 
     def test_rust_whitespace_can_separate_attribute_tokens(self):
         result = run_check(
-            '"dead_code" = 1\n', demo=' #\u200e!\u200f[expect\u200e(dead_code)]\n'
+            '"dead_code" = 1\n', demo=' #\u200e!\u200f[expect\u200e(dead_code, reason = "platform: test")]\n'
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_module_wide_exceptions_need_a_platform_reason(self):
+        for source in (
+            '#![{attribute}]\nfn item() {{}}',
+            '#![cfg_attr(unix, cfg_attr(all(), {attribute}))]\nfn item() {{}}',
+            '#[{attribute}]\n#[cfg(unix)]\n/* comment */ pub(crate) mod demo;',
+            '#[cfg_attr(unix, {attribute})]\n/// docs\npub mod demo {{}}',
+        ):
+            for reason, accepted in (
+                (', reason = "platform: FFI"', True),
+                (', r#reason = r#"platform: FFI"#', True),
+                (r', reason = "platform\x3a FFI"', True),
+                (', reason = "FFI"', False),
+                (', reason = "needs platform: FFI"', False),
+                ('', False),
+            ):
+                with self.subTest(source=source, reason=reason):
+                    attribute = f'expect(unsafe_code{reason})'
+                    result = run_check('"unsafe_code" = 1\n', demo=source.format(attribute=attribute))
+                    self.assertEqual(result.returncode, int(not accepted), result.stdout + result.stderr)
+                    if not accepted:
+                        self.assertIn('crates/demo.rs:1', result.stdout)
+                        self.assertIn('platform:', result.stdout)
+
+    def test_each_expect_in_a_module_cfg_attr_needs_its_own_reason(self):
+        result = run_check(
+            '"unsafe_code" = 1\n"dead_code" = 1\n',
+            demo='''\
+#[cfg_attr(unix,
+    expect(unsafe_code, reason = "platform: FFI"),
+    expect(dead_code, reason = "unused here"),
+)]
+mod demo;
+''',
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn('crates/demo.rs:2', result.stdout)
+        self.assertIn('crates/demo.rs:3', result.stdout)
 
     def test_ignores_comments_strings_and_the_cfg_condition(self):
         result = run_check(

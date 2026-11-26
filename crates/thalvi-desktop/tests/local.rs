@@ -1,6 +1,6 @@
 //! The local recognizer streams a model's text through the recognizer seam, and reports what each recognition cost.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::collections::VecDeque;
 use std::future::Future;

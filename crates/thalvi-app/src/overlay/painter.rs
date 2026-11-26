@@ -163,7 +163,7 @@ mod tests {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "a test point"
+            reason = "test probes are nonnegative points inside the 460 by 200 scale-1 frame"
         )]
         let at = (y as usize * frame.width as usize + x as usize) * 4;
         [frame.bgra[at + 2], frame.bgra[at + 1], frame.bgra[at]]

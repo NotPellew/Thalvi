@@ -1,6 +1,6 @@
 //! Stretches of speech end when the speaker is silent, and never before the words already spoken are in.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::sync::Arc;
 
