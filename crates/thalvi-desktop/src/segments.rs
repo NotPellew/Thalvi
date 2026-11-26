@@ -51,6 +51,12 @@ pub trait FrameDecoder: Send + 'static {
     fn holds_text_for_end(&self) -> bool {
         false
     }
+
+    /// Whether queued frames may be pushed together so a sliding-window encoder catches up in one
+    /// pass instead of one per step.
+    fn batches_frames(&self) -> bool {
+        false
+    }
 }
 
 /// Cuts a decoder's tokens into partials and finals.
@@ -282,10 +288,18 @@ impl<D: SnapshotDecoder> SpeechStream for Revising<D> {
 
 impl<D: FrameDecoder> SpeechStream for Segments<D> {
     fn accept(&mut self, frame: &Frame) -> Result<Vec<RecognizerEvent>, RecognizerError> {
-        let samples: Vec<f32> = frame.iter().map(|s| f32::from(*s) / PCM_SCALE).collect();
-        let frames = self.decoder.push(&samples)?;
+        self.accept_batch(std::slice::from_ref(frame))
+    }
+
+    fn accept_batch(&mut self, frames: &[Frame]) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        let samples: Vec<f32> = frames
+            .iter()
+            .flatten()
+            .map(|s| f32::from(*s) / PCM_SCALE)
+            .collect();
+        let encoded_frames = self.decoder.push(&samples)?;
         let mut events = Vec::new();
-        for encoded in frames {
+        for encoded in encoded_frames {
             self.take(vec![encoded]);
             if !self.ends_here()? {
                 continue;
@@ -305,11 +319,17 @@ impl<D: FrameDecoder> SpeechStream for Segments<D> {
         Ok(events)
     }
 
+    fn batches_frames(&self) -> bool {
+        self.decoder.batches_frames()
+    }
+
     fn holds_text_for_end(&self) -> bool {
         self.decoder.holds_text_for_end()
     }
 
     fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        let pending = self.decoder.lookahead(&vec![0.0; self.lookahead_samples])?;
+        self.take(pending);
         if self.spoken.is_empty() {
             return Ok(Vec::new());
         }

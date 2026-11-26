@@ -79,6 +79,8 @@ struct Fake {
     release_limit: Duration,
     /// Words the model holds back until the input ends.
     held_back: Option<&'static str>,
+    /// Records the size of each batch when the stream opts into frame batching.
+    batches: Option<Arc<Mutex<Vec<usize>>>>,
 }
 
 /// Fails to load this many times, then provides the [`Fake`]s it was given, one for each load.
@@ -136,6 +138,7 @@ struct FakeStream {
     seen: Arc<AtomicUsize>,
     done: mpsc::Sender<()>,
     held_back: Option<&'static str>,
+    batches: Option<Arc<Mutex<Vec<usize>>>>,
 }
 
 impl SpeechModel for Fake {
@@ -164,12 +167,19 @@ impl SpeechModel for Fake {
             seen: Arc::clone(&self.seen),
             done: self.done.clone(),
             held_back: self.held_back,
+            batches: self.batches.clone(),
         }
     }
 }
 
 impl SpeechStream for FakeStream {
     fn accept(&mut self, _frame: &Frame) -> Reply {
+        if let Some(batches) = &self.batches {
+            batches
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(1);
+        }
         let n = self.seen.fetch_add(1, Ordering::SeqCst);
         if n == 0
             && let Some(gate) = self.gate.take()
@@ -178,6 +188,25 @@ impl SpeechStream for FakeStream {
             let _ = gate.release.recv_timeout(WAIT);
         }
         (self.script)(n)
+    }
+
+    fn accept_batch(&mut self, frames: &[Frame]) -> Reply {
+        if let Some(batches) = &self.batches {
+            batches
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(frames.len());
+        }
+        let mut events = Vec::new();
+        for _ in frames {
+            let n = self.seen.fetch_add(1, Ordering::SeqCst);
+            events.extend((self.script)(n)?);
+        }
+        Ok(events)
+    }
+
+    fn batches_frames(&self) -> bool {
+        self.batches.is_some()
     }
 
     fn end_input(&mut self) -> Reply {
@@ -244,6 +273,7 @@ fn rig_on(
         done: done_tx.clone(),
         release_limit: RELEASE_LIMIT,
         held_back: None,
+        batches: None,
     };
     Rig {
         recognizer: LocalRecognizer::new(
@@ -282,7 +312,22 @@ impl Rig {
                 done: self.done_tx.clone(),
                 release_limit: RELEASE_LIMIT,
                 held_back: None,
+                batches: None,
             });
+    }
+
+    /// Makes the model the next load provides opt into frame batching and records each batch size.
+    fn then_batch(&self) -> Arc<Mutex<Vec<usize>>> {
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        self.recognizer
+            .source()
+            .fakes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .front_mut()
+            .expect("a model to load")
+            .batches = Some(Arc::clone(&batches));
+        batches
     }
 
     /// Makes the model the next load provides hold `text` back until the input ends.
@@ -380,6 +425,10 @@ async fn a_released_hold_stays_behind_until_the_model_answers_the_end_of_its_aud
     );
     rig.then_hold_back("reduced our hosting bills");
     let mut session = rig.recognizer.connect().await.expect("connects");
+    assert!(
+        !session.needs_release_silence(),
+        "local sessions flush themselves on input_ended instead of taking synthetic silence"
+    );
     session.send_frame(&FRAME).await.expect("sends");
     session.hold_released();
     for _ in 0..10 {
@@ -411,6 +460,40 @@ async fn a_released_hold_stays_behind_until_the_model_answers_the_end_of_its_aud
     );
     session.close().await;
     let _ = rig.metrics().await;
+}
+
+#[tokio::test]
+async fn a_batching_stream_drains_queued_frames_together_before_ending_the_input() {
+    let (hold, gate) = gate();
+    let rig = rig("batch", |_| Ok(vec![]), Some(gate), 0);
+    rig.then_hold_back("caught up");
+    let batches = rig.then_batch();
+    let mut session = rig.recognizer.connect().await.expect("connects");
+    session.send_frame(&FRAME).await.expect("sends");
+    hold.model_started();
+    for _ in 0..4 {
+        session.send_frame(&FRAME).await.expect("sends");
+    }
+    session.hold_released();
+    session.input_ended();
+    hold.release();
+    tokio::time::timeout(WAIT, async {
+        assert_eq!(
+            session.next_event().await,
+            Ok(RecognizerEvent::Final("caught up".to_owned()))
+        );
+        assert_eq!(session.next_event().await, Ok(RecognizerEvent::Ended));
+    })
+    .await
+    .expect("batched frames and end_input finish");
+    assert_eq!(
+        *batches.lock().unwrap_or_else(PoisonError::into_inner),
+        [1, 4],
+        "queued frames behind the first one are handed to accept_batch together"
+    );
+    session.close().await;
+    let metric = rig.metric().await;
+    assert_eq!(metric["frames"], 5);
 }
 
 #[tokio::test]
@@ -487,11 +570,6 @@ async fn the_load_and_each_recognition_report_the_device_and_any_reason_for_the_
             "cpu-model",
             Device::Cpu(Fallback::CpuModel),
             serde_json::json!({"device": "cpu", "fallback": "cpu_model"}),
-        ),
-        (
-            "windows",
-            Device::Cpu(Fallback::WindowsUnsupported),
-            serde_json::json!({"device": "cpu", "fallback": "windows_unsupported"}),
         ),
     ] {
         let rig = rig_on(&format!("device-{name}"), device, None, dictation, None, 0);
@@ -840,16 +918,16 @@ async fn a_failed_reload_leaves_no_model_claimed_to_run() {
 }
 
 #[tokio::test]
-async fn the_load_reports_how_many_nodes_of_each_network_the_gpu_took() {
+async fn the_load_reports_how_many_encoder_nodes_the_gpu_took() {
     let gpu = Gpu {
         name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
         api: "Vulkan",
     };
-    let nodes = |on_gpu, total| Nodes { on_gpu, total };
     let placement = Placement {
-        encoder: nodes(4_950, 5_000),
-        decoder: nodes(12, 30),
-        joiner: nodes(6, 6),
+        encoder: Nodes {
+            on_gpu: 4_950,
+            total: 5_000,
+        },
     };
     let rig = rig_on(
         "placement",
@@ -868,14 +946,7 @@ async fn the_load_reports_how_many_nodes_of_each_network_the_gpu_took() {
         .iter()
         .find(|line| line["event"] == "desktop_speech_load")
         .expect("a load line");
-    for (key, value) in [
-        ("encoder_nodes_on_gpu", 4_950),
-        ("encoder_nodes", 5_000),
-        ("decoder_nodes_on_gpu", 12),
-        ("decoder_nodes", 30),
-        ("joiner_nodes_on_gpu", 6),
-        ("joiner_nodes", 6),
-    ] {
+    for (key, value) in [("encoder_nodes_on_gpu", 4_950), ("encoder_nodes", 5_000)] {
         assert_eq!(load[key], value, "{key}");
     }
 }

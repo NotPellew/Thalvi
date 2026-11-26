@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "helpers/webgpu/webgpu_dawn.dll": "webgpu_dawn.dll",
+      "helpers/webgpu/dxcompiler.dll": "dxcompiler.dll"
+    }
+  }
+}

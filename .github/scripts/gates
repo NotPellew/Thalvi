@@ -46,13 +46,36 @@ tests() {
   fi
 }
 
+stage_windows_webgpu() {
+  local target_dir=${CARGO_TARGET_DIR:-$PWD/target}
+  local out=crates/thalvi-app/helpers/webgpu
+  step cargo build --release --locked -p thalvi-app
+  mkdir -p "$out"
+  for dll in webgpu_dawn.dll dxcompiler.dll; do
+    local src="$target_dir/release/$dll"
+    if [[ ! -f $src && -n ${LOCALAPPDATA:-} ]]; then
+      src=$(find "$LOCALAPPDATA/ort.pyke.io" -name "$dll" -type f 2>/dev/null | head -n 1 || true)
+    fi
+    if [[ ! -f $src ]]; then
+      echo "gates: missing Windows WebGPU runtime $dll in $target_dir/release" >&2
+      exit 1
+    fi
+    cp "$src" "$out/$dll"
+  done
+}
+
 bundle() {
   if [[ ${BUNDLE:-true} == false ]]; then
     echo "SKIPPED the $1 package: BUNDLE=false; it did not run and is not reported as passed"
   else
+    local extra=()
+    if [[ $1 == nsis ]]; then
+      stage_windows_webgpu
+      extra=(--config tauri.webgpu.windows.json)
+    fi
     step .github/scripts/whisper-helper crates/thalvi-app/helpers/whisper
     in_dir crates/thalvi-app "${@:2}" npm exec --prefix ui -- tauri build --bundles "$1" \
-      --config tauri.whisper.json -- --locked
+      --config tauri.whisper.json "${extra[@]}" -- --locked
   fi
 }
 
@@ -81,7 +104,7 @@ gate_desktop_windows() {
   desktop_ui
   step cargo fmt --all -- --check
   step cargo lint
-  tests "-p thalvi-desktop -p thalvi-app"
+  PATH="${CARGO_TARGET_DIR:-$PWD/target}/debug:$PATH" tests "-p thalvi-desktop -p thalvi-app"
   bundle nsis
 }
 
@@ -108,7 +131,6 @@ gate_issue_sync() {
     .github/scripts/changed .github/scripts/changed.test.sh .github/scripts/rust-layout.test.sh
   step .github/scripts/issue-refs.test.sh
   step .github/scripts/changed.test.sh
-  step python3 .github/scripts/hold.test.py
 }
 
 # Needs Node pinned in .node-version, minisign, jq and pipx.

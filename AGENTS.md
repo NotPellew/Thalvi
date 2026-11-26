@@ -112,7 +112,7 @@ names its components and, above each gate, the toolchains and system packages
 that gate needs and does not install. CI jobs call the script after their
 toolchain setup, so a new check goes in the script, and a new component adds
 its case and pinned toolchain there and its CI job; one that ships on Windows
-also runs its gate on `windows-latest`. npm is the package manager; lockfiles
+also runs its gate on `windows-2025-vs2026`. npm is the package manager; lockfiles
 are committed.
 
 Two required checks are not in the script:
@@ -163,6 +163,8 @@ only `--in-diff` against the base with no desktop session and a throwaway
   when the PR merges. The Issues workflow reopens those issues when a merged
   `Reverts #N` PR takes the change out. Use `Refs #N` when a PR only touches
   one.
+- A PR merges once the required checks pass. One that changes a path in
+  `.github/CODEOWNERS` also waits for the owner's review.
 - Use `.github/pull_request_template.md` for every PR body, including PRs
   created through CLI tools; preserve its headings and remove instructional
   comments.

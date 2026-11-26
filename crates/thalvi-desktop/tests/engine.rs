@@ -8676,6 +8676,37 @@ async fn a_buffered_live_hold_still_ends_a_streaming_extra_with_silence() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_release_skips_silence_when_the_session_flushes_on_end_but_still_flushes_extras() {
+    LocalSet::new()
+        .run_until(async {
+            let (chat_url, _asked, _feed) = chat(Chat::Stall).await;
+            let (mut rig, engine, frames) = Rig::new(&with_streaming(&chat_url, &["X"]));
+            rig.server.flushes_on_end();
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.extras[0].ready();
+            rig.feed_until(500, Kind::Voice).await;
+            let before = rig.sent();
+            rig.release(700).await;
+            assert_eq!(
+                rig.sent(),
+                before,
+                "no synthetic silence frames reach a session that flushes on input_ended"
+            );
+            assert_eq!(rig.server.input_ended_calls(), 1);
+            let extra = rig.extra_sent(0);
+            assert_eq!(
+                tags(&extra[extra.len() - 10..]),
+                vec![0; 10],
+                "streaming extras still get the release silence"
+            );
+            task.abort();
+            let _ = task.await;
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_streaming_extra_is_sent_every_frame_the_live_recognizer_is_sent_however_late_it_connects()
  {
     LocalSet::new()

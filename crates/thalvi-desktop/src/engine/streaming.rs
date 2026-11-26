@@ -319,8 +319,15 @@ pub(super) async fn finished<R: Recognizer>(
                 }
             }
         } else {
-            for frame in frames.iter().chain(&RELEASE_SILENCE) {
-                session.send_frame(frame).await?;
+            if session.needs_release_silence() {
+                for frame in frames.iter().chain(&RELEASE_SILENCE) {
+                    session.send_frame(frame).await?;
+                }
+            } else {
+                for frame in frames {
+                    session.send_frame(frame).await?;
+                }
+                session.input_ended();
             }
             loop {
                 let settled = text
@@ -328,7 +335,14 @@ pub(super) async fn finished<R: Recognizer>(
                     .then(|| Instant::now() + session.release_limit());
                 tokio::select! {
                     biased;
-                    event = session.next_event() => text.on_event(event?, buffers),
+                    event = session.next_event() => {
+                        let event = event?;
+                        let ended = matches!(event, RecognizerEvent::Ended);
+                        text.on_event(event, buffers);
+                        if ended {
+                            break;
+                        }
+                    }
                     () = until(settled) => break,
                 }
             }

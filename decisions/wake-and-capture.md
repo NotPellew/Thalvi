@@ -37,8 +37,7 @@ Starting and ending a capture: wake words, hold keys, cues and silence.
 - **Wake words are a switch apart from listening.** `wake.enabled` (stored only when off) turns spoken activation off while listening stays on: the engine skips the wake model and the hold keys work, the switch applies as a retune with no rebuild, and keyboard-only is its own status (`keyboardOnly`, tray icon and `state` word `keyboard`). Why: pausing also refuses the hold keys, and a user who wants only the keyboard has no other way to stop wake words from starting captures. Rejected: pausing as the way to turn wake words off, unloading the wake model (re-enabling would need a rebuild).
 - **AltGr alone may be a hold key on Windows.** `AltRight` held alone dictates; AltGr with any other key is a chord that types, so the hook passes every event, ignores the Ctrl Windows adds, and starts the hold only after 0.2 s alone, keeping the audio from the press. Why: AltGr types `@`, `€` and `{` on layouts that have it, and a swallowed AltGr would break typing for them. Reversible: a hold started by AltGr and a second key stays a hold.
   Rejected: swallowing AltGr, starting the hold at the press and cancelling on a chord (cue and overlay would flash on every `@`).
-- **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, then tells the session its input
-  ended, and pastes on the next final or after a session-reported wait: 250 ms, or 400 ms only for a decoder whose final re-hears the end
+- **Hold release flush.** At release a hold sends 800 ms of generated silence (kept out of the recording) to streaming servers that have no end-of-input message and to streaming extras, while local sessions skip those frames and flush their right-context tail in one pass on `input_ended`; the hold pastes on the next final or after a session-reported wait: 250 ms, or 400 ms only for a decoder whose final re-hears the end
   of the stretch (Parakeet's, measured at 235-397 ms loaded); a tentative decoding that commits frames without a token while the voice
   detector still hears speech replays its whole stretch. The session is told where the hold's audio ends, so only audio sent before the
   release is owed a result: a session is behind only while one of those frames has none, and a final ends the wait only once none is left,
@@ -48,7 +47,8 @@ Starting and ending a capture: wake words, hold keys, cues and silence.
   15 s, then the hold pastes what it has and says the end may be missing. The wait is recorded apart from the model's latency. Why: a
   streaming recognizer emits a word only after audio past it, an early final used to cut a lagging hold to the audio heard so far; a busy
   machine (Settings opening during a hold) made the recognizer fall seconds behind, so the 250 ms paste lost the end while saying it
-  worked; and Nemotron Unified keeps its last word until its stretch is finished, so the partial at the wait dropped it; showing Finishing
+  worked; Nemotron Unified keeps its last word until its stretch is finished, and feeding it 800 ms of release silence forced 5-6 full
+  616-frame GPU passes (400-1,835 ms on Radeon 8060S) instead of one right-context lookahead pass (~100 ms); showing Finishing
   from the release flashed it on ordinary releases. Measured headless on the server recognizer, no last word lost in 336 releases (75%
   before when released on the word's end). Rejected: one longer wait for every recognizer; a fixed 500 ms tail; an end-of-stream message
   through the server (11% lost at the word's end, a protocol change); pasting at the wait and only warning; more left context or a global

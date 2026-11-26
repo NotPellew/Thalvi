@@ -148,7 +148,7 @@ jobs:
     name: desktop-windows
     needs: changes
     if: ${{ !cancelled() }}
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     timeout-minutes: 45
     steps:
       - if: needs.changes.outputs.windows == 'false'
