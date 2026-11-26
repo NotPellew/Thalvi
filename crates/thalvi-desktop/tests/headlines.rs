@@ -108,6 +108,13 @@ fn recognition() -> Cases {
             "Can't reach speech server — Settings",
         ),
         (
+            Box::new(RecognizerError::Behind {
+                model: "Nemotron 160ms".to_owned(),
+                lag: seconds,
+            }),
+            "Can't keep up with Nemotron 160ms",
+        ),
+        (
             Box::new(CaptureError::NotReady {
                 waited: seconds,
                 speech: server(),

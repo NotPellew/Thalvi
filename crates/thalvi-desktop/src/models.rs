@@ -816,7 +816,7 @@ impl ModelError {
 }
 
 impl UserError for ModelError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::NoDataDir => "No folder to keep models in",
             Self::Download { failure, .. } => match failure {
@@ -832,6 +832,7 @@ impl UserError for ModelError {
             Self::Unpack { .. } => "Can't unpack the chat runtime",
             Self::Io { .. } => "Can't save the model file",
         }
+        .to_owned()
     }
 }
 

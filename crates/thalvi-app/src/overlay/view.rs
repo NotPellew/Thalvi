@@ -262,7 +262,7 @@ impl View {
             Sample::Failed => Status::Failed {
                 kind: FailureKind::Other,
                 notice: "The delivery failed.".to_owned(),
-                headline: "Couldn't send it",
+                headline: "Couldn't send it".to_owned(),
                 causes: Vec::new(),
             },
         };

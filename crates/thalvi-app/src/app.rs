@@ -1058,7 +1058,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
                 let failed = Status::Failed {
                     kind: FailureKind::Other,
                     notice: "Thalvi stopped unexpectedly. Restart it.".to_owned(),
-                    headline: "Thalvi stopped — restart it",
+                    headline: "Thalvi stopped — restart it".to_owned(),
                     causes: Vec::new(),
                 };
                 show(&handle, &failed);
@@ -1085,10 +1085,10 @@ fn note_start(errors: &LastError, notices: Vec<String>) {
 }
 
 /// Records a non-fatal failure for the tray and Settings. It does not open a dialog.
-fn note_failure(errors: &LastError, headline: &'static str, notice: String) {
+fn note_failure(errors: &LastError, headline: impl Into<String>, notice: String) {
     errors.note(Failure {
         notice,
-        headline,
+        headline: headline.into(),
         causes: Vec::new(),
         kind: FailureKind::Other,
     });
