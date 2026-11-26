@@ -99,6 +99,10 @@ const LEVEL_SPAN: Duration = Duration::from_secs(2);
 /// Frames of microphone audio kept for the wake clip, 2 s.
 const WAKE_CLIP_FRAMES: usize = 25;
 
+/// Pre-roll frames kept from `wake_clip` on an immediate hold press (2 × 80 ms = 160 ms),
+/// so starting to speak as the key goes down does not clip the first consonant.
+const HOLD_PREROLL_FRAMES: usize = 2;
+
 /// The sample peak from which a wake level window counts as activity.
 const ACTIVITY_PEAK: u16 = 1_000;
 
@@ -1612,13 +1616,16 @@ where
     /// Starts the capture, leaving the microphone open: the user talks from the press on.
     fn begin_hold(&mut self, press: Press) {
         let at = Instant::now();
-        let heard = press.since.map_or_else(Vec::new, |since| {
+        let heard = if let Some(since) = press.since {
             self.wake_clip
                 .iter()
                 .filter(|queued| queued.order >= since)
                 .copied()
                 .collect()
-        });
+        } else {
+            let skip = self.wake_clip.len().saturating_sub(HOLD_PREROLL_FRAMES);
+            self.wake_clip.iter().skip(skip).copied().collect()
+        };
         self.held = Some(Held {
             press: press.number,
             kind: press.kind,
