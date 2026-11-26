@@ -12,7 +12,7 @@
 //!
 //! Prints counts and durations only, never texts. Run with `--release --ignored --nocapture`.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

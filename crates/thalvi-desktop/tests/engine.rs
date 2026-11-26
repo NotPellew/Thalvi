@@ -1,7 +1,6 @@
 //! The capture engine on a paused clock, with a fake microphone, wake word, cues and recognizer.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
-#![expect(clippy::unwrap_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -6517,7 +6516,6 @@ fn hearing(config: &str) -> (Rig, SpotterControl, TestEngine, FakeFrames) {
 }
 
 /// The words the overlay holds for the open capture.
-#[expect(clippy::panic, reason = "an unexpected capture state fails the test")]
 fn drafted(rig: &Rig) -> String {
     match rig.state() {
         EngineState::Capturing { committed, .. } => committed,
@@ -6534,7 +6532,6 @@ fn shown(rig: &Rig) -> Option<String> {
 }
 
 /// The metrics of a capture whose heard ending was told: the hit and the capture's totals, no words.
-#[expect(clippy::panic, reason = "a missing expected metric fails the test")]
 fn assert_recorded_as_notified(dir: &std::path::Path, name: &str) {
     let metrics = read_lines(&dir.join("metrics.jsonl"));
     let hit = metrics

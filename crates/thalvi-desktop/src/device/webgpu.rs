@@ -2,7 +2,7 @@
 
 #![expect(
     unsafe_code,
-    reason = "Dawn's C API and ONNX Runtime's placement info are raw FFI; each block says why it is sound"
+    reason = "platform: Dawn adapter discovery and ONNX device placement use C FFI; each block states its safety conditions"
 )]
 
 use std::ffi::{CStr, c_char, c_void};

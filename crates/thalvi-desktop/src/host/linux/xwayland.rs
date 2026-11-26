@@ -64,7 +64,7 @@ impl Window {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "pixel sizes on one screen"
+            reason = "X11 takes u16 dimensions and a signed i16 offset; rounded values saturate to these limits"
         )]
         let (width, height, down) = (
             (size.0 * scale).ceil() as u16,

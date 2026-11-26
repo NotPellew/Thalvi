@@ -3,7 +3,7 @@
 
 #![expect(
     unsafe_code,
-    reason = "raw Win32 window calls; each block says why it is sound"
+    reason = "platform: the layered window, DIB and callbacks use Win32 FFI; each block states its safety conditions"
 )]
 
 use std::cell::{Cell, RefCell};
@@ -105,7 +105,10 @@ impl OverlayPlan {
         .map_err(failed)?;
         // SAFETY: a window this thread just made.
         let dpi = unsafe { GetDpiForWindow(window) }.max(96);
-        #[expect(clippy::cast_precision_loss, reason = "a DPI")]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "GetDpiForWindow returns an integer DPI; f32 rounds only above 2^24 DPI"
+        )]
         let scale = dpi as f32 / 96.0;
         SCALE.with(|cell| cell.set(scale));
         let mut area = RECT::default();
@@ -121,7 +124,7 @@ impl OverlayPlan {
         .map_err(failed)?;
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "the overlay's size in pixels"
+            reason = "Win32 SIZE holds signed 32-bit pixels; ceil rounds outwards and the cast saturates at i32::MAX"
         )]
         let size = SIZE {
             cx: (width * scale).ceil() as i32,

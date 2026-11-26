@@ -129,17 +129,20 @@ impl Wave {
     }
 
     /// Advances to `now` (seconds); the time to wait for the next frame.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "small positive counts"
-    )]
     fn step(&mut self, now: f64, level: f32) -> Duration {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "frame delta is clamped to 0–50 ms"
+        )]
         let elapsed = self
             .last_frame
             .map_or(0.0, |last| (now - last).clamp(0.0, 0.05)) as f32;
         self.last_frame = Some(now);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "floor counts whole intervals; only the first 40 matter, and negative deltas saturate to zero"
+        )]
         let due = self
             .last_sample
             .map_or(HISTORY, |last| ((now - last) / SAMPLE_S).floor() as usize);
@@ -150,7 +153,14 @@ impl Wave {
                 *sample = level;
             }
             self.last_sample = Some(match self.last_sample {
-                Some(last) if due <= HISTORY => last + due as f64 * SAMPLE_S,
+                Some(last) if due <= HISTORY => {
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "due is at most HISTORY (40) here"
+                    )]
+                    let advanced = last + due as f64 * SAMPLE_S;
+                    advanced
+                }
                 _ => now,
             });
         }
@@ -405,12 +415,12 @@ impl View {
         }
     }
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "milliseconds of a pause"
-    )]
     pub(super) fn left_ms(&self, countdown: &Countdown) -> u64 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "negative deltas become zero; drop sub-ms precision and saturate past u64 before subtracting"
+        )]
         let elapsed = ((self.clock - countdown.started) * 1000.0).max(0.0) as u64;
         countdown
             .total_ms

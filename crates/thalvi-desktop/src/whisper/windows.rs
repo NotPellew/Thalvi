@@ -2,7 +2,7 @@
 
 #![expect(
     unsafe_code,
-    reason = "raw Win32 job object calls; each block says why it is sound"
+    reason = "platform: managing the Windows helper process requires Win32 job object FFI; each block states its safety conditions"
 )]
 
 use std::ffi::c_void;
