@@ -154,6 +154,8 @@ struct BufferedShape {
     step: usize,
     /// Samples in a full window.
     capacity: usize,
+    /// Mel frames per encoded frame.
+    subsampling: usize,
     /// Encoded frames per call.
     frames: usize,
     /// The first encoded frame decoded at each step: the newest ones wait for their look-ahead.
@@ -494,6 +496,7 @@ fn buffered_shape(
             window,
             step: shift * HOP,
             capacity: window * HOP,
+            subsampling: sub,
             frames,
             begin: frames - behind,
             decoded,
@@ -1357,25 +1360,35 @@ impl<B: Backend> Buffered<B> {
         self.audio.extend_from_slice(chunk);
         let excess = self.audio.len().saturating_sub(shape.capacity);
         self.audio.drain(..excess);
-        let mel = shape.mel.features(&self.audio);
-        let valid = mel.len().min(shape.window);
-        let mut features = vec![0.0; MEL_BINS * shape.window];
-        for (t, frame) in mel.iter().take(valid).enumerate() {
-            for (m, value) in frame.iter().enumerate() {
-                features[m * shape.window + t] = *value;
+        let valid = (self.audio.len() / HOP).min(shape.window);
+        let silent_only = valid.div_ceil(shape.subsampling) <= shape.frames.saturating_sub(to);
+        let owned;
+        // Before audio reaches the decoded slice, every frame in `from..to` is precomputed silence.
+        let encoded: &[f32] = if silent_only {
+            &shape.silence
+        } else {
+            let mel = shape.mel.features(&self.audio);
+            let valid = mel.len().min(shape.window);
+            let mut features = vec![0.0; MEL_BINS * shape.window];
+            for (t, frame) in mel.iter().take(valid).enumerate() {
+                for (m, value) in frame.iter().enumerate() {
+                    features[m * shape.window + t] = *value;
+                }
             }
-        }
-        let heard = self.backend.encode(features, valid)?;
-        let mut full = shape.silence.clone();
-        let count = heard.count.min(shape.frames);
-        let channels = shape.silence.len() / shape.frames;
-        for c in 0..channels {
-            let target = c * shape.frames + shape.frames - count;
-            let source = c * heard.stride;
-            full[target..target + count].copy_from_slice(&heard.values[source..source + count]);
-        }
+            let heard = self.backend.encode(features, valid)?;
+            let mut full = shape.silence.clone();
+            let count = heard.count.min(shape.frames);
+            let channels = shape.silence.len() / shape.frames;
+            for c in 0..channels {
+                let target = c * shape.frames + shape.frames - count;
+                let source = c * heard.stride;
+                full[target..target + count].copy_from_slice(&heard.values[source..source + count]);
+            }
+            owned = full;
+            &owned
+        };
         let emitted = self.backend.decode(
-            &full,
+            encoded,
             shape.frames,
             from..to,
             &mut Decoding {
@@ -1390,18 +1403,6 @@ impl<B: Backend> Buffered<B> {
             self.silent_steps + 1
         };
         Ok(emitted)
-    }
-
-    /// Hears what is left over at the end of the audio, decoding every frame down to the newest.
-    fn finish(&mut self) -> Result<Vec<Vec<usize>>, RecognizerError> {
-        if self.audio.is_empty() && self.waiting.is_empty() {
-            return Ok(Vec::new());
-        }
-        let chunk = std::mem::take(&mut self.waiting);
-        let shape = Arc::clone(&self.shape);
-        // Without new samples the last step already decoded its first frames.
-        let from = shape.begin + if chunk.is_empty() { shape.decoded } else { 0 };
-        self.step(&chunk, from, shape.frames)
     }
 }
 
@@ -1425,10 +1426,16 @@ impl<B: Backend> FrameDecoder for Buffered<B> {
     }
 
     fn lookahead(&self, silence: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        if self.audio.is_empty() && self.waiting.is_empty() && silence.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut ahead = self.clone();
-        let mut found = ahead.push(silence)?;
-        found.extend(ahead.finish()?);
-        Ok(found)
+        let mut tail = std::mem::take(&mut ahead.waiting);
+        tail.extend_from_slice(silence);
+        let shape = Arc::clone(&ahead.shape);
+        let shifted = (tail.len() / HOP).div_ceil(shape.subsampling);
+        let from = (shape.begin + shape.decoded).saturating_sub(shifted);
+        ahead.step(&tail, from, shape.frames)
     }
 
     fn next_segment(&mut self) {
@@ -1869,6 +1876,7 @@ mod tests {
             window: 616,
             step: 2_560,
             capacity: 98_560,
+            subsampling: 8,
             frames: FRAMES,
             begin: 69,
             decoded: 2,
@@ -1903,6 +1911,7 @@ mod tests {
                 window: 0,
                 step: 0,
                 capacity: 0,
+                subsampling: 8,
                 frames: 0,
                 begin: 0,
                 decoded: 0,
@@ -1924,13 +1933,20 @@ mod tests {
     fn a_window_not_yet_full_is_heard_on_its_own_and_sits_at_the_end_of_the_silence_before_it() {
         let (mut stream, seen) = buffered();
         let mut emitted = Vec::new();
-        for step in 1..=3 {
+        for step in 1..=6 {
             emitted.extend(stream.push(&sound(STEP, step * STEP)).unwrap());
         }
         let seen = seen.lock().unwrap();
-        assert_eq!(emitted, [[69], [70], [69], [70], [69], [70]]);
-        for (step, (encode, decode)) in seen.encodes.iter().zip(&seen.decodes).enumerate() {
-            let valid = (step + 1) * 16;
+        assert_eq!(emitted.len(), 12);
+        // The first three steps sit wholly past the decoded slice (69..71), so they skip encoding.
+        assert_eq!(seen.encodes.len(), 3);
+        assert_eq!(seen.decodes.len(), 6);
+        for decode in &seen.decodes[..3] {
+            assert_eq!(decode.range, 69..71);
+            assert!(decode.channel.iter().all(|v| *v == SILENCE));
+        }
+        for (step, (encode, decode)) in seen.encodes.iter().zip(&seen.decodes[3..]).enumerate() {
+            let valid = (step + 4) * 16;
             assert_eq!(encode.0, valid);
             let (speech, quiet) = encode.1.split_at(valid);
             assert!(quiet.iter().all(|value| *value == 0.0), "step {step}");
@@ -1968,8 +1984,8 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(
             seen.encodes.len(),
-            41,
-            "a step for every 2560 samples, none for the 1280 left"
+            38,
+            "the first three steps decode silence only; every later 2560-sample step encodes once"
         );
         let (valid, row) = seen.encodes.last().unwrap();
         assert_eq!(*valid, 616);
@@ -1987,19 +2003,17 @@ mod tests {
         let (mut stream, seen) = buffered();
         stream.push(&sound(STEP + 1_280, 0)).unwrap();
         let ahead = stream.lookahead(&vec![0.0; 4_400]).unwrap();
-        // 1280 waiting + 4400 silence: two whole steps, then 560 samples for the end.
-        let frames =
-            |range: std::ops::Range<usize>| -> Vec<Vec<usize>> { range.map(|f| vec![f]).collect() };
-        let expected: Vec<Vec<usize>> = [frames(69..71), frames(69..71), frames(69..77)].concat();
+        // 1280 waiting + 4400 silence shifts the window by 5 frames in one pass: decode 66..77.
+        let expected: Vec<Vec<usize>> = (66..77).map(|f| vec![f]).collect();
         assert_eq!(ahead, expected);
         {
             let seen = seen.lock().unwrap();
-            assert_eq!(seen.encodes.len(), 4);
+            assert_eq!(seen.encodes.len(), 1);
         }
-        stream.push(&sound(1_280, 9)).unwrap();
+        stream.push(&sound(1_280 + 2 * STEP, 9)).unwrap();
         let seen = seen.lock().unwrap();
         let (valid, _) = seen.encodes.last().unwrap();
-        assert_eq!(*valid, 32, "the look-ahead did not move the stream");
+        assert_eq!(*valid, 64, "the look-ahead did not move the stream");
     }
 
     #[test]
