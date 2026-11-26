@@ -8,7 +8,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Wry};
 use thalvi_desktop::capture::CaptureRoute;
 
-use crate::status::Status;
+use crate::status::{LighterModel, Status};
 use crate::update::Snapshot;
 
 const SIZE: u8 = 32;
@@ -19,6 +19,8 @@ const SAMPLES: u8 = 4;
 pub const TOGGLE: &str = "toggle";
 pub const CANCEL: &str = "cancel";
 pub const COPY_ERROR: &str = "copy-error";
+/// Shown only while a failure offers a lighter on-device model.
+pub const LIGHTER_MODEL: &str = "lighter-model";
 pub const UPDATE: &str = "update";
 pub const LAST_DICTATION: &str = "last-dictation";
 pub const SETTINGS: &str = "settings";
@@ -259,11 +261,17 @@ impl CopyItem {
 /// The tray icon and the menu items that follow the status.
 pub struct Tray {
     icon: tauri::tray::TrayIcon,
+    /// The menu the offer item is added to and taken from.
+    menu: Menu<Wry>,
     /// The state in words; Linux trays show no tooltip, but they show menus.
     header: MenuItem<Wry>,
     toggle: MenuItem<Wry>,
     cancel: MenuItem<Wry>,
     copy_error: MenuItem<Wry>,
+    /// Switches to the lighter model a failure offers; in the menu only while it is offered.
+    lighter: MenuItem<Wry>,
+    /// Whether `lighter` is in the menu.
+    offering: Mutex<bool>,
     /// The update's state in words; clicking it checks for an update or opens the App page.
     update: MenuItem<Wry>,
     /// The state in words and the update's news, which the header and the tooltip put together.
@@ -273,6 +281,11 @@ pub struct Tray {
 /// The state in words, with the update's news after it when there is some.
 fn headline(title: &str, remark: Option<&str>) -> String {
     remark.map_or_else(|| title.to_owned(), |remark| format!("{title} — {remark}"))
+}
+
+/// The tray item that switches to the offered lighter model.
+fn lighter_text(lighter: LighterModel) -> String {
+    format!("Use {} (lighter)", lighter.title)
 }
 
 impl Tray {
@@ -301,6 +314,13 @@ impl Tray {
             COPY_ERROR,
             CopyItem::NoError.text(),
             CopyItem::NoError.enabled(),
+            None::<&str>,
+        )?;
+        let lighter = MenuItem::with_id(
+            app,
+            LIGHTER_MODEL,
+            "Use a lighter model",
+            true,
             None::<&str>,
         )?;
         let last = MenuItem::with_id(app, LAST_DICTATION, "Last dictation…", true, None::<&str>)?;
@@ -339,10 +359,13 @@ impl Tray {
             .build(app)?;
         Ok(Self {
             icon,
+            menu,
             header,
             toggle,
             cancel,
             copy_error,
+            lighter,
+            offering: Mutex::new(false),
             update,
             said: Mutex::new((title(status), remark)),
         })
@@ -372,6 +395,27 @@ impl Tray {
         let _ = self.cancel.set_enabled(can_cancel(status));
         if matches!(status, Status::Failed { .. }) {
             self.copy_item(&CopyItem::Ready);
+        }
+        self.offer(status.offer());
+    }
+
+    /// Puts the lighter model's item in the menu while a failure offers one, and takes it out after.
+    fn offer(&self, lighter: Option<LighterModel>) {
+        let mut offering = self.offering.lock().unwrap_or_else(PoisonError::into_inner);
+        match (lighter, *offering) {
+            (Some(lighter), false) => {
+                let _ = self.lighter.set_text(lighter_text(lighter));
+                let _ = self.menu.insert(&self.lighter, 4);
+                *offering = true;
+            }
+            (Some(lighter), true) => {
+                let _ = self.lighter.set_text(lighter_text(lighter));
+            }
+            (None, true) => {
+                let _ = self.menu.remove(&self.lighter);
+                *offering = false;
+            }
+            (None, false) => {}
         }
     }
 
@@ -504,8 +548,9 @@ mod tests {
             (
                 Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: "Your text follows: secret words".to_owned(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: Vec::new(),
                 },
                 Icon::Error,
@@ -646,8 +691,9 @@ mod tests {
             (
                 Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: String::new(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: Vec::new(),
                 },
                 false,
@@ -655,6 +701,17 @@ mod tests {
         ] {
             assert_eq!(can_cancel(&status), cancellable, "{status:?}");
         }
+    }
+
+    #[test]
+    fn the_lighter_model_item_names_the_model_it_switches_to() {
+        assert_eq!(
+            lighter_text(LighterModel {
+                name: "parakeet_tdt_v3",
+                title: "Parakeet TDT v3",
+            }),
+            "Use Parakeet TDT v3 (lighter)"
+        );
     }
 
     #[test]

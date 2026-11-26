@@ -64,7 +64,7 @@ impl fmt::Display for AudioError {
 }
 
 impl UserError for AudioError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::NoDevice => "No microphone found — plug one in",
             Self::DeviceMissing(_) => "Microphone not connected — Settings",
@@ -77,6 +77,7 @@ impl UserError for AudioError {
             Self::StreamFailed(_) => "Microphone stopped working",
             Self::Closed => "Microphone is off",
         }
+        .to_owned()
     }
 }
 

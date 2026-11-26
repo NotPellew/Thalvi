@@ -153,8 +153,9 @@ mod tests {
         assert_eq!(state(), "capturing");
         sender.send_replace(Status::Failed {
             kind: FailureKind::Other,
+            offer: None,
             notice: "http://user:key@host".to_owned(),
-            headline: "Failed",
+            headline: "Failed".to_owned(),
             causes: Vec::new(),
         });
         assert_eq!(state(), "error");

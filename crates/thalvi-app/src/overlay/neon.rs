@@ -1111,8 +1111,9 @@ mod tests {
         };
         let failed = Status::Failed {
             kind: crate::status::FailureKind::Other,
+            offer: None,
             notice: String::new(),
-            headline: "No words heard",
+            headline: "No words heard".to_owned(),
             causes: Vec::new(),
         };
         // The dot spans about 10 columns; the nine bars add 27 more.

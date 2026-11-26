@@ -509,6 +509,7 @@ fn state(running: &impl Running) -> String {
             notice,
             headline,
             kind,
+            offer,
             ..
         } => {
             reply["failure"] = match kind {
@@ -517,6 +518,9 @@ fn state(running: &impl Running) -> String {
                     json!({"headline": headline, "reason": scrub(notice, &secrets)})
                 }
             };
+            if let Some(offer) = offer {
+                reply["failure"]["lighter"] = json!({"name": offer.name, "title": offer.title});
+            }
             if running.overlay_on() {
                 reply["overlay"]["headline"] = json!(headline);
             }
@@ -1143,9 +1147,10 @@ mod tests {
                 }
                 (true, Status::Loading { .. }) => self.set_status(Status::Failed {
                     notice: "The microphone is closed.".to_owned(),
-                    headline: "Microphone closed",
+                    headline: "Microphone closed".to_owned(),
                     causes: Vec::new(),
                     kind: FailureKind::Other,
+                    offer: None,
                 }),
                 (false, Status::Capturing { .. }) => self.set_status(Status::Working {
                     target: None,
@@ -1916,7 +1921,7 @@ mod tests {
         );
         *lock(&rig.fake.failure) = Some(Failure {
             notice: "No.".to_owned(),
-            headline: "No",
+            headline: "No".to_owned(),
             causes: Vec::new(),
             kind: FailureKind::Other,
         });
@@ -2248,9 +2253,10 @@ mod tests {
 
         rig.fake.set_status(Status::Failed {
             notice: format!("The recognizer refused the key {SECRET}."),
-            headline: "Recognition failed",
+            headline: "Recognition failed".to_owned(),
             causes: Vec::new(),
             kind: FailureKind::Other,
+            offer: None,
         });
         let failed = rig.ask(&Request::State);
         assert_eq!(failed["state"], "failed");
@@ -2283,9 +2289,10 @@ mod tests {
         ] {
             rig.fake.set_status(Status::Failed {
                 notice: "It failed.".to_owned(),
-                headline: "Failed",
+                headline: "Failed".to_owned(),
                 causes: Vec::new(),
                 kind,
+                offer: None,
             });
             let state = rig.ask(&Request::State);
             assert_eq!(state["state"], "failed", "{kind:?}");
@@ -2984,7 +2991,7 @@ mod tests {
         assert_eq!(named, COMMANDS, "every command is asked");
         *lock(&rig.fake.failure) = Some(Failure {
             notice: "Could not paste my password is hunter2.".to_owned(),
-            headline: "Paste failed",
+            headline: "Paste failed".to_owned(),
             causes: Vec::new(),
             kind: FailureKind::Delivery,
         });
@@ -3012,9 +3019,10 @@ mod tests {
             },
             Status::Failed {
                 notice: "Nothing was delivered. Clipboard recovery failed: No clipboard. Your text follows:\nmy password is hunter2".to_owned(),
-                headline: "Clipboard failed — text in Settings",
+                headline: "Clipboard failed — text in Settings".to_owned(),
                 causes: Vec::new(),
                 kind: FailureKind::Delivery,
+                offer: None,
             },
         ];
         for status in statuses {

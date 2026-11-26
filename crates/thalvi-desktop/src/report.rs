@@ -77,7 +77,9 @@ pub const MAX_HEADLINE_CHARS: usize = 36;
 /// An error the user is shown: `Display` is the full text for Settings and the report, and
 /// `headline` a line short enough for the overlay to show whole.
 pub trait UserError: Error {
-    fn headline(&self) -> &'static str;
+    /// Names what only this failure knows, such as the model that fell behind, so it stays within
+    /// [`MAX_HEADLINE_CHARS`].
+    fn headline(&self) -> String;
 }
 
 /// The computer Thalvi runs on.

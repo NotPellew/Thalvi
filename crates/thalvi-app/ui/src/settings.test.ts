@@ -1071,7 +1071,7 @@ describe("the word list", () => {
     return [
       { ...NEMOTRON },
       { ...UNIFIED },
-      { ...NEMOTRON, name: "parakeet_tdt_v3", title: "Parakeet TDT" },
+      { ...NEMOTRON, name: "parakeet_tdt_v3", title: "Parakeet TDT v3" },
       { ...WHISPER },
       { ...WHISPER, name: "whisper_turbo_vulkan", title: VULKAN_TITLE },
     ];
@@ -1240,6 +1240,7 @@ const tickOf = (name: string): HTMLInputElement => entryNamed(name).querySelecto
 const editorEl = (): HTMLElement => root.querySelector(".editor") as HTMLElement;
 const editButton = (name: string): HTMLButtonElement => root.querySelector(`button[aria-label="Edit ${name}"]`) as HTMLButtonElement;
 const summaryText = (): string => recognition().querySelector(".next-dictation")?.textContent ?? "";
+const recovery = (): HTMLElement => recognition().querySelector(".next-dictation + div") as HTMLElement;
 const extrasText = (): string => recognition().querySelector(".extras")?.textContent ?? "";
 const needsChat = (): HTMLElement => recognition().querySelector(".needs-chat") as HTMLElement;
 
@@ -1257,6 +1258,95 @@ describe("the Recognition page", () => {
     goTo("recognition");
     return stub;
   }
+
+  const CANT_KEEP_UP: Status = {
+    state: "failed",
+    notice: "This computer can't keep up with Nemotron Streaming. Nothing was delivered.",
+    headline: "Nemotron Streaming is too slow",
+    causes: [],
+    kind: "recognizer",
+    offer: { name: "parakeet_tdt_v3", title: "Parakeet TDT v3" },
+  };
+  const LIGHTER = "Use Parakeet TDT v3 (lighter on this computer)";
+
+  it("offers the lighter on-device model after a cant-keep-up failure and switches through the desktop", async () => {
+    const stub = await open(local("nemotron_160ms"));
+    goTo("recognition");
+    stub.emit(CANT_KEEP_UP);
+    await settle();
+    button(LIGHTER).click();
+    await settle();
+    expect(stub.backend.useLighterModel).toHaveBeenCalledExactlyOnceWith("parakeet_tdt_v3");
+  });
+
+  it("keeps the model in use and says why when the lighter model cannot be downloaded", async () => {
+    const stub = await open(local("nemotron_160ms"));
+    goTo("recognition");
+    const message = "Could not download the speech model. Check the internet connection and try again.";
+    stub.backend.useLighterModel.mockRejectedValueOnce(new DownloadFailure(message, ["connection refused"]));
+    stub.emit(CANT_KEEP_UP);
+    await settle();
+    button(LIGHTER).click();
+    await settle();
+    expect(recognition().textContent).toContain(message);
+    expect(summaryText()).toContain("Nemotron Streaming");
+    expect(stub.applied().length).toBe(0);
+  });
+
+  it("shows the lighter model's download and cancels it, keeping the old model in use", async () => {
+    const stub = await open(local("nemotron_160ms"));
+    goTo("recognition");
+    let stop: () => void = () => {
+      throw new Error("the download has not started");
+    };
+    stub.backend.useLighterModel.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          stop = () => {
+            reject(new DownloadFailure("The download was cancelled.", []));
+          };
+        }),
+    );
+    stub.backend.cancelSpeechDownload.mockImplementationOnce(() => {
+      stop();
+      return Promise.resolve();
+    });
+    stub.emit(CANT_KEEP_UP);
+    await settle();
+    button(LIGHTER).click();
+    await settle();
+    const meter = recovery().querySelector("progress") as HTMLProgressElement;
+    expect(meter.hidden).toBe(false);
+    expect(recovery().textContent).toContain("Checking files…");
+    stub.speechProgress({ name: "parakeet_tdt_v3", percent: 42, status: "downloading", message: null, causes: [] });
+    await settle();
+    expect(recovery().textContent).toContain("Downloading… 42%");
+    const cancel = within(recovery(), "Cancel");
+    expect(cancel.hidden).toBe(false);
+    cancel.click();
+    await settle();
+    expect(stub.backend.cancelSpeechDownload).toHaveBeenCalledExactlyOnceWith("parakeet_tdt_v3");
+    expect(recovery().textContent).toContain("Download cancelled. Nemotron Streaming is still the model.");
+    expect(meter.hidden).toBe(true);
+    expect(button(LIGHTER).disabled).toBe(false);
+    expect(summaryText()).toContain("Nemotron Streaming");
+    expect(stub.applied().length).toBe(0);
+  });
+
+  it("takes the offer away when the failure stops carrying one", async () => {
+    const stub = await open(local("nemotron_160ms"));
+    goTo("recognition");
+    stub.emit(CANT_KEEP_UP);
+    await settle();
+    expect(root.textContent).toContain(LIGHTER);
+    (root.querySelector("footer.bar button[aria-label='Dismiss error']") as HTMLButtonElement).click();
+    await settle();
+    expect(stub.backend.dismissError).toHaveBeenCalled();
+    stub.emit({ ...CANT_KEEP_UP, offer: null });
+    await settle();
+    expect(button(LIGHTER).hidden).toBe(true);
+    expect(root.querySelector("footer.bar")?.textContent).not.toContain(CANT_KEEP_UP.notice);
+  });
 
   it("shows the Live recognizer with the next dictation and the extras, then the four groups by kind, then the word list", async () => {
     await openSeveral();
@@ -2058,8 +2148,8 @@ describe("the next dictation summary and state words", () => {
     ["done", { state: "done", target: null, route: "paste", notice: "Pasted" }, "Ready"],
     ["loading", { state: "loading", notice: "Loading the speech model." }, "Loading the speech model."],
     ["paused", { state: "paused" }, "Paused — resume to dictate"],
-    ["failed", { state: "failed", notice: "n", headline: "Can't reach speech server — Settings", causes: [], kind: "recognizer" }, "Can't reach speech server — Settings"],
-    ["failed delivery", { state: "failed", notice: "n", headline: "Nothing was pasted — Settings", causes: [], kind: "delivery" }, "Ready"],
+    ["failed", { state: "failed", notice: "n", headline: "Can't reach speech server — Settings", causes: [], kind: "recognizer", offer: null }, "Can't reach speech server — Settings"],
+    ["failed delivery", { state: "failed", notice: "n", headline: "Nothing was pasted — Settings", causes: [], kind: "delivery", offer: null }, "Ready"],
   ] as const)("shows %s as the summary state pushed through onStatus", async (_name, status, state) => {
     const stub = await open(several());
     goTo("recognition");
@@ -2101,7 +2191,7 @@ describe("the next dictation summary and state words", () => {
 
   describe("the summary's actions while the recognizer is being prepared", () => {
     const LOADING: Status = { state: "loading", notice: "Downloading the speech model — 42%" };
-    const FAILED: Status = { state: "failed", notice: "n", headline: "Download failed", causes: [], kind: "recognizer" };
+    const FAILED: Status = { state: "failed", notice: "n", headline: "Download failed", causes: [], kind: "recognizer", offer: null };
     const actions = (): string[] => {
       const row = root.querySelector(".next-dictation + div");
       return row === null || (row as HTMLElement).hidden
@@ -2434,7 +2524,7 @@ describe("the speech model catalog", () => {
     expect(download().hidden).toBe(true);
 
     // Closing the editor without saving and reopening it still shows the downloaded model as Downloaded.
-    button("Cancel").click();
+    within(editorEl(), "Cancel").click();
     await settle();
     await editLocal();
     await settle();
@@ -3650,7 +3740,7 @@ describe("live controls", () => {
 
   it("shows a failed apply plainly", async () => {
     const stub = await open();
-    stub.emit({ state: "failed", notice: "The saved microphone could not be opened.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The saved microphone could not be opened.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     expect(root.querySelector(".err")?.textContent).toBe("The saved microphone could not be opened.");
   });
 
@@ -3658,7 +3748,7 @@ describe("live controls", () => {
     [
       "a runtime failure",
       (stub) => {
-        stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: ["connection refused (os error 111)"], kind: "other" });
+        stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: ["connection refused (os error 111)"], kind: "other", offer: null });
         return Promise.resolve();
       },
       "The speech server is not reachable.",
@@ -3698,7 +3788,7 @@ describe("live controls", () => {
   it("says plainly when the report could not be copied and shows Copied only on success", async () => {
     const stub = await open();
     stub.backend.copyReport.mockRejectedValueOnce("No clipboard tool is installed.");
-    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     button("Copy").click();
     await settle();
     expect(root.querySelector(".msg")?.textContent).toBe("Could not copy: No clipboard tool is installed.");
@@ -3758,7 +3848,7 @@ describe("live controls", () => {
     },
   ])("$name", async ({ query, trigger, expected }) => {
     const stub = await open();
-    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     if (query !== "") {
       const search = root.querySelector<HTMLInputElement>('input[type="search"]');
       expect(search).not.toBeNull();
@@ -3784,13 +3874,13 @@ describe("live controls", () => {
   it.each([false, true])("uses audio state for listening controls when a failure occurs (paused=%s)", async (paused) => {
     const stub = await open();
     stub.audio({ selected: null, active: paused ? null : "Built-in", paused, problem: null });
-    stub.emit({ state: "failed", notice: "The last operation failed.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The last operation failed.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     expect(control("Listening", "input").checked).toBe(!paused);
   });
 
   it("retains a runtime problem through an applied change and clears it on recovery", async () => {
     const stub = await open();
-    stub.emit({ state: "failed", notice: "The chosen microphone is unavailable.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The chosen microphone is unavailable.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     goTo("commands");
     type(control("Quiet before paste", "input"), "1.5");
     await settle();
@@ -4431,7 +4521,7 @@ describe("the failure bar", () => {
     const stub = await open();
     const bar = root.querySelector<HTMLElement>("footer.bar") as HTMLElement;
     expect(getComputedStyle(bar).display).toBe("none");
-    stub.emit({ state: "failed", notice: "Could not download the wake model.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "Could not download the wake model.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     expect(getComputedStyle(bar).display).not.toBe("none");
     expect(getComputedStyle(root.querySelector(".err") as HTMLElement).display).not.toBe("none");
     expect(getComputedStyle(root.querySelector(".msg") as HTMLElement).display).toBe("none");

@@ -1,5 +1,6 @@
 //! Owns the on-device recognizer: runs a streaming speech model on a worker thread behind the recognizer seam.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
@@ -15,6 +16,58 @@ use crate::metrics::{Event, Metrics};
 use crate::recognizer::{
     RELEASE_LIMIT, Recognizer, RecognizerError, RecognizerEvent, RecognizerSession,
 };
+
+/// How far behind the microphone the model may fall before the capture stops.
+const KEEP_UP: Duration = Duration::from_secs(3);
+
+/// When a frame went to the model, on the runtime's clock so a paused one can move the lag.
+type Sent = tokio::time::Instant;
+
+/// The frames sent to the model and not processed yet, oldest first; the front's age is the lag.
+#[derive(Default)]
+struct Backlog {
+    waiting: Mutex<VecDeque<Sent>>,
+    /// The lag this recognition stopped at, once the model fell further behind than a capture may.
+    fell_behind: Mutex<Option<Duration>>,
+}
+
+impl Backlog {
+    /// Stamps the next frame, or refuses it when the oldest unprocessed one is older than [`KEEP_UP`].
+    fn send(&self, model: &str) -> Result<(), RecognizerError> {
+        let now = Sent::now();
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(oldest) = waiting.front() {
+            let lag = now.saturating_duration_since(*oldest);
+            if lag > KEEP_UP {
+                *self
+                    .fell_behind
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(lag);
+                return Err(RecognizerError::Behind {
+                    model: model.to_owned(),
+                    lag,
+                });
+            }
+        }
+        waiting.push_back(now);
+        Ok(())
+    }
+
+    /// The model finished the oldest frame it had not processed.
+    fn took(&self) {
+        self.waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front();
+    }
+
+    fn behind(&self) -> Option<Duration> {
+        *self
+            .fell_behind
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 /// A speech model that can start independent recognition streams.
 pub trait SpeechModel: Send + Sync + 'static {
@@ -83,13 +136,20 @@ struct Shared<S: ModelSource> {
     running: Mutex<Option<watch::Receiver<Outcome<S::Model>>>>,
     steps: watch::Sender<Step>,
     name: String,
+    /// How the user knows the model, for the notice when it falls behind; `name` labels metrics.
+    title: String,
     metrics: Metrics,
 }
 
 impl<S: ModelSource> LocalRecognizer<S> {
-    /// `name` labels the model in metrics.
+    /// `name` labels the model in metrics; `title` is how the user knows it.
     #[must_use]
-    pub fn new(source: S, name: impl Into<String>, metrics: Metrics) -> Self {
+    pub fn new(
+        source: S,
+        name: impl Into<String>,
+        title: impl Into<String>,
+        metrics: Metrics,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 source,
@@ -97,6 +157,7 @@ impl<S: ModelSource> LocalRecognizer<S> {
                 running: Mutex::new(None),
                 steps: watch::channel(Step::Reading).0,
                 name: name.into(),
+                title: title.into(),
                 metrics,
             }),
             loads: Mutex::new(JoinSet::new()),
@@ -231,6 +292,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
         let (frames_tx, frames_rx) = mpsc::channel();
         let (events_tx, events_rx) = events::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
+        let backlog = Arc::new(Backlog::default());
         let cache = Arc::clone(&self.shared.model);
         let work = Work {
             stream: model.stream(),
@@ -238,6 +300,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
             frames: frames_rx,
             events: events_tx,
             cancelled: Arc::clone(&cancelled),
+            backlog: Arc::clone(&backlog),
             name: self.shared.name.clone(),
             metrics: self.shared.metrics.clone(),
             forget: Box::new(move || {
@@ -253,6 +316,8 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
             events: events_rx,
             cancelled,
             release_limit,
+            backlog,
+            model: self.shared.title.clone(),
         })
     }
 
@@ -267,6 +332,9 @@ pub struct LocalSession {
     events: events::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>,
     cancelled: Arc<AtomicBool>,
     release_limit: Duration,
+    backlog: Arc<Backlog>,
+    /// The model's name, for the notice when it falls behind.
+    model: String,
 }
 
 fn stopped() -> RecognizerError {
@@ -282,11 +350,12 @@ impl RecognizerSession for LocalSession {
         &mut self,
         frame: &Frame,
     ) -> impl Future<Output = Result<(), RecognizerError>> + Send {
-        std::future::ready(
+        let sent = self.backlog.send(&self.model).and_then(|()| {
             self.frames
                 .send((Instant::now(), *frame))
-                .map_err(|_| stopped()),
-        )
+                .map_err(|_| stopped())
+        });
+        std::future::ready(sent)
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
@@ -309,6 +378,7 @@ struct Work<S> {
     frames: mpsc::Receiver<(Instant, Frame)>,
     events: events::UnboundedSender<Result<RecognizerEvent, RecognizerError>>,
     cancelled: Arc<AtomicBool>,
+    backlog: Arc<Backlog>,
     name: String,
     metrics: Metrics,
     /// Drops the model from its recognizer; a model whose recognition failed may have lost its device.
@@ -337,6 +407,7 @@ impl<S: SpeechStream> Work<S> {
             let started = Instant::now();
             let result = self.stream.accept(&frame);
             let took = started.elapsed();
+            self.backlog.took();
             tally.frames += 1;
             tally.model += took;
             tally.slowest = tally.slowest.max(took);
@@ -360,26 +431,34 @@ impl<S: SpeechStream> Work<S> {
         if outcome == "ok" && self.cancelled.load(Ordering::Relaxed) {
             outcome = "cancelled";
         }
-        self.report(&tally, outcome);
+        let behind = self.backlog.behind();
+        if behind.is_some() {
+            outcome = "cant_keep_up";
+        }
+        self.report(&tally, outcome, behind);
     }
 
-    fn report(&self, tally: &Tally, outcome: &str) {
+    fn report(&self, tally: &Tally, outcome: &str, behind: Option<Duration>) {
         let mean = tally
             .model
             .checked_div(tally.frames)
             .unwrap_or(Duration::ZERO);
+        let mut fields = json!({
+            "engine": "local",
+            "model": self.name,
+            "frames": tally.frames,
+            "model_mean_ms": mean.as_secs_f64() * 1000.0,
+            "model_max_ms": tally.slowest.as_secs_f64() * 1000.0,
+            "text_late_max_ms": tally.late.as_secs_f64() * 1000.0,
+        });
+        if let Some(lag) = behind {
+            fields["lag_ms"] = json!(lag.as_secs_f64() * 1000.0);
+        }
         self.metrics.metric(
             Event::LocalStt,
             outcome,
             Some(tally.model),
-            self.device.tag(json!({
-                "engine": "local",
-                "model": self.name,
-                "frames": tally.frames,
-                "model_mean_ms": mean.as_secs_f64() * 1000.0,
-                "model_max_ms": tally.slowest.as_secs_f64() * 1000.0,
-                "text_late_max_ms": tally.late.as_secs_f64() * 1000.0,
-            })),
+            self.device.tag(fields),
         );
     }
 }

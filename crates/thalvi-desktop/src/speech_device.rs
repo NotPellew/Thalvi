@@ -313,6 +313,7 @@ mod tests {
         Arc::new(LocalRecognizer::new(
             Source(device),
             name,
+            name,
             crate::metrics::Recorder::disabled().metrics(),
         ))
     }

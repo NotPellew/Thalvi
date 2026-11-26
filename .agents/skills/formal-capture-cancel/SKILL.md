@@ -229,6 +229,22 @@ final pass's `finished` uses the same value. The tail deadline is not a modeled 
 boundary or delivery guard, and a control queued before the final empty receive still prevents
 admission, so the model actions are unchanged.
 
+Stopping an on-device recognition that fell 3 s behind the microphone (#455) makes
+`LocalSession::send_frame` return `RecognizerError::Behind`, which `Engine::feed` turns into the
+same `Stop::Failed` a failed frame send already produced, under the same cancellation-biased
+select. The session drops its queued frames and the capture delivers nothing; metrics record
+`cant_keep_up` and the lag when the worker ends. The owned `headline` in `UserError`, `Finished`
+and `Status` is display text only. No await, queue step or write to cancellation state is added,
+so the model actions and bounds are unchanged.
+
+The lighter-model offer (#705) reads a failed capture's `RecognizerError::Behind` after
+`Settling::settle` has decided the outcome and attaches a display-only offer to the failure
+status, or appends a hint to the notice when the active model has no lighter catalog model.
+The new `Control::DismissError` and `Control::OfferFailed` return false from `Requests::take`,
+like `Overlay`, so they neither set nor clear `ended`; the tray switch and the Settings save
+run on their own tasks and end no capture. No await, queue step or write to cancellation
+state is added, so the model actions and bounds are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
