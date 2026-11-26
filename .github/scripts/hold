@@ -17,9 +17,10 @@ APPROVAL = "owner-ok"
 HOLD_PATHS = {
     "repository tooling": (".github/", ".githooks/", ".cargo/"),
     "verify skill": (".agents/skills/verify-thalvi/",),
+    "decision records": ("decisions/",),
 }
 ROOT_FILES = {
-    "decision records and agent rules": {"DECISIONS.md", "AGENTS.md", "CLAUDE.md"},
+    "agent rules": {"AGENTS.md", "CLAUDE.md"},
     "toolchain, lint and security settings": {
         "deny.toml", "rust-toolchain.toml", "clippy.toml", ".gitleaks.toml", ".node-version",
         ".python-version",

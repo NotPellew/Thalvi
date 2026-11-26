@@ -172,7 +172,7 @@ class HoldTest(unittest.TestCase):
     def test_policy_paths_hold_and_renames_check_both_names_across_pages(self):
         paths = [
             ".github/scripts/hold", ".github/workflows/hold.yml", ".githooks/pre-commit",
-            ".cargo/config.toml", "DECISIONS.md", "AGENTS.md", "CLAUDE.md",
+            ".cargo/config.toml", "decisions/app.md", "AGENTS.md", "CLAUDE.md",
             ".agents/skills/verify-thalvi/SKILL.md", "Cargo.toml", "crates/audio/Cargo.toml",
             "Cargo.lock", "package.json", "crates/app/ui/package.json", "package-lock.json",
             "crates/app/ui/package-lock.json", "deny.toml", "rust-toolchain.toml",
