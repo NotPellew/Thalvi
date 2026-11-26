@@ -1240,6 +1240,7 @@ const tickOf = (name: string): HTMLInputElement => entryNamed(name).querySelecto
 const editorEl = (): HTMLElement => root.querySelector(".editor") as HTMLElement;
 const editButton = (name: string): HTMLButtonElement => root.querySelector(`button[aria-label="Edit ${name}"]`) as HTMLButtonElement;
 const summaryText = (): string => recognition().querySelector(".next-dictation")?.textContent ?? "";
+const recovery = (): HTMLElement => recognition().querySelector(".next-dictation + div") as HTMLElement;
 const extrasText = (): string => recognition().querySelector(".extras")?.textContent ?? "";
 const needsChat = (): HTMLElement => recognition().querySelector(".needs-chat") as HTMLElement;
 
@@ -1288,6 +1289,46 @@ describe("the Recognition page", () => {
     button(LIGHTER).click();
     await settle();
     expect(recognition().textContent).toContain(message);
+    expect(summaryText()).toContain("Nemotron Streaming");
+    expect(stub.applied().length).toBe(0);
+  });
+
+  it("shows the lighter model's download and cancels it, keeping the old model in use", async () => {
+    const stub = await open(local("nemotron_160ms"));
+    goTo("recognition");
+    let stop: () => void = () => {
+      throw new Error("the download has not started");
+    };
+    stub.backend.useLighterModel.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          stop = () => {
+            reject(new DownloadFailure("The download was cancelled.", []));
+          };
+        }),
+    );
+    stub.backend.cancelSpeechDownload.mockImplementationOnce(() => {
+      stop();
+      return Promise.resolve();
+    });
+    stub.emit(CANT_KEEP_UP);
+    await settle();
+    button(LIGHTER).click();
+    await settle();
+    const meter = recovery().querySelector("progress") as HTMLProgressElement;
+    expect(meter.hidden).toBe(false);
+    expect(recovery().textContent).toContain("Checking files…");
+    stub.speechProgress({ name: "parakeet_tdt_v3", percent: 42, status: "downloading", message: null, causes: [] });
+    await settle();
+    expect(recovery().textContent).toContain("Downloading… 42%");
+    const cancel = within(recovery(), "Cancel");
+    expect(cancel.hidden).toBe(false);
+    cancel.click();
+    await settle();
+    expect(stub.backend.cancelSpeechDownload).toHaveBeenCalledExactlyOnceWith("parakeet_tdt_v3");
+    expect(recovery().textContent).toContain("Download cancelled. Nemotron Streaming is still the model.");
+    expect(meter.hidden).toBe(true);
+    expect(button(LIGHTER).disabled).toBe(false);
     expect(summaryText()).toContain("Nemotron Streaming");
     expect(stub.applied().length).toBe(0);
   });

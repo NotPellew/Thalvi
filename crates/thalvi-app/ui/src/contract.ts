@@ -438,6 +438,8 @@ export interface Backend {
   downloadSpeechModel(name: string): Promise<void>;
   /** Downloads the lighter model a failure offers and makes it the model in use; resolves the same way. */
   useLighterModel(name: string): Promise<void>;
+  /** Stops a speech model download that is running; files already downloaded stay. */
+  cancelSpeechDownload(name: string): Promise<void>;
   onSpeechModelProgress(listener: (progress: SpeechModelProgress) => void): void;
   /** Where the model runs, or will run when it loads, in plain words: the GPU, or the CPU and why. */
   speechDevice(name: string): Promise<string>;
