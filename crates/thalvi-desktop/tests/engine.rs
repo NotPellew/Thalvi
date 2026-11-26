@@ -5468,6 +5468,36 @@ async fn a_hold_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhi
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_immediate_hold_keeps_two_frames_of_pre_roll_heard_before_the_press() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            settle().await;
+            for tag in [1, 2, 3, 4] {
+                rig.feed.send(quiet(tag));
+                settle().await;
+            }
+            rig.press().await;
+            rig.server.ready();
+            settle().await;
+            rig.at(100).await;
+            rig.feed.send(quiet(5));
+            settle().await;
+            rig.at(240).await;
+            rig.feed.send(quiet(9));
+            settle().await;
+            assert_eq!(tags(&rig.sent()), [3, 4, 5, 9]);
+            rig.handle.cancel();
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled { dictated: None }
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn nothing_spoken_after_the_release_reaches_the_recognizer_but_the_words_already_sent_finish()
 {
     LocalSet::new()
