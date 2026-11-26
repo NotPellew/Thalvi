@@ -180,6 +180,20 @@ fn the_tentative_text_of_a_twelve_second_dictation_holds_all_three_sentences() {
 
 #[test]
 #[ignore = "needs THALVI_SPEECH_MODEL and THALVI_TEST_WAVS local folders"]
+fn the_final_of_a_twelve_second_dictation_keeps_its_last_sentence() {
+    let wavs = PathBuf::from(std::env::var("THALVI_TEST_WAVS").expect("THALVI_TEST_WAVS"));
+    let frames = wav_frames(&wavs.join("dict12.wav"));
+    let (finals, _) = recognize(&model(), &frames);
+    let final_text = finals.join(" ");
+    assert!(
+        final_text.contains("reduced our hosting bills"),
+        "the final lost the end of the last sentence: {final_text:?}"
+    );
+    println!("dict12.wav final: {final_text}");
+}
+
+#[test]
+#[ignore = "needs THALVI_SPEECH_MODEL and THALVI_TEST_WAVS local folders"]
 fn english_survives_seven_seconds_of_digital_silence() {
     let wavs = PathBuf::from(std::env::var("THALVI_TEST_WAVS").expect("THALVI_TEST_WAVS"));
     let clip = wav_frames(&wavs.join("en.wav"));
