@@ -119,13 +119,15 @@ impl<D: FrameDecoder> Segments<D> {
 
 /// Re-decodes tentative audio; no token is irrevocable until its speech stretch ends.
 pub trait SnapshotDecoder: Send + 'static {
-    /// Returns tokens by 80 ms encoder frame, replacing the preceding snapshot.
+    /// Returns tokens by 80 ms encoder frame, replacing the preceding snapshot. `speech` tells
+    /// whether the voice detector heard speech since the previous call.
     ///
     /// # Errors
     /// Fails when the model cannot continue.
-    fn snapshot(&mut self, audio: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError>;
+    fn snapshot(&mut self, audio: &[f32], speech: bool)
+    -> Result<Vec<Vec<usize>>, RecognizerError>;
 
-    /// Reconsiders the complete stretch before publishing immutable text.
+    /// Commits every frame received, including the newest, and returns the whole stretch's tokens.
     ///
     /// # Errors
     /// Fails when the model cannot continue.
@@ -144,6 +146,8 @@ pub struct Revising<D> {
     quiet: usize,
     zeros: usize,
     shown: String,
+    /// The voice detector heard speech since the decoder last looked.
+    spoke: bool,
     recent: std::collections::VecDeque<Frame>,
 }
 
@@ -158,6 +162,7 @@ impl<D: SnapshotDecoder> Revising<D> {
             quiet: 0,
             zeros: 0,
             shown: String::new(),
+            spoke: false,
             recent: std::collections::VecDeque::new(),
         }
     }
@@ -171,6 +176,7 @@ impl<D: SnapshotDecoder> Revising<D> {
         const ENDPOINT: usize = 10_240;
         if speech {
             self.quiet = 0;
+            self.spoke = true;
         } else {
             self.quiet += samples.len();
         }
@@ -193,10 +199,11 @@ impl<D: SnapshotDecoder> Revising<D> {
             return Ok(Vec::new());
         }
         self.waiting = 0;
+        let spoke = std::mem::take(&mut self.spoke);
         let frames = if finish {
             self.decoder.finish(&self.audio)?
         } else {
-            self.decoder.snapshot(&self.audio)?
+            self.decoder.snapshot(&self.audio, spoke)?
         };
         let trailing = frames
             .iter()
@@ -301,7 +308,11 @@ mod tests {
     }
 
     impl SnapshotDecoder for Snapshots {
-        fn snapshot(&mut self, audio: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        fn snapshot(
+            &mut self,
+            audio: &[f32],
+            _speech: bool,
+        ) -> Result<Vec<Vec<usize>>, RecognizerError> {
             Ok(self.next(audio, false))
         }
 

@@ -13,7 +13,9 @@ use tokio::task::JoinSet;
 use crate::device::{Device, Placement, Step};
 use crate::frame::Frame;
 use crate::metrics::{Event, Metrics};
-use crate::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
+use crate::recognizer::{
+    RELEASE_LIMIT, Recognizer, RecognizerError, RecognizerEvent, RecognizerSession,
+};
 
 /// How far behind the microphone the model may fall before the capture stops.
 const KEEP_UP: Duration = Duration::from_secs(3);
@@ -77,6 +79,12 @@ pub trait SpeechModel: Send + Sync + 'static {
     /// Where the GPU put the nodes of each network of the model; none on the CPU.
     fn placement(&self) -> Option<Placement> {
         None
+    }
+
+    /// How long a final may take after the release: a decoder that re-hears the end of the stretch
+    /// takes longer than the release flush.
+    fn release_limit(&self) -> Duration {
+        RELEASE_LIMIT
     }
 
     /// A stream with fresh state; the model's weights are shared.
@@ -280,6 +288,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
 
     async fn connect(&self) -> Result<LocalSession, RecognizerError> {
         let model = self.model().await?;
+        let release_limit = model.release_limit();
         let (frames_tx, frames_rx) = mpsc::channel();
         let (events_tx, events_rx) = events::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -306,6 +315,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
             frames: frames_tx,
             events: events_rx,
             cancelled,
+            release_limit,
             backlog,
             model: self.shared.title.clone(),
         })
@@ -321,6 +331,7 @@ pub struct LocalSession {
     frames: mpsc::Sender<(Instant, Frame)>,
     events: events::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>,
     cancelled: Arc<AtomicBool>,
+    release_limit: Duration,
     backlog: Arc<Backlog>,
     /// The model's name, for the notice when it falls behind.
     model: String,
@@ -331,6 +342,10 @@ fn stopped() -> RecognizerError {
 }
 
 impl RecognizerSession for LocalSession {
+    fn release_limit(&self) -> Duration {
+        self.release_limit
+    }
+
     fn send_frame(
         &mut self,
         frame: &Frame,

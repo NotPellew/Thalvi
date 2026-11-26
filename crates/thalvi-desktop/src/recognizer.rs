@@ -258,6 +258,15 @@ impl RecognizerError {
 /// timeout and a second to spare.
 const BUFFERED_FINAL_WAIT: Duration = Duration::from_secs(11);
 
+/// How long after the release a streaming session's final may take before its capture is ended
+/// with what has arrived. Measured headless on the server recognizer, the last word was in the text
+/// by 200 ms in every run.
+pub const RELEASE_LIMIT: Duration = Duration::from_millis(250);
+
+/// The same wait for a session whose final re-hears the end of the stretch: that decode measured
+/// 235-397 ms on a loaded machine, and only Parakeet's replaying decoder needs it.
+pub const REPLAYED_RELEASE_LIMIT: Duration = Duration::from_millis(400);
+
 /// One open recognition stream; it exists only after the recognizer said it is ready.
 pub trait RecognizerSession: Send {
     /// Whether audio is buffered until the user ends the capture.
@@ -268,6 +277,12 @@ pub trait RecognizerSession: Send {
     /// How long a buffering session may take for its final once the capture has ended.
     fn final_wait(&self) -> Duration {
         BUFFERED_FINAL_WAIT
+    }
+
+    /// How long a streaming session's final may take after the release before the engine pastes
+    /// the tentative text instead.
+    fn release_limit(&self) -> Duration {
+        RELEASE_LIMIT
     }
 
     /// Signals that all audio for a buffered capture has arrived.
@@ -410,6 +425,7 @@ pub struct FakeRecognizer {
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
     final_wait_ms: Arc<AtomicU64>,
+    release_limit_ms: Arc<AtomicU64>,
     language: Arc<Mutex<Option<Language>>>,
     load: Option<watch::Receiver<Step>>,
 }
@@ -423,6 +439,7 @@ pub struct FakeControl {
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
     final_wait_ms: Arc<AtomicU64>,
+    release_limit_ms: Arc<AtomicU64>,
     language: Arc<Mutex<Option<Language>>>,
     load: Option<watch::Sender<Step>>,
 }
@@ -434,6 +451,7 @@ pub struct FakeSession {
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
     final_wait_ms: Arc<AtomicU64>,
+    release_limit_ms: Arc<AtomicU64>,
     language: Arc<Mutex<Option<Language>>>,
 }
 
@@ -463,6 +481,9 @@ impl FakeRecognizer {
         let final_wait_ms = Arc::new(AtomicU64::new(
             u64::try_from(BUFFERED_FINAL_WAIT.as_millis()).unwrap_or(u64::MAX),
         ));
+        let release_limit_ms = Arc::new(AtomicU64::new(
+            u64::try_from(RELEASE_LIMIT.as_millis()).unwrap_or(u64::MAX),
+        ));
         let ready = Arc::new(Mutex::new(Some(ready_rx)));
         let events = Arc::new(Mutex::new(Some(events_rx)));
         let language = Arc::new(Mutex::new(None));
@@ -474,6 +495,7 @@ impl FakeRecognizer {
                 stalled: Arc::clone(&stalled),
                 buffers: Arc::clone(&buffers),
                 final_wait_ms: Arc::clone(&final_wait_ms),
+                release_limit_ms: Arc::clone(&release_limit_ms),
                 language: Arc::clone(&language),
                 load: load_rx,
             },
@@ -485,6 +507,7 @@ impl FakeRecognizer {
                 stalled,
                 buffers,
                 final_wait_ms,
+                release_limit_ms,
                 language,
                 load: load_tx,
             },
@@ -514,6 +537,7 @@ impl Recognizer for FakeRecognizer {
             stalled: Arc::clone(&self.stalled),
             buffers: Arc::clone(&self.buffers),
             final_wait_ms: Arc::clone(&self.final_wait_ms),
+            release_limit_ms: Arc::clone(&self.release_limit_ms),
             language: Arc::clone(&self.language),
         })
     }
@@ -578,6 +602,12 @@ impl FakeControl {
         self.final_wait_ms.store(millis, Ordering::Relaxed);
     }
 
+    /// How long the streaming session says its final may take after the release.
+    pub fn release_limit(&self, wait: Duration) {
+        let millis = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+        self.release_limit_ms.store(millis, Ordering::Relaxed);
+    }
+
     /// Everything the session was asked to do so far.
     pub fn calls(&self) -> Vec<FakeCall> {
         self.calls
@@ -603,6 +633,10 @@ impl RecognizerSession for FakeSession {
 
     fn final_wait(&self) -> Duration {
         Duration::from_millis(self.final_wait_ms.load(Ordering::Relaxed))
+    }
+
+    fn release_limit(&self) -> Duration {
+        Duration::from_millis(self.release_limit_ms.load(Ordering::Relaxed))
     }
 
     fn language(&self) -> Option<Language> {

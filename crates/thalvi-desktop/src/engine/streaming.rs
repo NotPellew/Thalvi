@@ -299,7 +299,7 @@ pub(super) async fn finished<R: Recognizer>(
     recognizer: &R,
     frames: &[Frame],
 ) -> Result<String, super::final_pass::Outcome> {
-    use super::{RELEASE_LIMIT, RELEASE_SILENCE, final_pass::Outcome};
+    use super::{RELEASE_SILENCE, final_pass::Outcome};
     use crate::recognizer::ConnectFailure;
 
     let replay = async {
@@ -324,7 +324,7 @@ pub(super) async fn finished<R: Recognizer>(
             loop {
                 let settled = text
                     .complete(buffers)
-                    .then(|| Instant::now() + RELEASE_LIMIT);
+                    .then(|| Instant::now() + session.release_limit());
                 tokio::select! {
                     biased;
                     event = session.next_event() => text.on_event(event?, buffers),

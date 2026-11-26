@@ -206,6 +206,15 @@ impl RecognizerSession for ChosenSession {
         }
     }
 
+    fn release_limit(&self) -> Duration {
+        match self {
+            Self::Realtime(session) => session.release_limit(),
+            Self::OpenAi(session) => session.release_limit(),
+            Self::Local(session, _) => session.release_limit(),
+            Self::Whisper(session, _) => session.release_limit(),
+        }
+    }
+
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
         match self {
             Self::OpenAi(session) => session.finish_audio().await,
