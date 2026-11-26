@@ -1265,12 +1265,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "the child process the helper tests start; it needs THALVI_WHISPER_TEST_CHILD"]
     fn helper_process_fixture() {
         use std::io::{Read, Write};
 
-        let Some(address) = std::env::var_os("THALVI_WHISPER_TEST_CHILD") else {
-            return;
-        };
+        let address = std::env::var_os("THALVI_WHISPER_TEST_CHILD")
+            .expect("the helper tests start this test with THALVI_WHISPER_TEST_CHILD set");
         let mut stream = std::net::TcpStream::connect(address.to_str().unwrap()).unwrap();
         stream.set_read_timeout(Some(WAIT * 4)).unwrap();
         for number in 0..KEPT_LINES + 2 {
@@ -1287,6 +1287,7 @@ mod tests {
             .args([
                 "--exact",
                 "whisper::tests::helper_process_fixture",
+                "--ignored",
                 "--nocapture",
             ])
             .env("THALVI_WHISPER_TEST_CHILD", address)
@@ -3238,10 +3239,11 @@ mod tests {
         assert_eq!(summary(false), [("ok".to_owned(), 1.84)]);
     }
 
-    /// Tests that run the packaged helper and the real model, which CI does not have: each is skipped, with
-    /// its reason printed, unless `THALVI_WHISPER_HELPERS` (the folder with `cpu` and `vulkan`),
+    /// Tests that run the packaged helper and the real model, which CI does not have: each is ignored, and
+    /// fails when run without `THALVI_WHISPER_HELPERS` (the folder with `cpu` and `vulkan`),
     /// `THALVI_WHISPER_MODELS` (holding `ggml-large-v3-turbo-q5_0.bin` and `ggml-silero-v6.2.0.bin`) and
-    /// `THALVI_WHISPER_FIXTURES` (16 kHz mono WAV files) name them.
+    /// `THALVI_WHISPER_FIXTURES` (16 kHz mono WAV files) naming them. Run them with
+    /// `cargo test -p thalvi-desktop --lib whisper::tests::real -- --ignored`.
     #[cfg(target_os = "linux")]
     mod real {
         use super::*;
@@ -3271,24 +3273,20 @@ mod tests {
         }
 
         impl Files {
-            fn from_env(test: &str) -> Option<Self> {
-                let var = |name| std::env::var_os(name).map(PathBuf::from);
-                let found = (|| {
-                    Some(Self {
-                        helpers: var("THALVI_WHISPER_HELPERS")?,
-                        models: var("THALVI_WHISPER_MODELS")?,
-                        fixtures: var("THALVI_WHISPER_FIXTURES")?,
-                    })
-                })();
-                if found.is_none() {
-                    eprintln!(
-                        "{test} skipped: set THALVI_WHISPER_HELPERS, THALVI_WHISPER_MODELS and THALVI_WHISPER_FIXTURES to run it against the real helper"
-                    );
+            fn from_env() -> Self {
+                let var = |name: &str| {
+                    PathBuf::from(
+                        std::env::var_os(name)
+                            .unwrap_or_else(|| panic!("set {name} to run this test")),
+                    )
+                };
+                Self {
+                    helpers: var("THALVI_WHISPER_HELPERS"),
+                    models: var("THALVI_WHISPER_MODELS"),
+                    fixtures: var("THALVI_WHISPER_FIXTURES"),
                 }
-                found
             }
 
-            /// A store that links the model files, so that nothing is copied or downloaded.
             fn store(&self, scratch: &Scratch) -> ModelStore {
                 for asset in [WHISPER_TURBO.model, WHISPER_TURBO.vad] {
                     std::os::unix::fs::symlink(
@@ -3336,12 +3334,9 @@ mod tests {
         }
 
         #[tokio::test]
+        #[ignore = "needs THALVI_WHISPER_HELPERS, THALVI_WHISPER_MODELS and THALVI_WHISPER_FIXTURES: cargo test -p thalvi-desktop --lib whisper::tests::real -- --ignored"]
         async fn the_real_helper_transcribes_a_spoken_name_and_hears_nothing_in_silence() {
-            let Some(files) = Files::from_env(
-                "the_real_helper_transcribes_a_spoken_name_and_hears_nothing_in_silence",
-            ) else {
-                return;
-            };
+            let files = Files::from_env();
             let scratch = Scratch::new("real");
             let backend = if std::env::var_os("THALVI_WHISPER_VULKAN").is_some() {
                 WhisperBackend::Vulkan
@@ -3378,12 +3373,10 @@ mod tests {
         /// The owner's clip says "Qwen. Qwen 3.8.": the list spells its name right, and neither five
         /// seconds of digital silence nor of room noise may come back as list words.
         #[tokio::test]
+        #[ignore = "needs THALVI_WHISPER_HELPERS, THALVI_WHISPER_MODELS and THALVI_WHISPER_FIXTURES: cargo test -p thalvi-desktop --lib whisper::tests::real -- --ignored"]
         async fn the_real_helper_spells_a_listed_name_and_neither_silence_nor_room_noise_becomes_list_words()
          {
-            let name = "the_real_helper_spells_a_listed_name_and_neither_silence_nor_room_noise_becomes_list_words";
-            let Some(files) = Files::from_env(name) else {
-                return;
-            };
+            let files = Files::from_env();
             let backend = if std::env::var_os("THALVI_WHISPER_VULKAN").is_some() {
                 WhisperBackend::Vulkan
             } else {
@@ -3451,15 +3444,13 @@ mod tests {
 
         /// A 54 s capture fed at ten times real time: the GPU's previews grow with it and the final follows.
         #[tokio::test]
+        #[ignore = "needs THALVI_WHISPER_HELPERS, THALVI_WHISPER_MODELS and THALVI_WHISPER_FIXTURES and THALVI_WHISPER_VULKAN: cargo test -p thalvi-desktop --lib whisper::tests::real -- --ignored"]
         async fn the_real_vulkan_helper_previews_a_capture_that_is_still_being_spoken() {
-            let name = "the_real_vulkan_helper_previews_a_capture_that_is_still_being_spoken";
-            let Some(files) = Files::from_env(name) else {
-                return;
-            };
-            if std::env::var_os("THALVI_WHISPER_VULKAN").is_none() {
-                eprintln!("{name} skipped: set THALVI_WHISPER_VULKAN to run it on the GPU");
-                return;
-            }
+            let files = Files::from_env();
+            assert!(
+                std::env::var_os("THALVI_WHISPER_VULKAN").is_some(),
+                "set THALVI_WHISPER_VULKAN to run this test on the GPU"
+            );
             let scratch = Scratch::new("real-previews");
             let recognizer = WhisperRecognizer::new(
                 WhisperBackend::Vulkan,
@@ -3512,12 +3503,10 @@ mod tests {
         /// The app is killed without running a destructor: the test runs itself twice, and the first run
         /// aborts as soon as the helper is up.
         #[tokio::test]
+        #[ignore = "needs THALVI_WHISPER_HELPERS, THALVI_WHISPER_MODELS and THALVI_WHISPER_FIXTURES: cargo test -p thalvi-desktop --lib whisper::tests::real -- --ignored"]
         async fn the_real_helper_does_not_outlive_an_app_that_aborts() {
             const CHILD: &str = "THALVI_WHISPER_ABORTING_CHILD";
-            let name = "the_real_helper_does_not_outlive_an_app_that_aborts";
-            let Some(files) = Files::from_env(name) else {
-                return;
-            };
+            let files = Files::from_env();
             let scratch = Scratch::new("real-abort");
             let recognizer = WhisperRecognizer::new(
                 WhisperBackend::Cpu,
@@ -3535,7 +3524,8 @@ mod tests {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    &format!("whisper::tests::real::{name}"),
+                    "whisper::tests::real::the_real_helper_does_not_outlive_an_app_that_aborts",
+                    "--ignored",
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
