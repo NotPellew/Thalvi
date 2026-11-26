@@ -2,7 +2,7 @@
 
 #![expect(
     unsafe_code,
-    reason = "raw Win32 pipe calls; each block says why it is sound"
+    reason = "platform: pipe connection, framing and shutdown call Win32 FFI; each block states its safety conditions"
 )]
 
 use std::ffi::c_void;

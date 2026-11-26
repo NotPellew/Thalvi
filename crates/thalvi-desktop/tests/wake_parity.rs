@@ -1,6 +1,6 @@
 //! Dictation wake scores match Python openwakeword 0.6.0 and ignore the saved conversation choice.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

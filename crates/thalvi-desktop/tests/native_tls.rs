@@ -1,7 +1,7 @@
 //! Exercises private-CA trust through real transcription and secure WebSocket requests.
 
+#![cfg(test)]
 #![cfg(target_os = "linux")]
-#![expect(clippy::unwrap_used, reason = "test failures panic")]
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};

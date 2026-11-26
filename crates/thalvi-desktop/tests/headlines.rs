@@ -1,6 +1,6 @@
 //! Every error the overlay can show has a headline that fits the narrowest look without scrolling.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::time::Duration;
 
