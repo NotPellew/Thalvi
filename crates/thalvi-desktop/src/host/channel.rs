@@ -438,6 +438,7 @@ mod tests {
             .args([
                 "--exact",
                 "host::channel::tests::sandboxed_peer",
+                "--ignored",
                 "--nocapture",
             ])
             .env(SANDBOX_ROLE, role)
@@ -450,10 +451,9 @@ mod tests {
 
     /// The body of the two processes `a_server_and_client_of_one_user_in_separate_sandboxes_reach_each_other` starts.
     #[test]
+    #[ignore = "a_server_and_client_of_one_user_in_separate_sandboxes_reach_each_other runs it"]
     fn sandboxed_peer() {
-        let Ok(role) = std::env::var(SANDBOX_ROLE) else {
-            return;
-        };
+        let role = std::env::var(SANDBOX_ROLE).unwrap();
         let dir = PathBuf::from(std::env::var("THALVI_TEST_SANDBOX_DIR").unwrap());
         match role.as_str() {
             "serve" => {
@@ -465,21 +465,22 @@ mod tests {
                 let answer = ask_in(&dir, me(), "state", Duration::from_secs(5)).unwrap();
                 assert_eq!(answer, Some("heard state".to_owned()));
             }
-            _ => {}
+            "probe" => {}
+            other => panic!("unknown sandbox role {other}"),
         }
     }
 
     #[test]
     fn a_server_and_client_of_one_user_in_separate_sandboxes_reach_each_other() {
         let dir = Dir::new("sandboxes", 0o700);
-        let Ok(mut probe) = in_new_namespaces("probe", &dir.0) else {
-            eprintln!("skipped: no `unshare`");
-            return;
-        };
-        if !probe.wait().is_ok_and(|status| status.success()) {
-            eprintln!("skipped: this machine does not allow user namespaces");
-            return;
-        }
+        let probe = in_new_namespaces("probe", &dir.0)
+            .expect("this test needs `unshare` from util-linux")
+            .wait();
+        assert!(
+            probe.is_ok_and(|status| status.success()),
+            "this test needs unprivileged user namespaces; on Ubuntu, \
+             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+        );
         let mut server = in_new_namespaces("serve", &dir.0).unwrap();
         let socket = dir.socket();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);

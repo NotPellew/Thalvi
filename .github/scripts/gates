@@ -81,7 +81,8 @@ bundle() {
 
 # Needs the Rust toolchain, Node pinned in .node-version, Python pinned in .python-version and, on Linux,
 # libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev. The package also needs what
-# whisper-helper builds with: git, cmake, a C++ compiler and libvulkan-dev glslc spirv-headers.
+# whisper-helper builds with: git, cmake, a C++ compiler and libvulkan-dev glslc spirv-headers. The tests
+# need `unshare` and unprivileged user namespaces.
 gate_server() {
   desktop_ui
   step cargo fmt --all -- --check
