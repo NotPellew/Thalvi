@@ -99,9 +99,8 @@ function device(model?: string, active = true): OnDeviceEntry {
   return { kind: "on_device", id: "on-device", name: "On this computer", active, ...(model ? { model } : {}) };
 }
 
-/** The speech settings with the merge switch on unless a case says otherwise. */
-function stt(entries: SpeechEntry[], merge = true): Settings["stt"] {
-  return { merge, entries };
+function stt(entries: SpeechEntry[]): Settings["stt"] {
+  return { entries };
 }
 
 /** Settings whose live entry in use is the on-device model, beside a realtime speech server entry not in use. */
@@ -140,7 +139,6 @@ const ADD: Record<SpeechEntry["kind"], string> = {
   realtime: "Add a streaming server",
   open_ai: "Add an after-you-stop server",
   on_device: "Add an on-device model",
-  extra: "Add an extra-only server",
 };
 
 function plus(kind: SpeechEntry["kind"]): HTMLButtonElement {
@@ -194,11 +192,10 @@ describe("pages", () => {
         id: "recognition",
         title: "Recognition",
         groups: {
-          "Live recognizer": ["live recognizer", "merge with the chat model"],
+          "Live recognizer": ["live recognizer"],
           "Streaming servers": ["streaming servers · speech servers"],
           "After-you-stop servers": ["after-you-stop servers · speech servers"],
           "On this computer": ["on this computer"],
-          "Extra-only servers": ["extra-only servers · extra recognizers · speech servers"],
           "Word list": ["word list"],
         },
       },
@@ -1119,18 +1116,6 @@ describe("the word list", () => {
     expect((rowOf("Word list").querySelector('input[aria-label="New word"]') as HTMLInputElement).disabled).toBe(false);
   });
 
-  const FINAL_PASSES: [string, SpeechEntry][] = [
-    ["An OpenAI extra", { ...OPENAI, final_pass: true }],
-    ["A Meta extra", { ...META, final_pass: true }],
-    ["An after-you-stop entry", { ...GATEWAY, final_pass: true }],
-  ];
-
-  it.each(FINAL_PASSES)("%s as the final pass uses the word list", async (_case, finalPass) => {
-    await open({ ...several(), stt: stt([{ ...SERVER }, finalPass]) });
-    goTo("recognition");
-    expect(wordHint()).toBe("The final pass uses this word list.");
-  });
-
   it.each([
     ["Whisper Turbo on the CPU", "whisper_turbo_cpu", cant("On this computer")],
     ["Whisper Turbo on the Vulkan GPU", "whisper_turbo_vulkan", cant("On this computer")],
@@ -1178,25 +1163,6 @@ const CYBREX: SpeechEntry = {
   model: "nemotron",
   has_key: true,
 };
-const OPENAI: SpeechEntry = {
-  kind: "extra",
-  id: "openai",
-  name: "OpenAI",
-  active: true,
-  address: "https://api.openai.com/v1",
-  model: "whisper-1",
-  api: "openai",
-  has_key: true,
-};
-const META: SpeechEntry = {
-  kind: "extra",
-  id: "meta",
-  name: "Meta",
-  active: false,
-  address: "https://meta.example/v1",
-  model: "asr",
-  api: "meta",
-};
 const GATEWAY: SpeechEntry = {
   kind: "open_ai",
   id: "gateway",
@@ -1210,9 +1176,9 @@ const GATEWAY: SpeechEntry = {
 
 const WRITING = { url: "http://127.0.0.1:8000/v1", model: "glimmer" };
 
-/** A realtime recognizer in use, another recognizer, the on-device model, and two extra recognizers, with a writing endpoint set. */
+/** A realtime recognizer in use, another recognizer, the on-device model and an after-you-stop server, with a writing endpoint set. */
 function several(): Settings {
-  return { ...SETTINGS, writing: WRITING, stt: stt([{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...OPENAI }, { ...META }]) };
+  return { ...SETTINGS, writing: WRITING, stt: stt([{ ...SERVER }, { ...CYBREX }, device(undefined, false), { ...GATEWAY }]) };
 }
 
 function entryNamed(name: string): HTMLElement {
@@ -1224,20 +1190,13 @@ function entryNamed(name: string): HTMLElement {
 const names = (list: HTMLElement): (string | null)[] => Array.from(list.querySelectorAll(".trow.server .phrase")).map((phrase) => phrase.textContent);
 const recognition = (): HTMLElement => root.querySelector("section[data-page=recognition]") as HTMLElement;
 const listOf = (kind: SpeechEntry["kind"]): HTMLElement => recognition().querySelector(`.table[data-kind="${kind}"]`) as HTMLElement;
-const tickOf = (name: string): HTMLInputElement => entryNamed(name).querySelector("input[type=checkbox]") as HTMLInputElement;
 const editorEl = (): HTMLElement => root.querySelector(".editor") as HTMLElement;
 const editButton = (name: string): HTMLButtonElement => root.querySelector(`button[aria-label="Edit ${name}"]`) as HTMLButtonElement;
 const summaryText = (): string => recognition().querySelector(".next-dictation")?.textContent ?? "";
 const recovery = (): HTMLElement => recognition().querySelector(".next-dictation + div") as HTMLElement;
-const extrasText = (): string => recognition().querySelector(".extras")?.textContent ?? "";
-const needsChat = (): HTMLElement => recognition().querySelector(".needs-chat") as HTMLElement;
-
-/** What a row shows at its right edge: Live, or its Extra switch and whether it is on. */
+/** What a row shows at its right edge: Live, or nothing. */
 function roleOf(name: string): string {
-  const row = entryNamed(name);
-  const tick = row.querySelector<HTMLInputElement>("input[type=checkbox]");
-  if (tick) return `${row.querySelector(".extra label")?.textContent ?? ""} ${tick.checked ? "on" : "off"}`;
-  return row.querySelector(".badge")?.textContent ?? "";
+  return entryNamed(name).querySelector(".badge")?.textContent ?? "";
 }
 
 describe("the Recognition page", () => {
@@ -1336,7 +1295,7 @@ describe("the Recognition page", () => {
     expect(root.querySelector("footer.bar")?.textContent).not.toContain(CANT_KEEP_UP.notice);
   });
 
-  it("shows the Live recognizer with the next dictation and the extras, then the four groups by kind, then the word list", async () => {
+  it("shows the Live recognizer with the next dictation, then the three groups by kind, then the word list", async () => {
     await openSeveral();
     const boxes = Array.from(recognition().querySelectorAll<HTMLElement>(".grp")).map((box) => {
       const head = box.querySelector<HTMLElement>(".row") as HTMLElement;
@@ -1350,15 +1309,13 @@ describe("the Recognition page", () => {
     expect(boxes).toEqual([
       ["Live recognizer", "Shows your words and hears ending phrases.", null, null],
       ["Streaming servers", "Words appear while you speak.", "Add a streaming server", null],
-      ["After-you-stop servers", "Sends each capture once you stop.", "Add an after-you-stop server", "None yet."],
+      ["After-you-stop servers", "Sends each capture once you stop.", "Add an after-you-stop server", null],
       ["On this computer", "A downloaded model; audio stays here.", "Add an on-device model", null],
-      ["Extra-only servers", "Upload for a final pass or as an extra.", "Add an extra-only server", null],
       ["Word list", "Names and terms, added one at a time.", null, null],
     ]);
     const live = recognition().querySelector(".grp") as HTMLElement;
-    expect(Array.from(live.children).filter((node) => !(node as HTMLElement).hidden).map((node) => node.className)).toEqual(["row", "next-dictation", "row", "next-dictation extras"]);
+    expect(Array.from(live.children).filter((node) => !(node as HTMLElement).hidden).map((node) => node.className)).toEqual(["row", "next-dictation"]);
     expect(summaryText()).toBe("Next dictation: Realtime speech server · text arrives as you speak · Ready");
-    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
     for (const box of recognition().querySelectorAll<HTMLElement>(".grp .what small")) expect(box.textContent.length).toBeLessThanOrEqual(HINT_BUDGET);
     expect(recognition().querySelectorAll("select")).toHaveLength(1);
     expect(recognition().textContent).not.toContain("Live streams.");
@@ -1370,7 +1327,7 @@ describe("the Recognition page", () => {
     [" on this computer ", " on this computer "],
     ["Laptop model", "Laptop model (on this computer)"],
   ])("lists every live-kind entry in the Live recognizer drop-down by name and group, unless the name says the group (%j), with the one in use chosen", async (name, label) => {
-    await open({ ...several(), stt: stt([{ ...SERVER }, { ...GATEWAY }, { ...OPENAI }, { ...device(undefined, false), name }]) });
+    await open({ ...several(), stt: stt([{ ...SERVER }, { ...GATEWAY }, { ...device(undefined, false), name }]) });
     goTo("recognition");
     expect(Array.from(liveSelect().options).map((option) => [option.value, option.textContent])).toEqual([
       ["direct", "Realtime speech server (streaming)"],
@@ -1382,54 +1339,45 @@ describe("the Recognition page", () => {
 
   it.each([
     ["Realtime speech server", "127.0.0.1:8012", "Live"],
-    ["Cybrex2", "100.64.0.2:8012 · key saved", "Extra off"],
-    ["On this computer", "Nemotron Streaming", "Extra off"],
-    ["LLM Gateway", "gw.example", "Extra off"],
-    ["OpenAI", "api.openai.com · key saved", "Extra on"],
-    ["Meta", "meta.example", "Extra off"],
+    ["Cybrex2", "100.64.0.2:8012 · key saved", ""],
+    ["On this computer", "Nemotron Streaming", ""],
+    ["LLM Gateway", "gw.example", ""],
   ])("shows %s as one flat row: name, where it runs, its role and Edit", async (name, where, role) => {
-    await open({ ...several(), stt: stt([...several().stt.entries, { ...GATEWAY }]) });
-    goTo("recognition");
+    await openSeveral();
     const row = entryNamed(name);
     expect(row.querySelector(".unit")?.textContent).toBe(where);
     expect(roleOf(name)).toBe(role);
     expect(Array.from(row.querySelectorAll("button")).map((node) => [node.textContent, node.getAttribute("aria-label")])).toEqual([["Edit", `Edit ${name}`]]);
     expect(row.querySelectorAll(".badge").length).toBe(role === "Live" ? 1 : 0);
     expect(row.querySelector("details")).toBeNull();
-    const tick = row.querySelector<HTMLInputElement>("input[type=checkbox]");
-    if (tick) {
-      expect(tick.getAttribute("aria-label")).toBe(`Extra: ${name}`);
-      expect((row.querySelector(".extra label") as HTMLLabelElement).htmlFor).toBe(tick.id);
-    }
+    expect(row.querySelector("input[type=checkbox]")).toBeNull();
   });
 
   it("keeps every row in config order, in its kind's group, when the Live recognizer changes", async () => {
     await openSeveral();
-    const order = (): (string | null)[][] => (["realtime", "open_ai", "on_device", "extra"] as const).map((kind) => names(listOf(kind)));
+    const order = (): (string | null)[][] => (["realtime", "open_ai", "on_device"] as const).map((kind) => names(listOf(kind)));
     const before = order();
-    expect(before).toEqual([["Realtime speech server", "Cybrex2"], [], ["On this computer"], ["OpenAI", "Meta"]]);
+    expect(before).toEqual([["Realtime speech server", "Cybrex2"], ["LLM Gateway"], ["On this computer"]]);
     use("Cybrex2");
     await settle();
     expect(order()).toEqual(before);
-    expect([roleOf("Cybrex2"), roleOf("Realtime speech server")]).toEqual(["Live", "Extra off"]);
+    expect([roleOf("Cybrex2"), roleOf("Realtime speech server")]).toEqual(["Live", ""]);
     use("On this computer");
     await settle();
     expect(order()).toEqual(before);
   });
 
   it("switches the Live recognizer from the drop-down, applying only that, and keeps focus on it", async () => {
-    const stub = await open({ ...several(), stt: stt(several().stt.entries.map((entry) => (entry.id === "cybrex2" ? { ...entry, extra: true } : entry))) });
-    goTo("recognition");
+    const stub = await openSeveral();
     liveSelect().focus();
     use("Cybrex2");
     await settle();
     expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
-    expect(sent(stub).stt.entries.map((entry) => [entry.name, entry.active, "extra" in entry])).toEqual([
-      ["Realtime speech server", false, false],
-      ["Cybrex2", true, false],
-      ["On this computer", false, false],
-      ["OpenAI", true, false],
-      ["Meta", false, false],
+    expect(sent(stub).stt.entries.map((entry) => [entry.name, entry.active])).toEqual([
+      ["Realtime speech server", false],
+      ["Cybrex2", true],
+      ["On this computer", false],
+      ["LLM Gateway", false],
     ]);
     expect(document.activeElement).toBe(liveSelect());
     expect(summaryText()).toBe("Next dictation: Cybrex2 · text arrives as you speak · Ready");
@@ -1446,11 +1394,9 @@ describe("the Recognition page", () => {
   it.each([
     ["choosing a Live recognizer", false, async () => { use("Cybrex2"); await settle(); }, APPLIED_TEXT, "live recognizer"],
     ["a refused Live recognizer", true, async () => { use("Cybrex2"); await settle(); }, REFUSED, "live recognizer"],
-    ["an Extra switch", false, async () => { flip(tickOf("Meta")); await settle(); }, APPLIED_TEXT, "row Meta"],
-    ["a refused Extra switch", true, async () => { flip(tickOf("Meta")); await settle(); }, REFUSED, "row Meta"],
     ["a saved edit", false, async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, APPLIED_TEXT, "row Cybrex2"],
     ["a refused edit", true, async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, REFUSED, "form"],
-    ["a refused removal", true, async () => { edit("Meta"); within(editorEl(), "Remove").click(); await settle(); }, REFUSED, "form"],
+    ["a refused removal", true, async () => { edit("LLM Gateway"); within(editorEl(), "Remove").click(); await settle(); }, REFUSED, "form"],
   ] as const)("shows how %s went in the form or on its row", async (_case, refuse, act, text, expected) => {
     const stub = await openSeveral();
     if (refuse) stub.backend.saveSettings.mockRejectedValueOnce(REFUSED);
@@ -1459,11 +1405,8 @@ describe("the Recognition page", () => {
   });
 
   const liveChoice = async () => { use("Cybrex2"); await settle(); };
-  const finalPass = async () => { flip(entryNamed("OpenAI").querySelector<HTMLInputElement>(".final-pass input") as HTMLInputElement); await settle(); };
   it.each([
     ["a Live choice", liveChoice, "live recognizer"],
-    ["an Extra switch", async () => { flip(tickOf("Meta")); await settle(); }, "row Meta"],
-    ["a Final pass switch", finalPass, "row OpenAI"],
     ["a saved edit", async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, "row Cybrex2"],
   ] as const)("keeps the Applied. of %s through status changes until the next change", async (_case, act, expected) => {
     const stub = await openSeveral();
@@ -1474,17 +1417,16 @@ describe("the Recognition page", () => {
     for (const status of [{ state: "working", target: null, route: "paste", cancellable: false }, { state: "listening" }, capturing] as const) stub.emit(status);
     await settle();
     expect(where(APPLIED_TEXT)).toBe(expected);
-    flip(tickOf("On this computer"));
-    await settle();
-    expect(Array.from(recognition().querySelectorAll(".applied")).filter((node) => node.textContent !== "").map((node) => where(node.textContent))).toEqual(["row On this computer"]);
+    edit("LLM Gateway");
+    type(control("Model", "input"), "other");
+    await saveServer();
+    expect(Array.from(recognition().querySelectorAll(".applied")).filter((node) => node.textContent !== "").map((node) => where(node.textContent))).toEqual(["row LLM Gateway"]);
   });
 
   it.each([
-    ["a Live choice", "an Extra switch", liveChoice, async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
-    ["a Live choice", "a removal", liveChoice, async () => { edit("Meta"); within(editorEl(), "Remove").click(); await settle(); }, () => listOf("extra").parentElement],
+    ["a Live choice", "a removal", liveChoice, async () => { edit("LLM Gateway"); within(editorEl(), "Remove").click(); await settle(); }, () => listOf("open_ai").parentElement],
     ["a Live choice", "a saved edit", liveChoice, async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, () => entryNamed("Cybrex2")],
-    ["an Extra switch", "a Final pass switch", async () => { flip(tickOf("Meta")); await settle(); }, finalPass, () => entryNamed("OpenAI")],
-    ["an Extra switch", "another Extra switch", async () => { flip(tickOf("On this computer")); await settle(); }, async () => { flip(tickOf("Meta")); await settle(); }, () => entryNamed("Meta")],
+    ["a saved edit", "another saved edit", async () => { edit("Cybrex2"); type(control("Model", "input"), "other"); await saveServer(); }, async () => { edit("LLM Gateway"); type(control("Model", "input"), "other"); await saveServer(); }, () => entryNamed("LLM Gateway")],
   ] as const)("after %s, shows only the Applied. of %s", async (_first, _then, before, act, owner) => {
     await openSeveral();
     await before();
@@ -1498,7 +1440,6 @@ describe("the Recognition page", () => {
     ["realtime", "Realtime transcription (WebSocket)", ["Name", "Address", "API key", "Model"]],
     ["open_ai", "OpenAI transcriptions", ["Name", "Address", "API key", "Model", "Request", "Language"]],
     ["on_device", "On this computer 2", ["Name", "Show models for", "Speech model"]],
-    ["extra", "Extra recognizer", ["Name", "Address", "API key", "Model", "API"]],
   ] as const)("opens the %s form at the top of its group with a short default name, its explanation and fields, then Cancel and Save", async (kind, name, fields) => {
     await openSeveral();
     await addServer(kind);
@@ -1517,7 +1458,6 @@ describe("the Recognition page", () => {
     ["realtime", [["Name", "How this server is listed when something fails."], ["Address", "The server's ws:// or wss:// address. Thalvi's own recognizer uses port 8012."], ["API key", "Only if the server needs one. Saved, never shown."], ["Model", "The model the server should use. Thalvi's own recognizer accepts any name."]]],
     ["open_ai", [["Name", "How this server is listed when something fails."], ["Address", "Where each capture is sent for transcription."], ["API key", "Saved in the config. Never shown again."], ["Model", "The model named in each request."], ["Request", "Transcriptions, or Chat with audio."], ["Language", "A two-letter code such as de. Empty detects it."]]],
     ["on_device", [["Name", "How this server is listed when something fails."], ["Show models for", "Filters this list by each card's languages."], ["Speech model", "Downloads on first use. A pick applies next."]]],
-    ["extra", [["Name", "How this server is listed when something fails."], ["Address", "Where the extra transcription is sent."], ["API key", "Saved in the config. Never shown again."], ["Model", "The model named in each request."], ["API", "Which transcription API the endpoint speaks."]]],
   ] as const)("explains each field of the %s form under its label", async (kind, hints) => {
     await openSeveral();
     await addServer(kind);
@@ -1537,12 +1477,12 @@ describe("the Recognition page", () => {
   });
 
   it("numbers a default name that is taken", async () => {
-    await open({ ...several(), stt: stt([{ ...SERVER, name: "Realtime transcription (WebSocket)" }, { ...META, name: "Extra recognizer" }]) });
+    await open({ ...several(), stt: stt([{ ...SERVER, name: "Realtime transcription (WebSocket)" }, { ...GATEWAY, name: "LLM Gateway" }]) });
     goTo("recognition");
     await addServer("realtime");
     expect(control("Name", "input").value).toBe("Realtime transcription (WebSocket) 2");
-    await addServer("extra");
-    expect(control("Name", "input").value).toBe("Extra recognizer 2");
+    await addServer("open_ai");
+    expect(control("Name", "input").value).toBe("OpenAI transcriptions");
   });
 
   it("opens Edit in place of its row, one form at a time, with Remove before Cancel and Save", async () => {
@@ -1553,7 +1493,7 @@ describe("the Recognition page", () => {
     expect(listOf("realtime").children[1]).toBe(editorEl());
     expect(editorEl().querySelector("h4")?.textContent).toBe("Editing “Cybrex2”");
     expect(Array.from(editorEl().querySelectorAll<HTMLElement>(".actions button")).filter((node) => node.closest("[hidden]") === null).map((node) => node.textContent)).toEqual(["Remove", "Cancel", "Save"]);
-    await addServer("extra");
+    await addServer("open_ai");
     expect(root.querySelectorAll(".editor")).toHaveLength(1);
     expect(names(listOf("realtime"))).toEqual(["Realtime speech server", "Cybrex2"]);
     expect(editButton("Cybrex2").getAttribute("aria-expanded")).toBe("false");
@@ -1562,8 +1502,8 @@ describe("the Recognition page", () => {
   it.each([
     ["realtime", "Cancel", "the +"],
     ["realtime", "Save", "the new entry's Edit"],
-    ["extra", "Cancel", "the +"],
-    ["extra", "Save", "the new entry's Edit"],
+    ["open_ai", "Cancel", "the +"],
+    ["open_ai", "Save", "the new entry's Edit"],
     ["edit", "Cancel", "its Edit"],
     ["edit", "Save", "its Edit"],
   ] as const)("returns focus from a %s form closed with %s to %s", async (opener, close, expected) => {
@@ -1574,7 +1514,7 @@ describe("the Recognition page", () => {
     expect(document.activeElement).toBe(control("Name", "input"));
     const name = control("Name", "input").value;
     if (opener === "realtime") type(control("Address", "input"), "ws://127.0.0.1:8013");
-    if (opener === "extra") type(control("Address", "input"), "http://127.0.0.1:9000/v1");
+    if (opener === "open_ai") type(control("Address", "input"), "http://127.0.0.1:9000/v1");
     if (opener === "edit") type(control("Model", "input"), "other");
     within(editorEl(), close).click();
     await settle();
@@ -1594,14 +1534,13 @@ describe("the Recognition page", () => {
     type(control("Language", "input"), "de");
     await saveServer();
     expect(sent(stub).stt.entries.at(-1)).toMatchObject({ kind: "open_ai", name: "Local Whisper", active: false, api_key: "local-secret", request: "chat", language: "de" });
-    expect(sent(stub).stt.entries.at(-1)).not.toHaveProperty("extra");
-    expect(names(listOf("open_ai"))).toEqual(["Local Whisper"]);
+    expect(names(listOf("open_ai"))).toEqual(["LLM Gateway", "Local Whisper"]);
     expect(entryNamed("Local Whisper").querySelector(".unit")?.textContent).toBe("127.0.0.1:9000 · key saved");
     edit("Local Whisper");
     type(control("Name", "input"), "Dropped");
     within(editorEl(), "Cancel").click();
     await settle();
-    expect(names(listOf("open_ai"))).toEqual(["Local Whisper"]);
+    expect(names(listOf("open_ai"))).toEqual(["LLM Gateway", "Local Whisper"]);
     expect(stub.applied()).toHaveLength(1);
   });
 
@@ -1622,7 +1561,7 @@ describe("the Recognition page", () => {
 
   it.each([
     ["a saved key", "Cybrex2", true],
-    ["no key", "Meta", false],
+    ["no key", "LLM Gateway", false],
   ] as const)("removes an entry with %s from its form, asking first only when a key would be lost", async (_case, name, asks) => {
     const stub = await openSeveral();
     edit(name);
@@ -1653,7 +1592,7 @@ describe("the Recognition page", () => {
 
   it.each([
     ["the next row's Edit", "Cybrex2", [{ ...SERVER }, { ...CYBREX, has_key: false }, { ...CYBREX, id: "third", name: "Third", has_key: false }], "Edit Third"],
-    ["the group's + when it is now empty", "Meta", [{ ...SERVER }, { ...META }], "Add an extra-only server"],
+    ["the group's + when it is now empty", "LLM Gateway", [{ ...SERVER }, { ...GATEWAY }], "Add an after-you-stop server"],
   ] as const)("moves focus after Remove to %s", async (_case, name, entries, expected) => {
     await open({ ...several(), stt: stt([...entries]) });
     goTo("recognition");
@@ -1666,251 +1605,37 @@ describe("the Recognition page", () => {
   });
 });
 
-describe("Extra switches", () => {
-  async function openSeveral(settings: Settings = several()) {
-    const stub = await open(settings);
+describe("one recognizer per capture", () => {
+  it("shows no Extra or Final pass switch, no merge switch, no extras summary, no extras prompt and no extra-only card", async () => {
+    const stub = await open(several());
     goTo("recognition");
-    return stub;
-  }
-  const withExtras = (writing: Settings["writing"], extras: readonly string[] = [], merge = true): Settings => ({
-    ...several(),
-    writing,
-    stt: stt(several().stt.entries.map((entry) => (extras.includes(entry.name) ? { ...entry, extra: true } : entry)), merge),
-  });
-  const savedEntry = (stub: Awaited<ReturnType<typeof open>>, name: string): SpeechEntry | undefined =>
-    stub.applied().at(-1)?.stt.entries.find((entry) => entry.name === name);
-
-  it.each([
-    ["an extra-only server", "Meta", { active: true }, { active: false }],
-    ["a streaming server not in use", "Cybrex2", { active: false, extra: true }, { active: false }],
-    ["the on-device model not in use", "On this computer", { active: false, extra: true }, { active: false }],
-  ] as const)("turns %s on and off at once, changing only its own flag, and keeps focus on the switch", async (_case, name, on, off) => {
-    const stub = await openSeveral();
-    const others = (settings: Settings | undefined) => settings?.stt.entries.filter((entry) => entry.name !== name);
-    tickOf(name).focus();
-    flip(tickOf(name));
-    await settle();
-    expect(savedEntry(stub, name)).toMatchObject(on);
-    expect(others(stub.applied().at(-1))).toEqual(several().stt.entries.filter((entry) => entry.name !== name));
-    expect(document.activeElement).toBe(tickOf(name));
-    flip(tickOf(name));
-    await settle();
-    expect(savedEntry(stub, name)).toMatchObject(off);
-    expect(savedEntry(stub, name)).not.toHaveProperty("extra");
-    expect(others(stub.applied().at(-1))).toEqual(several().stt.entries.filter((entry) => entry.name !== name));
-  });
-
-  it("moves the final pass between rows and resumes the same extras when switched off", async () => {
-    const stub = await openSeveral();
-    const finalOf = (name: string) => entryNamed(name).querySelector<HTMLInputElement>(".final-pass input");
-    const pick = async (name: string) => {
-      const toggle = finalOf(name);
-      if (!toggle) throw new Error(`Missing final-pass switch for ${name}`);
-      flip(toggle);
-      await settle();
-    };
-    expect(finalOf("Realtime speech server")).toBeNull();
-    await pick("OpenAI");
-    expect(savedEntry(stub, "OpenAI")).toMatchObject({ active: true, final_pass: true });
-    expect(extrasText()).toBe("Paused while a final pass is set");
-    expect(recognition().textContent).toContain("Final pass: OpenAI.");
-    expect(recognition().textContent).toContain("The final pass uses this word list.");
-    await pick("Meta");
-    expect(finalOf("OpenAI")?.checked).toBe(false);
-    expect(savedEntry(stub, "OpenAI")).not.toHaveProperty("final_pass");
-    expect(savedEntry(stub, "Meta")).toMatchObject({ active: false, final_pass: true });
-    await pick("Meta");
-    expect(savedEntry(stub, "Meta")).not.toHaveProperty("final_pass");
-    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
-  });
-
-  it("can select a final pass without a chat model", async () => {
-    const stub = await open({ ...several(), writing: null, stt: stt(
-      several().stt.entries.map((entry) => entry.kind === "extra" ? { ...entry, active: false } : entry),
-    ) });
-    goTo("recognition");
-    const toggle = entryNamed("OpenAI").querySelector<HTMLInputElement>(".final-pass input");
-    if (!toggle) throw new Error("Missing final-pass switch");
-    expect(toggle.disabled).toBe(false);
-    flip(toggle);
-    await settle();
-    expect(savedEntry(stub, "OpenAI")).toMatchObject({ active: false, final_pass: true });
-  });
-
-  it("shows a switch that was refused as still off", async () => {
-    const stub = await openSeveral();
-    stub.backend.saveSettings.mockRejectedValueOnce("The settings could not be saved.");
-    flip(tickOf("Meta"));
-    await settle();
-    expect(tickOf("Meta").checked).toBe(false);
-  });
-
-  it.each([
-    ["no chat endpoint and none on", null, [], [false, false], "Extra: none"],
-    ["a chat endpoint and none on", WRITING, [], [false, false], "Extra: none"],
-    ["one on", WRITING, [], [true, false], "Extra: OpenAI. The chat model merges its text with the live text."],
-    ["several on", WRITING, [], [true, true], "Extra: OpenAI, Meta. The chat model merges their texts with the live text."],
-    ["an on-device one on", WRITING, ["On this computer"], [false, false], "Extra: On this computer. The chat model merges its text with the live text. Each on-device extra loads its own model, which adds memory and processing."],
-  ] as const)("sums up the extras with %s", async (_case, writing, live, [openai, meta], text) => {
-    await openSeveral({ ...withExtras(writing, live), stt: stt(withExtras(writing, live).stt.entries.map((entry) => (entry.id === "openai" ? { ...entry, active: openai } : entry.id === "meta" ? { ...entry, active: meta } : entry))) });
-    expect(extrasText()).toBe(text);
-  });
-
-  it.each([
-    ["no chat endpoint", null, true],
-    ["a chat endpoint", WRITING, false],
-  ] as const)("with %s, locks every Extra switch that is off and points it to the one line that says why", async (_case, writing, locked) => {
-    await openSeveral(withExtras(writing, ["On this computer"]));
-    expect(needsChat().hidden).toBe(!locked);
-    expect(needsChat().textContent).toBe("Extra switches need a chat model. Go to the endpoint setting");
-    expect(recognition().querySelectorAll(".needs-chat")).toHaveLength(1);
-    expect(recognition().querySelector(".note.why")).toBeNull();
-    for (const name of ["Cybrex2", "Meta", "OpenAI", "On this computer"]) {
-      const offAndLocked = locked && !tickOf(name).checked;
-      expect([name, tickOf(name).disabled, tickOf(name).getAttribute("aria-describedby")]).toEqual([name, offAndLocked, offAndLocked ? needsChat().id : null]);
-    }
-  });
-
-  it("lets an Extra that is on be turned off without a chat endpoint", async () => {
-    const stub = await openSeveral(withExtras(null, ["On this computer"]));
-    flip(tickOf("On this computer"));
-    await settle();
-    expect(savedEntry(stub, "On this computer")).not.toHaveProperty("extra");
-    expect(tickOf("On this computer").disabled).toBe(true);
-  });
-
-  it("follows the chat endpoint right away, and leads to it", async () => {
-    await openSeveral(withExtras(null));
-    expect(tickOf("Meta").disabled).toBe(true);
-    button("Go to the endpoint setting").click();
-    expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("chat");
-    expect(document.activeElement).toBe(control("Writing endpoint address", "input"));
-    type(control("Writing endpoint address", "input"), "http://127.0.0.1:8000/v1");
-    type(control("Writing model", "input"), "glimmer");
-    await settle();
-    expect(needsChat().hidden).toBe(true);
-    expect(tickOf("Meta").disabled).toBe(false);
-  });
-
-  it.each([["open", false], ["collapsed", true]] as const)("leads to the endpoint address with its details %s", async (_case, collapse) => {
-    await open({ ...several(), writing: null });
-    goTo("chat");
-    const fold = rowOf("Writing endpoint address").closest("details.fold");
-    if (!(fold instanceof HTMLDetailsElement)) throw new Error("no details around the endpoint address");
-    if (collapse) fold.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(fold.open).toBe(!collapse);
-    goTo("recognition");
-    button("Go to the endpoint setting").click();
-    expect(fold.open).toBe(true);
-    expect(document.activeElement).toBe(control("Writing endpoint address", "input"));
-  });
-
-  it("gives the entry that becomes Live no switch, clears its own extra, and gives the one replaced a switch that is off", async () => {
-    const stub = await openSeveral(withExtras(WRITING, ["Cybrex2"]));
-    expect(roleOf("Cybrex2")).toBe("Extra on");
-    use("Cybrex2");
-    await settle();
-    expect(savedEntry(stub, "Cybrex2")).toMatchObject({ active: true });
-    expect(savedEntry(stub, "Cybrex2")).not.toHaveProperty("extra");
-    expect([roleOf("Cybrex2"), roleOf("Realtime speech server")]).toEqual(["Live", "Extra off"]);
-    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
+    expect(stub.backend.getStatus).toHaveBeenCalled();
+    expect(recognition().querySelector('input[aria-label^="Extra:"]')).toBeNull();
+    expect(recognition().querySelector('input[aria-label^="Final pass:"]')).toBeNull();
+    expect(recognition().querySelector('input[aria-label="Merge with the chat model"]')).toBeNull();
+    expect(recognition().querySelector(".extras")).toBeNull();
+    expect(recognition().querySelector(".needs-chat")).toBeNull();
+    expect(recognition().querySelector('[data-kind="extra"]')).toBeNull();
+    expect(recognition().textContent).not.toContain("Extra-only servers");
+    expect(recognition().textContent).not.toContain("Extra:");
+    expect(recognition().textContent).not.toContain("Merge with the chat model");
+    expect(recognition().textContent).not.toContain("Extra switches need a chat model");
+    expect(recognition().textContent).not.toContain("Final pass");
   });
 });
 
-describe("Merge with the chat model", () => {
-  const mergeTick = (): HTMLInputElement =>
-    recognition().querySelector<HTMLInputElement>('input[aria-label="Merge with the chat model"]') as HTMLInputElement;
-  const mergeState = (): HTMLElement => recognition().querySelector(".merge-state") as HTMLElement;
-  async function openRecognition(settings: Settings = several()) {
-    const stub = await open(settings);
-    goTo("recognition");
-    return stub;
-  }
-
-  it("turns the merge on and off, saying what happens while it is off", async () => {
-    const stub = await openRecognition();
-    expect(mergeTick().checked).toBe(true);
-    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
-    flip(mergeTick());
-    await settle();
-    expect(stub.applied().at(-1)?.stt.merge).toBe(false);
-    expect(mergeTick().checked).toBe(false);
-    expect(extrasText()).toBe("Merge off: dictation pastes the live text at once; extras are only recorded.");
-    flip(mergeTick());
-    await settle();
-    expect(stub.applied().at(-1)?.stt.merge).toBe(true);
-    expect(mergeTick().checked).toBe(true);
-    expect(extrasText()).toBe("Extra: OpenAI. The chat model merges its text with the live text.");
-  });
-
-  it("leaves every Extra switch usable without an endpoint while it is off", async () => {
-    await openRecognition({ ...several(), writing: null, stt: stt(several().stt.entries, false) });
-    expect(mergeTick().checked).toBe(false);
-    expect(extrasText()).toBe("Merge off: dictation pastes the live text at once; extras are only recorded.");
-    for (const name of ["Cybrex2", "Meta", "OpenAI", "On this computer"]) {
-      expect([name, tickOf(name).disabled]).toEqual([name, false]);
-    }
-    expect(needsChat().hidden).toBe(true);
-  });
-
-  it("refuses turning it on without a chat endpoint and leads to the endpoint setting", async () => {
-    await openRecognition({ ...several(), writing: null, stt: stt(several().stt.entries, false) });
-    flip(mergeTick());
-    await settle();
-    expect(mergeTick().checked).toBe(false);
-    expect(needsChat().hidden).toBe(false);
-    expect(needsChat().textContent).toBe("Extra switches need a chat model. Go to the endpoint setting");
-    button("Go to the endpoint setting").click();
-    expect(root.querySelector('nav [aria-current="page"]')?.getAttribute("data-page")).toBe("chat");
-    expect(document.activeElement).toBe(control("Writing endpoint address", "input"));
-  });
-
-  it("locks the extra switches again while it is on without an endpoint", async () => {
-    await openRecognition({ ...several(), writing: null });
-    expect(mergeTick().checked).toBe(true);
-    expect(needsChat().hidden).toBe(false);
-    expect(tickOf("Meta").disabled).toBe(true);
-    expect(tickOf("OpenAI").disabled).toBe(false);
-  });
-
-  it("shows off and disabled while a final pass is set and keeps the stored value", async () => {
-    const stub = await openRecognition();
-    const finalOf = (name: string): HTMLInputElement | null =>
-      entryNamed(name).querySelector<HTMLInputElement>(".final-pass input");
-    const pick = async (name: string): Promise<void> => {
-      const toggle = finalOf(name);
-      if (!toggle) throw new Error(`Missing final-pass switch for ${name}`);
-      flip(toggle);
-      await settle();
-    };
-    await pick("Meta");
-    expect(mergeTick().checked).toBe(false);
-    expect(mergeTick().disabled).toBe(true);
-    expect(mergeState().textContent).toBe("A final pass is set");
-    expect(stub.applied().at(-1)?.stt.merge).toBe(true);
-    await pick("Meta");
-    expect(mergeTick().checked).toBe(true);
-    expect(mergeTick().disabled).toBe(false);
-    expect(mergeState().textContent).toBe("");
-  });
-});
-
-/** High risk: #558. An extra switched on by mistake sends the user's audio to another server unnoticed. */
 describe("roles on the Recognition page against the fake backend", () => {
   type Step =
     | { kind: "live"; at: number }
-    | { kind: "extra"; at: number }
     | { kind: "add"; entry: SpeechEntry["kind"] }
     | { kind: "remove"; at: number };
   const step: fc.Arbitrary<Step> = fc.oneof(
     fc.record({ kind: fc.constant("live" as const), at: fc.nat(9) }),
-    fc.record({ kind: fc.constant("extra" as const), at: fc.nat(9) }),
-    fc.record({ kind: fc.constant("add" as const), entry: fc.constantFrom<SpeechEntry["kind"]>("realtime", "on_device", "extra") }),
+    fc.record({ kind: fc.constant("add" as const), entry: fc.constantFrom<SpeechEntry["kind"]>("realtime", "on_device") }),
     fc.record({ kind: fc.constant("remove" as const), at: fc.nat(9) }),
   );
-  const flags = (entry: SpeechEntry): [boolean, boolean] => [entry.active, entry.kind !== "extra" && entry.extra === true];
   const byId = (settings: Settings): Map<string, SpeechEntry> => new Map(settings.stt.entries.map((entry) => [entry.id, entry]));
-  const START: Settings = { ...SETTINGS, writing: WRITING, stt: stt([{ ...SERVER }, { ...CYBREX, has_key: false }, device(undefined, false), { ...META }]) };
+  const START: Settings = { ...SETTINGS, writing: WRITING, stt: stt([{ ...SERVER }, { ...CYBREX, has_key: false }, device(undefined, false), { ...GATEWAY }]) };
 
   async function act(backend: ReturnType<typeof fakeBackend>, next: Step): Promise<string | null> {
     const rows = Array.from(recognition().querySelectorAll<HTMLElement>(".trow.server"));
@@ -1924,18 +1649,10 @@ describe("roles on the Recognition page against the fake backend", () => {
         await settle();
         return option.value;
       }
-      case "extra": {
-        const tick = picked?.querySelector<HTMLInputElement>("input[type=checkbox]");
-        if (!tick || tick.disabled) return null;
-        flip(tick);
-        await settle();
-        return id;
-      }
       case "add": {
         await addServer(next.entry);
         if (next.entry === "realtime") type(control("Address", "input"), "ws://127.0.0.1:8013");
         if (next.entry !== "on_device") type(control("Model", "input"), "m");
-        if (next.entry === "extra") type(control("Address", "input"), "http://127.0.0.1:9000/v1");
         await saveServer();
         await settle();
         const ids = (await backend.getSettings()).stt.entries.map((entry) => entry.id);
@@ -1960,7 +1677,7 @@ describe("roles on the Recognition page against the fake backend", () => {
     }
   }
 
-  it("changes only the chosen entry's flags, turns nothing else on, and keeps exactly one live entry", async () => {
+  it("changes only the chosen entry, turns nothing else on, and keeps exactly one live entry", async () => {
     vi.useFakeTimers();
     await fc.assert(
       fc.asyncProperty(fc.array(step, { minLength: 1, maxLength: 8 }), async (steps) => {
@@ -1975,27 +1692,22 @@ describe("roles on the Recognition page against the fake backend", () => {
           const before = byId(await backend.getSettings());
           const target = await act(backend, next);
           const after = await backend.getSettings();
-          const live = after.stt.entries.filter((entry) => entry.kind !== "extra" && entry.active);
-          expect(live, JSON.stringify(steps)).toHaveLength(1);
+          expect(after.stt.entries.filter((entry) => entry.active), JSON.stringify(steps)).toHaveLength(1);
           for (const entry of after.stt.entries) {
             const was = before.get(entry.id);
             if (was === undefined) {
-              expect([next.kind, entry.id, flags(entry)]).toEqual(["add", target, [false, false]]);
+              expect([next.kind, entry.id, entry.active]).toEqual(["add", target, false]);
               continue;
             }
             if (entry.id === target && next.kind === "live") {
-              expect(flags(entry)).toEqual([true, false]);
+              expect(entry.active).toBe(true);
               continue;
             }
-            if (entry.id === target && next.kind === "extra") {
-              expect(flags(entry)).toEqual(entry.kind === "extra" ? [!was.active, false] : [false, !flags(was)[1]]);
+            if (next.kind === "live" && entry.id !== target) {
+              expect(entry.active).toBe(false);
               continue;
             }
-            if (next.kind === "live" && entry.kind !== "extra") {
-              expect(flags(entry)).toEqual([false, flags(was)[1]]);
-              continue;
-            }
-            expect(flags(entry), JSON.stringify(steps)).toEqual(flags(was));
+            expect(entry, JSON.stringify(steps)).toEqual(was);
           }
           if (next.kind === "remove" && target !== null) expect(after.stt.entries.some((entry) => entry.id === target)).toBe(false);
         }
@@ -2005,54 +1717,10 @@ describe("roles on the Recognition page against the fake backend", () => {
   });
 });
 
-describe("the fake backend's rule for extra recognizers", () => {
-  const writing = { url: "http://127.0.0.1:8000/v1", model: "glimmer" };
-  /** Sends the patch from what the backend holds to `next`, as a window would. */
-  const put = async (backend: ReturnType<typeof fakeBackend>, next: Settings): Promise<void> => {
-    await backend.saveSettings(settingsPatch(await backend.getSettings(), next));
-  };
-  const settings = (endpoint: Settings["writing"], on: boolean): Settings => ({ ...SETTINGS, writing: endpoint, stt: stt([{ ...SERVER }, { ...OPENAI, active: on }]) });
-
-  it.each([
-    ["no writing model was set", null, "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."],
-    ["the writing model is removed", writing, "Switch off the extra recognizers before removing the writing model."],
-  ] as const)("refuses a switched-on extra when %s", async (_case, before, message) => {
-    const backend = fakeBackend(new URLSearchParams());
-    await put(backend, settings(before, before !== null));
-    await expect(put(backend, settings(null, true))).rejects.toThrow(message);
-    await expect(put(backend, settings(null, false))).resolves.toBeUndefined();
-  });
-
-  it.each([
-    ["a live extra needs a writing model", null, { ...SERVER }, { ...CYBREX, extra: true }, "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."],
-    ["the entry in use cannot be an extra", writing, { ...SERVER, extra: true }, { ...CYBREX }, 'Speech server "Realtime speech server" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first.'],
-  ] as const)("refuses a live entry's extra: %s", async (_case, endpoint, first, second, message) => {
-    const backend = fakeBackend(new URLSearchParams());
-    await expect(put(backend, { ...SETTINGS, writing: endpoint, stt: stt([first, second]) })).rejects.toThrow(message);
-    await expect(put(backend, { ...SETTINGS, writing, stt: stt([{ ...SERVER }, { ...CYBREX, extra: true }]) })).resolves.toBeUndefined();
-  });
-
-  it("allows a switched-on extra without a writing model while the merge is off", async () => {
-    const backend = fakeBackend(new URLSearchParams());
-    const unmerged = { ...settings(null, false), stt: stt([{ ...SERVER }, { ...OPENAI, active: true }], false) };
-    await expect(put(backend, unmerged)).resolves.toBeUndefined();
-    await expect(put(backend, { ...settings(null, true), stt: stt([{ ...SERVER }, { ...OPENAI, active: true }]) })).rejects.toThrow("Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off.");
-  });
-
-  it("treats numbers as digits alone as no writing endpoint", async () => {
-    const backend = fakeBackend(new URLSearchParams());
-    await put(backend, settings(writing, true));
-    const off = { numbers_as_digits: false };
-    await expect(put(backend, { ...settings(null, true), writing: off })).rejects.toThrow("Switch off the extra recognizers before removing the writing model.");
-    await expect(put(backend, { ...settings(null, false), writing: off })).resolves.toBeUndefined();
-  });
-});
-
 describe("the fake backend's address check", () => {
   it.each([
     ["realtime", { ...SERVER, address: "wss://asr.example" }, { ...SERVER, address: "https://asr.example" }, "ws:// or wss://"],
     ["open_ai", { ...GATEWAY, address: "http://127.0.0.1:9000/v1" }, { ...GATEWAY, address: "ws://127.0.0.1:9000/v1" }, "http:// or https://"],
-    ["extra", { ...META, address: "http://127.0.0.1:9000/v1" }, { ...META, address: "wss://meta.example/v1" }, "http:// or https://"],
   ] as const)("accepts the addresses the desktop takes for kind %s and refuses another", async (_kind, good, bad, wanted) => {
     const backend = fakeBackend(new URLSearchParams());
     await expect(backend.checkSpeechEntry(good)).resolves.toBeUndefined();
@@ -2131,7 +1799,6 @@ describe("the next dictation summary and state words", () => {
     ["pending", { state: "pending", target: null, route: "paste", text: "hi", waitingForQuiet: false, pauseMs: 0, copies: false }, "Ready"],
     ["writing", { state: "writing", target: null, text: "" }, "Ready"],
     ["thinking", { state: "thinking", target: null }, "Ready"],
-    ["merging", { state: "merging", target: null, route: "paste" }, "Merging…"],
     ["working", { state: "working", target: null, route: "paste", cancellable: true }, "Ready"],
     ["done", { state: "done", target: null, route: "paste", notice: "Pasted" }, "Ready"],
     ["loading", { state: "loading", notice: "Loading the speech model." }, "Loading the speech model."],
@@ -3203,14 +2870,12 @@ describe("search", () => {
   });
 
   it.each([
-    ["speech server", ["Streaming servers", "After-you-stop servers", "Extra-only servers"]],
-    ["extra recognizer", ["Extra-only servers"]],
+    ["speech server", ["Streaming servers", "After-you-stop servers"]],
     ["word list", ["Word list"]],
     ["live recognizer", ["Live recognizer"]],
     ["streaming servers", ["Streaming servers"]],
     ["after-you-stop servers", ["After-you-stop servers"]],
     ["on this computer", ["On this computer"]],
-    ["extra-only servers", ["Extra-only servers"]],
   ])("finds the Recognition page by %s", async (term, titles) => {
     await open();
     type(root.querySelector<HTMLInputElement>(".search") as HTMLInputElement, term);

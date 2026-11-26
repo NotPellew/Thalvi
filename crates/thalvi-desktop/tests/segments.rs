@@ -138,3 +138,20 @@ fn a_stretch_ends_in_a_final_with_the_words_the_look_ahead_still_held() {
         assert_eq!(finals(&events), expected, "{case}");
     }
 }
+
+#[test]
+fn end_input_flushes_words_held_in_the_look_ahead_without_trailing_silence() {
+    let pieces: Arc<Vec<String>> = Arc::new(vec!["\u{2581}one".to_owned()]);
+    let fake = Fake {
+        spoken: vec![(0, 0)],
+        ghost: false,
+        frame: 0,
+    };
+    let mut segments = Segments::new(fake, pieces, ENDPOINT, LOOKAHEAD);
+    let frame: Frame = [0; FRAME_SAMPLES];
+    assert_eq!(segments.accept(&frame).expect("frame is accepted"), []);
+    assert_eq!(
+        segments.end_input().expect("end flushes look-ahead"),
+        [RecognizerEvent::Final("one".to_owned())]
+    );
+}

@@ -13,13 +13,10 @@ def state(variables: dict[str, str]) -> str:
         return 'settling [a stop was seen]' if variables['ended'] == 'TRUE' else 'settling'
     return {
         'pre': 'reading controls queued before the capture',
-        'cleaning': 'dictation cleanup of a submit',
+        'cleaning': 'dictation cleanup before Enter',
         'ending': 'ending cue plays, recognizer releases',
-        'finalPass': 'waiting for the final recognizer',
-        'finalCleanup': 'dictation cleanup before the review',
-        'preview': 'waiting for the full Submit preview',
-        'confirm': 'showing the submit text for approval',
-        'secondary': 'merging the streaming texts',
+        'preview': 'waiting for the full text on screen',
+        'confirm': 'showing the text for approval',
         'writing': 'explicit write request',
     }[stage]
 
@@ -31,15 +28,12 @@ ACTIONS = {
     'Receive': 'reads a control',
     'Loaded': 'model ready',
     'LoadFailed': 'load fails',
-    'Prepare': 'submit needs cleanup',
+    'Prepare': 'Enter ending needs cleanup',
     'CleanupReturns': 'cleanup returns',
     'Accept': 'user ends the dictation',
     'ActiveCancelled': 'capture cancelled',
     'CueReturns': None,
     'CloseReturns': 'recognizer released',
-    'SecondaryReturns': 'merge returns',
-    'FinalReturns': 'final pass settles',
-    'FinalCleanupReturns': 'cleanup returns',
     'PreviewReturns': 'preview is shown or unavailable',
     'ConfirmReturns': 'confirmation ends',
     'WritingReturns': 'write request returns',

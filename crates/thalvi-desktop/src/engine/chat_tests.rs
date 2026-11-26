@@ -1,4 +1,4 @@
-//! Exercises local writing and merging through a fake child and a real loopback HTTP endpoint.
+//! Exercises local writing through a fake child and a real loopback HTTP endpoint.
 
 use super::*;
 use crate::chat::{Build, Chat, Files, fakes::FakeLaunch};
@@ -38,7 +38,7 @@ async fn endpoint() -> (u16, Requests, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
-async fn writing_and_merging_use_the_owned_runtime_and_a_second_crash_stays_failed() {
+async fn writing_uses_the_owned_runtime_and_a_second_crash_stays_failed() {
     let (port, asked, http) = endpoint().await;
     let dir = std::env::temp_dir().join(format!("thalvi-engine-chat-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("runtime")).unwrap();
@@ -80,7 +80,6 @@ async fn writing_and_merging_use_the_owned_runtime_and_a_second_crash_stays_fail
             notice: Box::new(|_| {}),
             spotter: None,
             spotter_off: None,
-            extras: Vec::new(),
         },
         &config,
         Recorder::disabled(),
@@ -92,13 +91,9 @@ async fn writing_and_merging_use_the_owned_runtime_and_a_second_crash_stays_fail
             text: "Hello.".to_owned()
         })
     );
-    let writing = config.writing.as_ref().unwrap();
-    assert!(
-        matches!(engine.ask_merge(writing, &["hello".to_owned(), "Hello.".to_owned()], &WordList::default(), Instant::now() + writing::LIMIT).await, Asked::Merged { text, .. } if text == "Hello.")
-    );
     {
         let asked = asked.lock().unwrap();
-        assert_eq!(asked.len(), 2);
+        assert_eq!(asked.len(), 1);
         let spawned = child.spawned(0);
         for (headers, body) in asked.iter() {
             assert_eq!(
@@ -111,7 +106,6 @@ async fn writing_and_merging_use_the_owned_runtime_and_a_second_crash_stays_fail
             asked[0].1["messages"][0]["content"],
             writing::DEFAULT_PROMPT
         );
-        assert_eq!(asked[1].1["messages"][0]["content"], writing::MERGE_PROMPT);
     }
     assert_eq!(child.spawns(), 1);
     child.exit(0);

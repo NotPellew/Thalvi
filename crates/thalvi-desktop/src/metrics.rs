@@ -59,13 +59,6 @@ pub enum Event {
     PartialLag,
     /// From the last speech heard before a final result to that result.
     FinalLag,
-    /// One extra recognizer's transcription of a capture: its latency and outcome. An upload
-    /// extra's latency is its request's; a streaming extra's is from the capture's end to its
-    /// final text, and its `api` names the kind (`realtime`, `open_ai_live`, `on_device`).
-    ExtraStt,
-    FinalPass,
-    /// Merging the texts of a capture: the latency it adds after the ending, the chat call's own latency, and how it ended.
-    Merge,
     LiveStt,
     LiveSttFirstText,
     LiveSttDelta,
@@ -132,9 +125,6 @@ impl Event {
             Self::TranscriptionReady => "desktop_transcription_ready",
             Self::PartialLag => "desktop_partial_lag",
             Self::FinalLag => "desktop_final_lag",
-            Self::ExtraStt => "desktop_extra_stt",
-            Self::FinalPass => "final_pass",
-            Self::Merge => "desktop_merge",
             Self::LiveStt => "desktop_live_stt",
             Self::LiveSttFirstText => "desktop_live_stt_first_text",
             Self::LiveSttDelta => "desktop_live_stt_delta",
@@ -383,21 +373,6 @@ impl Recorder {
                 line,
             });
         }
-    }
-
-    /// Holds a way to record a transcript that may arrive after delivery.
-    pub(crate) fn capture_text(
-        &self,
-        dictation: Dictation,
-    ) -> Option<impl FnOnce(String) + Send + use<>> {
-        let sender = self.sender.clone();
-        let dropped = Arc::clone(&self.dropped);
-        let kinds = Arc::clone(&self.kinds);
-        self.kinds().text.then_some(move |line| {
-            if kinds.get().text {
-                send(sender.as_ref(), &dropped, Message::Text { dictation, line });
-            }
-        })
     }
 
     /// Queues the 16 kHz mono audio heard up to the wake as the dictation's `wake.wav`.
@@ -854,8 +829,6 @@ mod tests {
             (Event::WakeNothing, "desktop_wake_nothing"),
             (Event::WakeReset, "desktop_wake_reset"),
             (Event::TranscriptionReady, "desktop_transcription_ready"),
-            (Event::ExtraStt, "desktop_extra_stt"),
-            (Event::Merge, "desktop_merge"),
             (Event::LiveStt, "desktop_live_stt"),
             (Event::LiveSttFirstText, "desktop_live_stt_first_text"),
             (Event::LiveSttDelta, "desktop_live_stt_delta"),
@@ -910,7 +883,7 @@ mod tests {
         let dir = TempDir::new("line");
         let recorder = Recorder::in_dir(METRICS, dir.root()).unwrap();
         recorder.metric(
-            Event::ExtraStt,
+            Event::Writing,
             "timeout",
             Some(Duration::from_micros(1500)),
             json!({"model": "m", "api": "openai"}),
@@ -926,7 +899,7 @@ mod tests {
         assert_eq!(
             first,
             json!({
-                "event": "desktop_extra_stt", "outcome": "timeout",
+                "event": "desktop_writing", "outcome": "timeout",
                 "duration_ms": 1.5, "model": "m", "api": "openai"
             })
         );

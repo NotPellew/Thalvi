@@ -411,8 +411,6 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
         }
         | Status::Transcribing { .. }
         | Status::Finishing { .. } => "transcribing",
-        Status::FinalPass { .. } => "finalPass",
-        Status::Merging { .. } => "merging",
         Status::CleaningUp { .. } => "cleaning",
         Status::Working { .. } => "delivering",
         Status::Writing { .. } | Status::Thinking { .. } | Status::StartingChat { .. } => "writing",
@@ -446,8 +444,6 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
         Status::Working { .. } => "working",
         Status::Transcribing { .. } => "transcribing",
         Status::Finishing { .. } => "finishing",
-        Status::FinalPass { .. } => "finalPass",
-        Status::Merging { .. } => "merging",
         Status::CleaningUp { .. } => "cleaning",
         Status::Done { .. } => "delivered",
         Status::Failed { .. } => "error",
@@ -565,8 +561,6 @@ fn capturing(status: &Status) -> bool {
                 cancellable: true,
                 ..
             }
-            | Status::FinalPass { .. }
-            | Status::Merging { .. }
             | Status::CleaningUp { .. }
     )
 }
@@ -1647,29 +1641,29 @@ mod tests {
     }
 
     #[test]
-    fn the_merge_switch_round_trips_through_settings_get_and_set() {
-        let config = r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}, "stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "extra", "id": "x", "name": "X", "active": true, "address": "http://127.0.0.1:9/v1", "model": "m"}]}}"#;
-        let rig = Rig::new("merge", config);
-        assert_eq!(
-            rig.ask(&Request::SettingsGet)["settings"]["stt"]["merge"],
-            true,
-            "a config from before the switch keeps merging"
-        );
-        let set = rig.set(json!({"stt": {"merge": false}}));
-        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
-        assert!(!rig.fake.config().stt.merge);
-        assert_eq!(
-            rig.ask(&Request::SettingsGet)["settings"]["stt"]["merge"],
-            false
-        );
-        let set = rig.set(json!({"stt": {"merge": true}}));
-        assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
-        assert!(rig.fake.config().stt.merge);
-        assert_eq!(
-            rig.ask(&Request::SettingsGet)["settings"]["stt"]["merge"],
-            true
-        );
-        assert_eq!(rig.fake.saves.store.load().unwrap(), rig.fake.config());
+    fn extra_and_final_pass_flags_in_a_settings_change_leave_the_config_unchanged() {
+        let config = r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}, "stt": {"entries": [
+            {"kind": "on_device", "id": "d", "name": "D", "active": true},
+            {"kind": "realtime", "id": "x", "name": "X", "active": false, "address": "ws://127.0.0.1:9", "model": "m"}
+        ]}}"#;
+        let rig = Rig::new("old-extra-flags", config);
+        rig.fake.saves.store.write(&rig.fake.config()).unwrap();
+        let file = rig.fake.folder.join("desktop.json");
+        let saved = std::fs::read(&file).unwrap();
+        let before = rig.ask(&Request::SettingsGet)["settings"]["stt"]["entries"].clone();
+        for flag in ["extra", "final_pass"] {
+            let mut entries = before.clone();
+            entries[1][flag] = json!(true);
+            let set = rig.set(json!({"stt": {"entries": entries}}));
+            assert_eq!(set, json!({"ok": true, "changed": false}), "{flag}");
+            let after = rig.ask(&Request::SettingsGet)["settings"]["stt"]["entries"].clone();
+            assert_eq!(after, before, "{flag}");
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                saved,
+                "{flag}: the settings file is unchanged"
+            );
+        }
     }
 
     #[test]

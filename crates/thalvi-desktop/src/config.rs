@@ -267,33 +267,17 @@ fn build(
     if write_key == hold_key {
         return Err("The write key must differ from the dictate key.".to_owned());
     }
-    let requested_merge = raw.stt.merge;
     let (entries, phrases) = raw
         .stt
         .entries(raw.server)
         .map_err(|error: EntryError| error.to_string())?;
-    // A form from before the switch loads as an upgrade does: merge on exactly when an extra is on.
-    let merge = requested_merge.unwrap_or_else(|| entries.any_extra());
-    if merge
-        && entries.any_extra()
-        && raw
-            .writing
-            .as_ref()
-            .is_none_or(|writing| !writing.has_endpoint())
-    {
-        return Err(EntryError::ExtrasNeedWriting.to_string());
-    }
     Ok(DesktopConfig {
         wake: raw.wake,
         cues: raw.cues,
         ending_pause: raw.ending_pause,
         capture_limits: raw.capture_limits,
         endings: raw.endings,
-        stt: SttConfig {
-            entries,
-            merge,
-            phrases,
-        },
+        stt: SttConfig { entries, phrases },
         apps,
         scripts,
         overlay: raw.overlay,
@@ -494,11 +478,8 @@ fn nonempty(value: &str, label: &str) -> Result<String, String> {
 /// Speech-to-text settings.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SttConfig {
-    /// The speech servers: the live one dictation uses, and the extras that run on each capture.
+    /// The speech servers: the live one dictation uses.
     pub entries: Entries,
-    /// Whether the chat model merges the extras' texts with the live text before delivery; off, the
-    /// live text is delivered at once and the extras are only recorded.
-    pub merge: bool,
     /// Spellings recognition favours, on this computer and on a recognizer that boosts phrases.
     pub phrases: WordList,
 }
@@ -507,13 +488,11 @@ impl Serialize for SttConfig {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         struct FileStt<'a> {
-            merge: bool,
             entries: &'a Entries,
             #[serde(skip_serializing_if = "WordList::is_empty")]
             phrases: &'a WordList,
         }
         FileStt {
-            merge: self.merge,
             entries: &self.entries,
             phrases: &self.phrases,
         }
@@ -726,9 +705,8 @@ mod tests {
     use super::*;
     use crate::capture::{CaptureRoute, Ending};
     use crate::cues::Cue;
-    use crate::entries::{ExtraEntry, LiveKind};
+    use crate::entries::LiveKind;
     use crate::models::{CatalogHead, CatalogSpeech};
-    use crate::secondary::{SecondaryApi, SecondaryStt};
     use crate::transducer::SpeechChoice;
     use crate::wake::HeadModel;
     use crate::whisper::WhisperBackend;
@@ -746,7 +724,6 @@ mod tests {
             config.stt.entries.active_live().kind,
             LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms))
         );
-        assert_eq!(config.stt.entries.extras(), []);
         assert_eq!(config.wake, WakeConfig::default());
         assert_eq!(config.cues, Cues::default());
         assert_eq!(config.endings, Endings::default());
@@ -1084,197 +1061,26 @@ mod tests {
     }
 
     #[test]
-    fn extras_are_off_by_default_and_round_trip_off_on_and_default() {
-        let writing = r#""writing": {"url": "http://c/v1", "model": "c"}"#;
-        let endpoint =
-            r#""url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k", "api": "meta""#;
-        for (json, expected) in [
-            ("{}".to_owned(), None),
-            (
-                format!(r#"{{{writing}, "stt": {{"secondary": {{{endpoint}}}}}}}"#),
-                Some(false),
-            ),
-            (
-                format!(
-                    r#"{{{writing}, "stt": {{"secondary": {{"enabled": false, {endpoint}}}}}}}"#
-                ),
-                Some(false),
-            ),
-            (
-                format!(
-                    r#"{{{writing}, "stt": {{"secondary": {{"enabled": true, {endpoint}}}}}}}"#
-                ),
-                Some(true),
-            ),
+    fn old_merge_and_secondary_settings_load_ignored() {
+        for json in [
+            r#"{"stt": {"merge": true}}"#,
+            r#"{"stt": {"merge": false}}"#,
+            r#"{"stt": {"secondary": {"enabled": true, "url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k", "api": "meta"}}}"#,
+            r#"{"stt": {"secondary": {"enabled": true, "url": "", "model": ""}}}"#,
+            r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}], "merge": true}}"#,
         ] {
-            let config = parse(&json).unwrap();
+            let config = parse(json).unwrap_or_else(|error| panic!("{json}: {error}"));
+            assert_eq!(config.stt.entries.live().len(), 1, "{json}");
+            let written = serde_json::to_value(&config).unwrap();
+            assert!(written["stt"].get("merge").is_none(), "{json}");
+            assert!(!written.to_string().contains("127.0.0.1:9"), "{json}");
+            assert!(!written.to_string().contains("api_key"), "{json}");
             assert_eq!(
-                config.stt.entries.extras().first().map(ExtraEntry::ticked),
-                expected,
-                "{json}"
+                parse(&written.to_string()).unwrap().stt,
+                config.stt,
+                "{json}: round trip"
             );
-            let written = serde_json::to_string(&config).unwrap();
-            let again = parse(&written).unwrap();
-            assert_eq!(again.stt.entries, config.stt.entries, "{written}");
-            if expected == Some(false) {
-                assert!(written.contains(r#""active":false"#), "{written}");
-                assert!(written.contains("http://127.0.0.1:9/v1"), "{written}");
-                assert!(written.contains(r#""api_key":"k""#), "{written}");
-            }
-            if expected == Some(true) {
-                assert!(written.contains(r#""active":true"#), "{written}");
-            }
         }
-        let off_blank = parse(
-            r#"{"stt": {"secondary": {"enabled": false, "url": "", "model": "", "api_key": "k"}}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            off_blank
-                .stt
-                .entries
-                .extras()
-                .first()
-                .map(ExtraEntry::ticked),
-            Some(false)
-        );
-        let on_blank =
-            parse(r#"{"stt": {"secondary": {"enabled": true, "url": "", "model": ""}}}"#)
-                .unwrap_err()
-                .to_string();
-        assert!(on_blank.contains("stt.secondary.url"), "{on_blank}");
-        for (json, expected) in [
-            (
-                r#"{"stt": {"secondary": {"enabled": true, "url": "ftp://x", "model": "m"}}}"#,
-                "stt.secondary.url must be an http or https URL",
-            ),
-            (
-                r#"{"stt": {"secondary": {"enabled": true, "url": "http://x", "model": " "}}}"#,
-                "stt.secondary.model must be nonempty",
-            ),
-        ] {
-            let error = parse(json).unwrap_err().to_string();
-            assert!(error.contains(expected), "{json}: {error}");
-        }
-    }
-
-    #[test]
-    fn an_extra_that_is_on_needs_the_writing_endpoint_and_old_second_passes_load_as_extras() {
-        let writing = r#""writing": {"url": "http://c/v1", "model": "c"}"#;
-        let extra = |kind: &str, on: bool| {
-            format!(
-                r#""stt": {{"entries": [{{"kind": "on_device", "id": "d", "name": "D", "active": true}}, {{"kind": "{kind}", "id": "x", "name": "X", "active": {on}, "address": "http://x/v1", "model": "m"}}]}}"#
-            )
-        };
-        let refused = "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off.";
-        for (name, json, error) in [
-            (
-                "on without writing",
-                format!("{{{}}}", extra("extra", true)),
-                Some(refused),
-            ),
-            (
-                "on with null writing",
-                format!(r#"{{"writing": null, {}}}"#, extra("extra", true)),
-                Some(refused),
-            ),
-            (
-                "an old second pass that is on",
-                format!("{{{}}}", extra("second_pass", true)),
-                Some(refused),
-            ),
-            (
-                "an old second-pass setting that is on",
-                r#"{"stt": {"secondary": {"enabled": true, "url": "http://x/v1", "model": "m"}}}"#
-                    .to_owned(),
-                Some(refused),
-            ),
-            (
-                "off without writing",
-                format!("{{{}}}", extra("extra", false)),
-                None,
-            ),
-            (
-                "on with writing",
-                format!("{{{writing}, {}}}", extra("extra", true)),
-                None,
-            ),
-            (
-                "an old second pass with writing",
-                format!("{{{writing}, {}}}", extra("second_pass", true)),
-                None,
-            ),
-        ] {
-            let result = parse(&json);
-            if let Some(error) = error {
-                assert_eq!(
-                    result.unwrap_err().to_string(),
-                    format!("The desktop config is not valid: {error}"),
-                    "{name}"
-                );
-                continue;
-            }
-            let config = result.unwrap();
-            assert_eq!(config.stt.entries.extras().len(), 1, "{name}");
-            let written = serde_json::to_value(&config).unwrap();
-            assert_eq!(written["stt"]["entries"][1]["kind"], "extra", "{name}");
-        }
-    }
-
-    #[test]
-    fn the_merge_switch_keeps_merging_for_an_upgrade_and_is_off_for_a_new_install() {
-        let writing = r#""writing": {"url": "http://c/v1", "model": "c"}"#;
-        let entries = |on: bool| {
-            format!(
-                r#""entries": [{{"kind": "on_device", "id": "d", "name": "D", "active": true}}, {{"kind": "extra", "id": "x", "name": "X", "active": {on}, "address": "http://x/v1", "model": "m"}}]"#
-            )
-        };
-        let refused = "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off.";
-        for (name, json, merge) in [
-            ("a new install", "{}".to_owned(), false),
-            (
-                "an upgrade with an extra on",
-                format!("{{{writing}, \"stt\": {{{}}}}}", entries(true)),
-                true,
-            ),
-            (
-                "an upgrade with every extra off",
-                format!("{{{writing}, \"stt\": {{{}}}}}", entries(false)),
-                false,
-            ),
-            (
-                "merge off with an extra on and no endpoint",
-                format!(r#"{{"stt": {{"merge": false, {}}}}}"#, entries(true)),
-                false,
-            ),
-            (
-                "merge on with no extra and no endpoint",
-                format!(r#"{{"stt": {{"merge": true, {}}}}}"#, entries(false)),
-                true,
-            ),
-            (
-                "merge on with an extra on and an endpoint",
-                format!(
-                    r#"{{{writing}, "stt": {{"merge": true, {}}}}}"#,
-                    entries(true)
-                ),
-                true,
-            ),
-        ] {
-            let config = parse(&json).unwrap_or_else(|error| panic!("{name}: {error}"));
-            assert_eq!(config.stt.merge, merge, "{name}");
-            let written = serde_json::to_value(&config).unwrap();
-            assert_eq!(written["stt"]["merge"], merge, "{name}");
-            let again = parse(&written.to_string()).unwrap();
-            assert_eq!(again.stt, config.stt, "{name}: round trip");
-        }
-        let error = parse(&format!(
-            r#"{{"stt": {{"merge": true, {}}}}}"#,
-            entries(true)
-        ))
-        .unwrap_err()
-        .to_string();
-        assert_eq!(error, format!("The desktop config is not valid: {refused}"));
     }
 
     #[test]
@@ -1363,24 +1169,6 @@ mod tests {
         assert_eq!(
             config.stt.entries.active_live().kind,
             LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0]))
-        );
-        assert_eq!(
-            config
-                .stt
-                .entries
-                .extras()
-                .first()
-                .map(|entry| &entry.settings),
-            Some(
-                &SecondaryStt::new(
-                    "http://127.0.0.1:9/v1",
-                    "m",
-                    String::new(),
-                    SecondaryApi::Meta,
-                    false
-                )
-                .unwrap()
-            )
         );
         assert_eq!(
             config.wake.capture().model,
@@ -1626,11 +1414,6 @@ mod tests {
             (
                 r#"{"stt": {"primary": {}}}"#.to_owned(),
                 "unknown field `primary`",
-            ),
-            (
-                r#"{"stt": {"secondary": {"url": "http://x", "model": "m", "api": "azure"}}}"#
-                    .to_owned(),
-                "unknown variant `azure`",
             ),
             (
                 r#"{"metrics": "m.jsonl"}"#.to_owned(),

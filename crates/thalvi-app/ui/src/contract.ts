@@ -35,8 +35,6 @@ export type Status =
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "transcribing"; target: string | null; route: Route; cancellable: boolean }
   | { state: "finishing"; target: string | null; route: Route; cancellable: boolean } // a released hold whose recognizer is catching up; cancellable
-  | { state: "finalPass"; target: string | null; route: Route }
-  | { state: "merging"; target: string | null; route: Route } // extra recognizers' texts are being merged with the live text; cancellable
   | { state: "cleaningUp"; target: string | null } // a dictation is being cleaned before it is pasted; cancellable
   | { state: "done"; target: string | null; route: Route; notice: string }
   | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind; offer: LighterModel | null } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report; offer: a lighter on-device model to switch to after a cant-keep-up failure
@@ -114,16 +112,11 @@ interface EntryBase {
   /** Never shown; the key saved for an entry belongs to its id. */
   id: string;
   name: string;
-  /** The one live entry in use; for an extra recognizer, whether it is switched on. */
+  /** The one live entry in use. */
   active: boolean;
-  /** Only the selected non-live entry carries this flag. */
-  final_pass?: true;
 }
 
-interface LiveBase extends EntryBase {
-  /** Also transcribes each capture as an extra recognizer while not the active entry; absent means off, and the active entry never has it. */
-  extra?: boolean;
-}
+type LiveBase = EntryBase;
 
 /** A recognizer the desktop connects to itself, speaking Meta's realtime ASR protocol. */
 export interface RealtimeEntry extends LiveBase {
@@ -151,16 +144,6 @@ export interface OpenAiEntry extends LiveBase {
   request: OpenAiRequest;
   /** A two-letter ISO 639-1 code, or empty to let the server detect it. */
   language: string;
-  api_key?: string;
-  has_key?: boolean;
-}
-
-/** An OpenAI or Meta transcription API that transcribes each accepted capture again; the chat model merges its text with the live text. */
-export interface ExtraEntry extends EntryBase {
-  kind: "extra";
-  address: string;
-  model: string;
-  api: SecondaryApi;
   api_key?: string;
   has_key?: boolean;
 }
@@ -213,7 +196,7 @@ export interface WritingSettings {
   numbers_as_digits?: boolean;
 }
 export type LiveEntry = RealtimeEntry | OnDeviceEntry | OpenAiEntry;
-export type SpeechEntry = LiveEntry | ExtraEntry;
+export type SpeechEntry = LiveEntry;
 
 export interface AppSettings {
   classes: string[];
@@ -237,10 +220,8 @@ export interface Settings {
   capture_limits: { idle: number; max: number };
   endings: Record<string, Ending>;
   stt: {
-    /** Live entries (exactly one active) and extra recognizers, whose order carries no meaning. */
+    /** Live entries, exactly one active. */
     entries: SpeechEntry[];
-    /** Whether the chat model merges the extras' texts with the live text; off, delivery waits for no extra and each is only recorded. */
-    merge: boolean;
     /** Spellings recognition favours; absent when empty. */
     phrases?: string[];
   };

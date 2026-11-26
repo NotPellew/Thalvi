@@ -157,25 +157,21 @@ def main():
             controls = [
                 ('removed-completion-guard', 'NoDeliveryAfterStop', ('DropCompletionGuard',), None),
                 ('forgot-earlier-stop', 'NoDeliveryAfterStop', ('ForgetEarlierStop',), None),
-                ('leaked-extra-session', 'ExtrasNeverLeftOpen', ('LeakExtraOnCancel',), None),
-                ('cancel-keeps-extra', 'ReleasedWhenCancelled', ('LeakExtraOnCancel',), None),
-                ('late-without-merge', 'LateOnlyAfterMerge', (),
-                 ('THEN "released" ELSE x', 'THEN "late" ELSE x')),
                 ('accept-before-load', 'AcceptedOnlyAfterLoad', (),
-                 ('phase = "active" /\\ ~starting /\\ ~cancelPending /\\ (~cleaning \\/ secondary \\/ finalMode # \"off\")',
-                  'phase = "active" /\\ ~cancelPending /\\ (~cleaning \\/ secondary \\/ finalMode # \"off\")')),
+                 ('phase = "active" /\\ ~starting /\\ ~cancelPending /\\ ~cleaning /\\ phase\' = "ending"',
+                  'phase = "active" /\\ ~cancelPending /\\ ~cleaning /\\ phase\' = "ending"')),
             ]
             for label, invariant, flags, mutation in controls:
                 caught = run(java, jar, evidence, label, flags=flags,
                              invariant=invariant, mutation=mutation)
                 if caught != invariant:
                     raise RuntimeError(f'{label} should break {invariant}, got {caught or "a pass"}')
-            print('SELF-TEST PASS: faithful model passed; all six controls broke their named invariant.')
+            print('SELF-TEST PASS: faithful model passed; all three controls broke their named invariant.')
             return 0
         violation = run(java, jar, evidence, 'faithful')
         keep = violation
         print(f'FAIL: {violation} is broken; replay the trace using SKILL.md.' if violation
-              else 'PASS: all five invariants hold in this bounded model; see SKILL.md for scope.')
+              else 'PASS: both invariants hold in this bounded model; see SKILL.md for scope.')
         return 1 if violation else 0
     finally:
         if keep:

@@ -52,12 +52,10 @@ const SETTINGS: Settings = {
     "never mind": "cancel",
   },
   stt: {
-    merge: true,
     entries: [
       { kind: "realtime", id: "realtime", name: "Realtime transcription (WebSocket)", active: false, address: "wss://asr.example", model: "nemotron", has_key: true },
       { kind: "open_ai", id: "gateway", name: "LLM Gateway", active: false, address: "https://gw.example/v1", model: "whisper-1", request: "transcriptions", language: "", has_key: true },
       { kind: "on_device", id: "on-device", name: "On this computer", active: true, model: "nemotron_160ms" },
-      { kind: "extra", id: "extra", name: "Extra recognizer", active: false, address: "https://extra.example/v1", model: "whisper-1", api: "openai" },
     ],
   },
   apps: { slack: { classes: ["Slack"], executables: ["slack.exe"], input_keys: [] } },
@@ -106,11 +104,6 @@ function script(): Status[] {
     { state: "working", target: "Firefox", route: "task", cancellable: true },
     { state: "done", target: "Firefox", route: "task", notice: "Opened the calendar" },
   ];
-}
-
-/** Whether the writing settings name an endpoint; numbers as digits alone is not one. */
-function hasWritingEndpoint(writing: Settings["writing"]): boolean {
-  return writing !== null && (writing.local === true || ((writing.url ?? "").trim() !== "" && (writing.model ?? "").trim() !== ""));
 }
 
 export function fakeBackend(params: URLSearchParams): Backend {
@@ -254,27 +247,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
     saveSettings: (patch) => {
       // A setting the patch removed is back at its default.
       const next: Settings = Object.assign({ writing: null, microphone: null }, applyPatch(saved, patch));
-      if (next.stt.entries.filter((entry) => entry.kind !== "extra" && entry.active).length !== 1) {
+      if (next.stt.entries.filter((entry) => entry.active).length !== 1) {
         return Promise.reject(new Error("The desktop config is not valid: exactly one live speech server must be active."));
-      }
-      const activeExtra = next.stt.entries.find((entry) => entry.kind !== "extra" && entry.active && entry.extra === true);
-      if (activeExtra) {
-        return Promise.reject(new Error(`Speech server "${activeExtra.name}" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first.`));
-      }
-      const finals = next.stt.entries.filter((entry) => entry.final_pass === true);
-      if (finals.length > 1) return Promise.reject(new Error("Choose only one speech server for the final pass."));
-      const activeFinal = finals.find((entry) => entry.kind !== "extra" && entry.active);
-      if (activeFinal) {
-        return Promise.reject(new Error(`Speech server "${activeFinal.name}" is the one in use, so it cannot also be the final pass.`));
-      }
-      if (next.stt.merge && !hasWritingEndpoint(next.writing) && next.stt.entries.some((entry) => (entry.kind === "extra" ? entry.active : entry.extra === true))) {
-        return Promise.reject(
-          new Error(
-            !hasWritingEndpoint(saved.writing)
-              ? "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."
-              : "Switch off the extra recognizers before removing the writing model.",
-          ),
-        );
       }
       saved = structuredClone(next);
       emitAudio({ selected: next.microphone, active: audioState.paused ? null : activeFor(next.microphone), paused: audioState.paused, problem: null });

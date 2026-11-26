@@ -4,8 +4,6 @@
 //! wake detectors never cross a thread and every timer follows the runtime's clock.
 
 pub mod fakes;
-mod final_pass;
-mod streaming;
 mod submit_preview;
 
 use std::collections::VecDeque;
@@ -13,14 +11,13 @@ use std::future::{Future, pending};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::Duration;
 
 use futures_util::future::{FutureExt, LocalBoxFuture};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinSet};
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::audio::{AudioError, Frames, InputGate};
@@ -31,28 +28,23 @@ use crate::capture::{
 use crate::claim::{Effect, Resolution, Watch};
 use crate::config::{DesktopConfig, Script};
 use crate::cues::{Cue, CueEngine, CueError, CueTiming, Cues, Mic};
-use crate::entries::{ExtraEntry, LiveEntry, LiveKind};
+use crate::entries::LiveKind;
 use crate::frame::{FRAME_SAMPLES, Frame, Order, Queued};
 use crate::hold::{Cutoff, HoldKind, KeyState, Press, Presses, Refusal};
-use crate::merge;
 use crate::metrics::{Dictation, Event, Metrics, RecordKinds, Recorder};
 use crate::models::CatalogSpeech;
 use crate::numbers;
-use crate::phrases::WordList;
 use crate::recognizer::{
     Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
 };
 use crate::report::UserError;
-use crate::secondary::{self, Language, SecondaryApi, SecondaryError};
+use crate::secondary::Language;
 use crate::spotter::KeywordSpotter;
 use crate::transducer::SpeechChoice;
 use crate::vad::VadDetector;
 use crate::wake::{WakeEngine, WakeError, WakeEvent, WakeFrame};
 use crate::wake_stats::{Latency, LatencySummary, NearMisses};
 use crate::writing::{self, Destination, Endpoint, Piece, Writing, WritingError};
-use final_pass::{FinalPass, Record as FinalPassRecord};
-pub use streaming::StreamingExtra;
-use streaming::Streams;
 use submit_preview::Presentation;
 pub use submit_preview::{PreviewError, SubmitPreview};
 
@@ -98,6 +90,10 @@ const LEVEL_SPAN: Duration = Duration::from_secs(2);
 
 /// Frames of microphone audio kept for the wake clip, 2 s.
 const WAKE_CLIP_FRAMES: usize = 25;
+
+/// Pre-roll frames kept from `wake_clip` on an immediate hold press (2 × 80 ms = 160 ms),
+/// so starting to speak as the key goes down does not clip the first consonant.
+const HOLD_PREROLL_FRAMES: usize = 2;
 
 /// The sample peak from which a wake level window counts as activity.
 const ACTIVITY_PEAK: u16 = 1_000;
@@ -251,13 +247,6 @@ pub enum EngineState {
         text: String,
         pause: Duration,
         preview: SubmitPreview,
-    },
-    /// The extra recognizers' texts are being merged with the live text, as far as they arrive in time.
-    Merging {
-        route: CaptureRoute,
-    },
-    FinalPass {
-        route: CaptureRoute,
     },
     TranscribingLive {
         route: CaptureRoute,
@@ -504,8 +493,6 @@ pub struct Parts<R, W, C> {
     pub spotter: Option<Box<dyn KeywordSpotter>>,
     /// Why there is no spotter, for the first capture to tell the user once.
     pub spotter_off: Option<String>,
-    /// Recognizers for the enabled streaming extras, or for a streaming final pass.
-    pub extras: Vec<StreamingExtra<R>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -522,12 +509,6 @@ struct NumberRules {
     language: Option<Language>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SubmitConfirmation {
-    Live,
-    Settled,
-}
-
 /// Wake listening and capture, owning everything they share.
 pub struct Engine<R, W, C> {
     recognizer: R,
@@ -541,28 +522,12 @@ pub struct Engine<R, W, C> {
     pauses: EndingPauses,
     scripts: Vec<Script>,
     limits: CaptureLimits,
-    /// The extras that are switched on, and the chat endpoint that merges their texts when merge is on.
-    extras: Option<Extras>,
-    final_pass: Option<Arc<FinalPass<R>>>,
-    final_tasks: JoinSet<()>,
-    final_record: Option<FinalPassRecord>,
-    final_dictation: Option<Dictation>,
-    streaming: Vec<StreamingExtra<R>>,
-    /// The streaming extras of the capture in progress.
-    streams: Streams,
-    /// Extra requests the delivery did not wait for, one set per capture. Each runs as its own
-    /// task, so its latency is its own, and is recorded when a loop of the engine collects it.
-    /// Dropping the engine aborts them.
-    recorded_only: Vec<JoinSet<Answer>>,
     writing: Option<Writing>,
     /// How a delivered paste, submit or write writes its number words.
     number_rules: NumberRules,
-    /// The language of the capture's words: the entry hint until the recognizer or final pass
-    /// reports the language it detected.
+    /// The language of the capture's words: the entry hint until the recognizer reports the
+    /// language it detected.
     language: Option<Language>,
-    /// Whether a Submit is settled after the merge or final pass, so its own confirmation comes
-    /// once that text exists.
-    submit_confirmation: SubmitConfirmation,
     chat: Option<crate::chat::Chat>,
     speech: SpeechSource,
     /// The live recognizer's bearing on an ending spoken in another language.
@@ -600,8 +565,6 @@ pub struct Engine<R, W, C> {
     held_for: Option<Duration>,
     /// The presses of the dictation key that started nothing, until the caller takes them.
     ignored: Vec<Refusal>,
-    /// What the last merge told the user, until the caller takes it to show beside the delivery.
-    merge_note: Option<String>,
     /// What the last dictation cleanup told the user, until the caller takes it to show beside the paste.
     cleanup_note: Option<String>,
     /// That the end of the last hold may be missing, until the caller takes it to show beside the
@@ -893,7 +856,7 @@ enum Done {
     /// The user said "never mind".
     NeverMind(Option<String>),
     Accepted(CaptureRequest),
-    /// A submit must be merged and cleaned before its confirmation is shown.
+    /// A submit must be cleaned before its confirmation is shown.
     Prepare(CaptureRequest),
     Failed(CaptureError),
 }
@@ -920,207 +883,6 @@ enum Step {
     Preview(Presentation),
     /// A live Submit preview was not reported shown in time.
     PreviewTimeout,
-    /// An extra that was not waited for finished.
-    Recorded(Answer),
-}
-
-/// What an extra recognizer is called in notices, recordings and metrics.
-#[derive(Clone)]
-struct Extra {
-    name: String,
-    model: String,
-    api: &'static str,
-}
-
-impl Extra {
-    fn upload(entry: &ExtraEntry) -> Self {
-        Self {
-            name: entry.name.clone(),
-            model: entry.settings.model().to_owned(),
-            api: match entry.settings.api() {
-                SecondaryApi::OpenAi => "openai",
-                SecondaryApi::Meta => "meta",
-            },
-        }
-    }
-
-    fn streaming(entry: &LiveEntry) -> Self {
-        let (model, api) = match &entry.kind {
-            LiveKind::Realtime(realtime) => (realtime.model().to_owned(), "realtime"),
-            LiveKind::OpenAi(live) => (live.settings.model().to_owned(), "open_ai_live"),
-            LiveKind::OnDevice(choice) => (choice.label(), "on_device"),
-        };
-        Self {
-            name: entry.name.clone(),
-            model,
-            api,
-        }
-    }
-}
-
-/// The extras that are switched on, and the chat endpoint that merges their texts when merge is on.
-#[derive(Clone)]
-struct Extras {
-    /// The extras that transcribe the finished capture.
-    uploads: Vec<ExtraEntry>,
-    /// Every extra, the uploads first and then the streaming ones, in the order of their slots.
-    all: Vec<Extra>,
-    /// The endpoint the merge asks; `None` while merge is off, which records the extras instead.
-    merge: Option<Writing>,
-    /// The word list every request into this set carries.
-    words: WordList,
-}
-
-impl Extras {
-    /// `None` unless an extra is on. A merge with no endpoint cannot be built: the config refuses
-    /// merge on with an extra on and no endpoint, and an endpoint-less writing setting is dropped.
-    fn of<'a>(
-        config: &DesktopConfig,
-        streaming: impl Iterator<Item = &'a LiveEntry>,
-    ) -> Option<Self> {
-        let uploads: Vec<_> = config.stt.entries.ticked().cloned().collect();
-        let extras: Vec<_> = uploads
-            .iter()
-            .map(Extra::upload)
-            .chain(streaming.map(Extra::streaming))
-            .collect();
-        let merge = config
-            .writing
-            .clone()
-            .filter(|writing| config.stt.merge && Writing::has_endpoint(writing));
-        (!extras.is_empty()).then_some(Self {
-            uploads,
-            all: extras,
-            merge,
-            words: config.stt.phrases.clone(),
-        })
-    }
-}
-
-/// Why a capture was delivered as the live text and not merged.
-enum Skipped {
-    /// Fewer than two texts were left; the string says why each extra gave none.
-    TooFew(String),
-    Timeout,
-    Failed(WritingError),
-    Unfaithful,
-}
-
-impl Skipped {
-    fn outcome(&self) -> &'static str {
-        match self {
-            Self::TooFew(_) => "too_few",
-            Self::Timeout => "timeout",
-            Self::Failed(_) => "error",
-            Self::Unfaithful => "unfaithful",
-        }
-    }
-
-    fn reason(&self) -> String {
-        match self {
-            Self::TooFew(left_out) => format!("fewer than two texts arrived: {left_out}"),
-            Self::Timeout => "the chat model took too long".to_owned(),
-            Self::Failed(WritingError::Unreachable) => {
-                "the chat model could not be reached".to_owned()
-            }
-            Self::Failed(WritingError::Status(code)) => {
-                format!("the chat model failed with status {code}")
-            }
-            Self::Failed(WritingError::BadResponse) => {
-                "the chat model sent an answer Thalvi could not read".to_owned()
-            }
-            Self::Failed(_) => "the chat model returned no text".to_owned(),
-            Self::Unfaithful => {
-                "the chat model used a word none of the recognizers heard".to_owned()
-            }
-        }
-    }
-}
-
-/// How asking the chat model to merge ended.
-enum Asked {
-    Merged {
-        text: String,
-        chat: Duration,
-    },
-    Skipped {
-        why: Skipped,
-        chat: Option<Duration>,
-    },
-    Cancelled,
-}
-
-/// Why an extra gave no text.
-#[derive(Clone, Copy)]
-enum Unheard {
-    Timeout,
-    Failed,
-    /// The capture was cancelled before the extra answered.
-    Cancelled,
-}
-
-impl From<SecondaryError> for Unheard {
-    fn from(error: SecondaryError) -> Self {
-        match error {
-            SecondaryError::Timeout => Self::Timeout,
-            _ => Self::Failed,
-        }
-    }
-}
-
-/// One entry's reply to a capture, with what is needed to judge and record it when it arrives.
-struct Answer {
-    /// The entry's place among the switched-on ones.
-    index: usize,
-    extra: Extra,
-    dictation: Dictation,
-    route: CaptureRoute,
-    has_endings: bool,
-    heard: Result<String, Unheard>,
-    /// For an upload, the request's time; for a streaming extra, from the capture's end to its text.
-    took: Duration,
-}
-
-/// An [`Answer`] with its outcome, and the text it gives when it agrees with the user's ending.
-struct Judged {
-    answer: Answer,
-    outcome: &'static str,
-    agreed: Option<String>,
-}
-
-/// The answer of a finished request; a request only ends without one if it panicked, and that
-/// panic is the engine's too.
-fn settled(joined: Result<Answer, JoinError>) -> Option<Answer> {
-    match joined {
-        Ok(answer) => Some(answer),
-        Err(error) => match error.try_into_panic() {
-            Ok(panic) => std::panic::resume_unwind(panic),
-            Err(_) => None,
-        },
-    }
-}
-
-/// The next answer of an extra the merge did not wait for; never ready while none is running.
-async fn next_recorded(sets: &mut Vec<JoinSet<Answer>>) -> Answer {
-    std::future::poll_fn(|cx| {
-        for at in 0..sets.len() {
-            while let Some(set) = sets.get_mut(at) {
-                match set.poll_join_next(cx) {
-                    Poll::Ready(None) => {
-                        sets.swap_remove(at);
-                    }
-                    Poll::Ready(Some(joined)) => {
-                        if let Some(answer) = settled(joined) {
-                            return Poll::Ready(answer);
-                        }
-                    }
-                    Poll::Pending => break,
-                }
-            }
-        }
-        Poll::Pending
-    })
-    .await
 }
 
 /// Whether any of the frames heard after the start cue holds speech.
@@ -1296,12 +1058,6 @@ where
             state: state_rx,
             level: level_rx,
         };
-        let extras = if config.stt.entries.final_pass().is_none() {
-            Extras::of(config, parts.extras.iter().map(|extra| &extra.entry))
-        } else {
-            None
-        };
-        let final_pass = FinalPass::of(config, &parts.extras).map(Arc::new);
         let engine = Self {
             recognizer: parts.recognizer,
             wake: parts.wake,
@@ -1314,14 +1070,6 @@ where
             pauses: config.ending_pause,
             scripts: config.scripts.clone(),
             limits: config.capture_limits,
-            extras,
-            final_pass,
-            final_tasks: JoinSet::new(),
-            final_record: None,
-            final_dictation: None,
-            streaming: parts.extras,
-            streams: Streams::default(),
-            recorded_only: Vec::new(),
             writing: config.writing.clone(),
             number_rules: NumberRules {
                 as_digits: config
@@ -1332,7 +1080,6 @@ where
                 language: config.stt.entries.active_live().language(),
             },
             language: config.stt.entries.active_live().language(),
-            submit_confirmation: SubmitConfirmation::Live,
             chat: parts.chat,
             speech: config.speech_source(),
             ending_listener: if matches!(
@@ -1366,7 +1113,6 @@ where
             hold_end: None,
             held_for: None,
             ignored: Vec::new(),
-            merge_note: None,
             cleanup_note: None,
             release_note: None,
             cleanup_record: None,
@@ -1404,30 +1150,6 @@ where
         self.wake_words = on;
     }
 
-    /// What the merge of the capture that just ended told the user, if it did: the delivery that
-    /// follows would otherwise replace the notice on the overlay.
-    pub fn take_merge_note(&mut self) -> Option<String> {
-        self.merge_note.take()
-    }
-
-    /// Records the final pass once delivery has settled and returns its fallback notice, if any.
-    pub fn settle_final_pass(
-        &mut self,
-        delivered: Option<CaptureRoute>,
-        cancelled: bool,
-    ) -> Option<String> {
-        let record = self.final_record.take()?;
-        let dictation = self.final_dictation.take()?;
-        record.emit(
-            &self.recorder,
-            self.final_pass.as_ref()?.label(),
-            &dictation,
-            delivered,
-            cancelled,
-            self.speech.name(),
-        )
-    }
-
     /// What the cleanup of the capture that just ended told the user, if it fell back to the raw
     /// words: the delivery that follows would otherwise replace the notice on the overlay.
     pub fn take_cleanup_note(&mut self) -> Option<String> {
@@ -1451,12 +1173,9 @@ where
         std::mem::take(&mut self.ignored)
     }
 
-    /// Writes the recordings still queued and abandons extras still running; call once at
-    /// shutdown.
+    /// Writes the recordings still queued; call once at shutdown.
     pub async fn finish(mut self) {
         while self.ending_cues.join_next().await.is_some() {}
-        drop(self.recorded_only);
-        drop(self.final_tasks);
         self.recorder.finish().await;
     }
 
@@ -1546,10 +1265,6 @@ where
                     }
                     continue;
                 }
-                answer = next_recorded(&mut self.recorded_only) => {
-                    self.record_late(answer);
-                    continue;
-                }
                 frame = frames.next() => frame,
             };
             let queued = match frame {
@@ -1612,13 +1327,16 @@ where
     /// Starts the capture, leaving the microphone open: the user talks from the press on.
     fn begin_hold(&mut self, press: Press) {
         let at = Instant::now();
-        let heard = press.since.map_or_else(Vec::new, |since| {
+        let heard = if let Some(since) = press.since {
             self.wake_clip
                 .iter()
                 .filter(|queued| queued.order >= since)
                 .copied()
                 .collect()
-        });
+        } else {
+            let skip = self.wake_clip.len().saturating_sub(HOLD_PREROLL_FRAMES);
+            self.wake_clip.iter().skip(skip).copied().collect()
+        };
         self.held = Some(Held {
             press: press.number,
             kind: press.kind,
@@ -1788,14 +1506,6 @@ where
                 }),
             );
         }
-        self.final_dictation = self.final_pass.as_ref().map(|_| woke.dictation.clone());
-        self.final_record = None;
-        self.streams = self
-            .extras
-            .as_ref()
-            .map_or_else(Streams::default, |extras| {
-                Streams::start(&self.streaming, extras.uploads.len(), &woke.dictation)
-            });
         let outcome = match self.start(frames, &woke, held.as_ref()).await {
             Ok((mut live, backlog, released)) => {
                 let (done, decided) = self
@@ -1806,8 +1516,6 @@ where
             }
             Err((done, decided)) => self.conclude(done, decided, None, &woke.dictation).await,
         };
-        self.skip_unfinished_final_pass(&outcome);
-        self.drop_streams();
         let pressed = u64::from(self.key.take().is_some()) + self.key.take_lost();
         if pressed > 0 {
             self.ignore(Refusal::Capturing, pressed);
@@ -1869,16 +1577,6 @@ where
             return;
         }
         self.set_state(match live.text.pending() {
-            Some(pending)
-                if self.submit_confirmation == SubmitConfirmation::Settled
-                    && pending.route == CaptureRoute::Submit =>
-            {
-                EngineState::Capturing {
-                    committed: pending.text.clone(),
-                    partial: live.partial.clone(),
-                    notice: live.notice.clone(),
-                }
-            }
             Some(pending) => EngineState::PendingEnding {
                 route: pending.route,
                 text: pending.text.clone(),
@@ -2072,7 +1770,6 @@ where
             return Err((Done::Failed(self.not_ready()), decided));
         };
         self.language = self.number_rules.language;
-        self.submit_confirmation = SubmitConfirmation::Live;
         let buffers_audio = session.buffers_audio();
         let live = Live {
             session,
@@ -2103,15 +1800,9 @@ where
         Ok((live, backlog, released))
     }
 
-    /// Whether the frames sent are kept: for an upload extra, the recordings or a buffering recognizer.
+    /// Whether the frames sent are kept: for the recordings or a buffering recognizer.
     fn keeps_sent(&self, buffers_audio: bool) -> bool {
-        self.final_pass.is_some()
-            || self
-                .extras
-                .as_ref()
-                .is_some_and(|extras| !extras.uploads.is_empty())
-            || self.recorder.kinds().audio
-            || buffers_audio
+        self.recorder.kinds().audio || buffers_audio
     }
 
     /// Sends frames buffered while connecting and any hold release that happened before ready.
@@ -2131,7 +1822,6 @@ where
             self.held_for = Some(at.duration_since(held.at));
             live.session.hold_released();
             if live.session.buffers_audio() {
-                self.streams.send(&RELEASE_SILENCE);
                 if let Err(error) = live.session.finish_audio().await {
                     return Some(Done::Failed(error.into()));
                 }
@@ -2139,7 +1829,9 @@ where
                     route: held.route(),
                 });
             } else {
-                if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                if live.session.needs_release_silence()
+                    && let Err(stop) = self.feed(live, &RELEASE_SILENCE).await
+                {
                     return Some(stop.into());
                 }
                 live.session.input_ended();
@@ -2210,7 +1902,6 @@ where
                 } => Step::Preview(preview),
                 event = live.session.next_event() => Step::Event(event),
                 frame = frames.next() => Step::Frame(frame),
-                answer = next_recorded(&mut self.recorded_only) => Step::Recorded(answer),
                 Some(end) = live.cues.next() => Step::Cue(end),
                 () = until(quiet_at) => Step::Quiet,
                 () = until(preview_deadline) => Step::PreviewTimeout,
@@ -2231,10 +1922,6 @@ where
                     live.last_audio = Instant::now();
                     self.cue_metric(Event::Cue, &end);
                     self.cue_failed(&end, "The capture continues.");
-                    None
-                }
-                Step::Recorded(answer) => {
-                    self.record_late(answer);
                     None
                 }
                 Step::Quiet => match Self::quiet_allowed(live) {
@@ -2411,7 +2098,6 @@ where
         }
         live.session.hold_released();
         if live.session.buffers_audio() {
-            self.streams.send(&RELEASE_SILENCE);
             if let Err(error) = live.session.finish_audio().await {
                 return Some(Done::Failed(error.into()));
             }
@@ -2419,7 +2105,9 @@ where
                 route: held.route(),
             });
         } else {
-            if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+            if live.session.needs_release_silence()
+                && let Err(stop) = self.feed(live, &RELEASE_SILENCE).await
+            {
                 return Some(Done::from(stop));
             }
             live.session.input_ended();
@@ -2549,21 +2237,8 @@ where
             }
             Ok(FinalStep::Armed(mut pending)) => {
                 live.submit_preview = None;
-                // A Submit whose text only exists after the merge or final pass is formatted and
-                // cleaned when it settles, and confirmed then. An ordinary submit's confirmation
-                // shows its formatted text, which is sent as shown.
-                let settled = pending.route == CaptureRoute::Submit
-                    && (self.final_pass.is_some()
-                        || (self.merge_on()
-                            && self.number_rules.as_digits
-                            && has_words(&pending.text)));
-                self.submit_confirmation = if settled {
-                    SubmitConfirmation::Settled
-                } else {
-                    SubmitConfirmation::Live
-                };
-                if pending.route == CaptureRoute::Submit && !settled && self.number_rules.as_digits
-                {
+                // A submit's confirmation shows its formatted text, which is sent as shown.
+                if pending.route == CaptureRoute::Submit && self.number_rules.as_digits {
                     pending.text = self.text_with_numbers(&pending.text);
                     if let Some(stored) = live.text.pending_mut() {
                         stored.text.clone_from(&pending.text);
@@ -2575,7 +2250,7 @@ where
                     live.speech_run = 0;
                 }
                 live.last_audio = now;
-                // A submit is settled (merged, then cleaned) before its confirmation is shown.
+                // A submit is cleaned before its confirmation is shown.
                 if self.cleans_before_confirm(&pending) {
                     return Some(Done::Prepare(CaptureRequest {
                         route: pending.route,
@@ -2816,11 +2491,10 @@ where
         live.spot.record(&self.recorder);
     }
 
-    /// Sends `frames` to the recognizer and the streaming extras, giving up when the user cancels
-    /// or a capture limit passes while the recognizer is not taking audio.
+    /// Sends `frames` to the recognizer, giving up when the user cancels or a capture limit
+    /// passes while the recognizer is not taking audio.
     async fn feed(&mut self, live: &mut Live<R::Session>, frames: &[Frame]) -> Result<(), Stop> {
         let limits = self.limits;
-        self.streams.send(frames);
         for frame in frames {
             tokio::select! {
                 biased;
@@ -2853,28 +2527,14 @@ where
         if let Some(live) = live.as_mut() {
             self.close_spotting(live);
         }
-        let (session, mut sent, scratched, recoverable_text, has_endings, ended) = match live {
+        let (session, sent, recoverable_text) = match live {
             // Dropping the rest stops any cue still playing.
-            Some(live) => (
-                Some(live.session),
-                live.sent,
-                live.text.scratched(),
-                recoverable(&live.text),
-                live.text.has_endings(),
-                live.cutoff
-                    .as_ref()
-                    .and_then(Cutoff::released_at)
-                    .or(live.capture_end)
-                    .unwrap_or(decided),
-            ),
-            None => (None, Vec::new(), false, None, true, decided),
+            Some(live) => (Some(live.session), live.sent, recoverable(&live.text)),
+            None => (None, Vec::new(), None),
         };
         if !sent.is_empty() {
             self.recorder
                 .speech(dictation, sent.as_flattened().to_vec());
-        }
-        if !matches!(done, Done::Accepted(_)) {
-            self.drop_streams();
         }
         let outcome = match done {
             Done::Stopped => {
@@ -2900,34 +2560,10 @@ where
             }
             Done::Accepted(request) => {
                 self.gate.set_enabled(false);
-                // A task acts on the text the user heard before it ran; a merge could pick another action.
-                let extras = self.extras.clone().filter(|_| {
-                    !scratched && has_words(&request.text) && request.route != CaptureRoute::Task
-                });
-                if extras.is_some() {
-                    self.streams.finish(request.route, has_endings);
-                } else {
-                    self.drop_streams();
-                }
-                let final_work =
-                    self.start_final_pass(&request, &mut sent, dictation, ended, scratched);
                 if self.end_with(Cue::Accepted, decided, session, true).await {
-                    let resolved = match extras {
-                        Some(extras) => {
-                            self.deliver_with_extras(extras, request, &sent, has_endings, dictation)
-                                .await
-                        }
-                        None => match final_work {
-                            Some(work) => self.wait_final_pass(request, work, has_endings).await,
-                            None => CaptureOutcome::Accepted(request),
-                        },
-                    };
-                    self.finish_transcript(resolved, decided).await
+                    self.finish_transcript(CaptureOutcome::Accepted(request), decided)
+                        .await
                 } else {
-                    if let Some(work) = final_work {
-                        self.final_record = Some(work.cancel());
-                    }
-                    self.drop_streams();
                     CaptureOutcome::cancelled_with(request.text)
                 }
             }
@@ -2956,19 +2592,13 @@ where
     ) -> CaptureOutcome {
         let outcome = match outcome {
             CaptureOutcome::Accepted(request)
-                if self.number_rules.as_digits && self.formats_on_delivery(request.route) =>
+                if self.number_rules.as_digits && Self::formats_on_delivery(request.route) =>
             {
                 CaptureOutcome::Accepted(self.delivered_with_numbers(&request))
             }
             other => other,
         };
         match outcome {
-            CaptureOutcome::Accepted(request)
-                if request.route == CaptureRoute::Submit
-                    && self.submit_confirmation == SubmitConfirmation::Settled =>
-            {
-                self.confirm_final_submit(request).await
-            }
             CaptureOutcome::Accepted(request) if request.route == CaptureRoute::Write => {
                 self.write(request.text).await
             }
@@ -2981,12 +2611,7 @@ where
                         .is_some_and(writing::Writing::clean_dictation)
                     && has_words(&request.text) =>
             {
-                let cleanup_start = if self.final_pass.is_some() {
-                    Instant::now()
-                } else {
-                    decided
-                };
-                self.clean(request, cleanup_start).await
+                self.clean(request, decided).await
             }
             outcome => outcome,
         }
@@ -3061,384 +2686,10 @@ where
         }
     }
 
-    /// Merges the live text with the texts of the switched-on extras that arrive in time: the chat
-    /// model chooses between what the recognizers heard, and the live text is kept, with a notice,
-    /// when that cannot be done faithfully. The route is the live transcript's and stays it.
-    async fn merge(
-        &mut self,
-        writing: &Writing,
-        extras: &Extras,
-        request: CaptureRequest,
-        sent: &[Frame],
-        has_endings: bool,
-        dictation: &Dictation,
-    ) -> CaptureOutcome {
-        self.set_state(EngineState::Merging {
-            route: request.route,
-        });
-        let started = Instant::now();
-        let mut running = self.ask_all(
-            &extras.uploads,
-            &extras.words,
-            &request,
-            sent,
-            has_endings,
-            dictation,
-        );
-        let mut streams = std::mem::take(&mut self.streams);
-        let mut slots: Vec<Option<Judged>> = extras.all.iter().map(|_| None).collect();
-        while slots.iter().any(Option::is_none) {
-            tokio::select! {
-                biased;
-                _ = self.cancel.changed() => {
-                    self.recorded_only.push(streams.cancel());
-                    return self.merge_cancelled(writing, extras, &slots, started, request.text);
-                }
-                () = tokio::time::sleep_until(started + merge::EXTRAS_WAIT) => break,
-                answer = next_recorded(&mut self.recorded_only) => self.record_late(answer),
-                Some(joined) = running.join_next() => self.fill(&mut slots, joined),
-                Some(joined) = streams.tasks.join_next() => self.fill(&mut slots, joined),
-            }
-        }
-        let mut inputs = vec![request.text.clone()];
-        let mut left_out = Vec::new();
-        for (extra, slot) in extras.all.iter().zip(&slots) {
-            match slot.as_ref().and_then(|judged| judged.agreed.as_ref()) {
-                Some(text) => inputs.push(text.clone()),
-                None => left_out.push(match slot {
-                    None => format!("\"{}\" was too slow", extra.name),
-                    Some(judged) if judged.answer.heard.is_err() => {
-                        format!("\"{}\" failed", extra.name)
-                    }
-                    Some(_) => format!("\"{}\" heard another ending", extra.name),
-                }),
-            }
-        }
-        let left_out = left_out.join(", ");
-        let asked = if inputs.len() < 2 {
-            Asked::Skipped {
-                why: Skipped::TooFew(left_out.clone()),
-                chat: None,
-            }
-        } else {
-            self.ask_merge(writing, &inputs, &extras.words, started + merge::LIMIT)
-                .await
-        };
-        if matches!(asked, Asked::Cancelled) {
-            self.recorded_only.push(streams.cancel());
-            return self.merge_cancelled(writing, extras, &slots, started, request.text);
-        }
-        let merged = matches!(asked, Asked::Merged { .. });
-        for judged in slots.iter().flatten() {
-            self.record_answer(judged, merged && judged.agreed.is_some());
-        }
-        self.recorded_only.push(running);
-        self.recorded_only.push(streams.tasks);
-        match asked {
-            Asked::Merged { text, chat } => {
-                self.merge_metric("merged", started, writing, inputs.len(), Some(chat));
-                self.recorder.text(dictation, format!("merged: {text}"));
-                if !left_out.is_empty() {
-                    self.tell_merge(format!("Merged without some texts: {left_out}."));
-                }
-                CaptureOutcome::Accepted(CaptureRequest {
-                    route: request.route,
-                    text,
-                })
-            }
-            Asked::Skipped { why, chat } => {
-                self.merge_metric(why.outcome(), started, writing, inputs.len(), chat);
-                self.tell_merge(format!(
-                    "Merge skipped: {}. Used the live text.",
-                    why.reason()
-                ));
-                CaptureOutcome::Accepted(request)
-            }
-            Asked::Cancelled => CaptureOutcome::cancelled_with(request.text),
-        }
-    }
-
-    /// Delivers an accepted capture: merged with the extras' texts when merge is on, or at once
-    /// with the extras only recorded.
-    async fn deliver_with_extras(
-        &mut self,
-        extras: Extras,
-        request: CaptureRequest,
-        sent: &[Frame],
-        has_endings: bool,
-        dictation: &Dictation,
-    ) -> CaptureOutcome {
-        if let Some(writing) = &extras.merge {
-            self.merge(writing, &extras, request, sent, has_endings, dictation)
-                .await
-        } else {
-            self.record_only(&extras, &request, sent, has_endings, dictation);
-            CaptureOutcome::Accepted(request)
-        }
-    }
-
-    /// Sends the capture to every extra and records what each answers, without waiting: the live
-    /// text is delivered at once.
-    fn record_only(
-        &mut self,
-        extras: &Extras,
-        request: &CaptureRequest,
-        sent: &[Frame],
-        has_endings: bool,
-        dictation: &Dictation,
-    ) {
-        let running = self.ask_all(
-            &extras.uploads,
-            &extras.words,
-            request,
-            sent,
-            has_endings,
-            dictation,
-        );
-        let streams = std::mem::take(&mut self.streams);
-        self.recorded_only.push(running);
-        self.recorded_only.push(streams.tasks);
-    }
-
-    /// Whether the chat model merges the extras' texts before delivery.
-    fn merge_on(&self) -> bool {
-        self.extras
-            .as_ref()
-            .is_some_and(|extras| extras.merge.is_some())
-    }
-
-    fn tell_merge(&mut self, note: String) {
-        (self.notice)(&note);
-        self.merge_note = Some(note);
-    }
-
-    /// Records the extras that had answered as they did, the others and the merge as cancelled;
-    /// nothing is delivered.
-    fn merge_cancelled(
-        &self,
-        writing: &Writing,
-        extras: &Extras,
-        slots: &[Option<Judged>],
-        started: Instant,
-        text: String,
-    ) -> CaptureOutcome {
-        for (index, (extra, slot)) in extras.all.iter().zip(slots).enumerate() {
-            match slot {
-                Some(judged) => self.record_answer(judged, false),
-                // A streaming extra's cancelled answer is recorded when its task ends.
-                None if index >= extras.uploads.len() => {}
-                None => self.record_extra(extra, "cancelled", started.elapsed(), false),
-            }
-        }
-        let heard = slots
-            .iter()
-            .flatten()
-            .filter(|judged| judged.agreed.is_some())
-            .count();
-        self.merge_metric("cancelled", started, writing, heard + 1, None);
-        CaptureOutcome::cancelled_with(text)
-    }
-
-    /// Asks the chat endpoint to merge `inputs`, the live text first, within `deadline`, and checks
-    /// that its text invents no word.
-    async fn ask_merge(
-        &mut self,
-        writing: &Writing,
-        inputs: &[String],
-        words: &WordList,
-        deadline: Instant,
-    ) -> Asked {
-        let loading = Instant::now();
-        let previous = self.state.borrow().clone();
-        let endpoint = match self.endpoint(writing).await {
-            Ok(endpoint) => endpoint,
-            Err(None) => return Asked::Cancelled,
-            Err(Some(error)) => {
-                return Asked::Skipped {
-                    why: Skipped::Failed(error),
-                    chat: None,
-                };
-            }
-        };
-        let deadline = if matches!(writing.destination(), Destination::Computer { .. }) {
-            deadline + loading.elapsed()
-        } else {
-            deadline
-        };
-        self.set_state(previous);
-        let asked = Instant::now();
-        let stopped = |stop: Option<WritingError>| match stop {
-            None => Asked::Cancelled,
-            Some(error) => Asked::Skipped {
-                why: match error {
-                    WritingError::Timeout => Skipped::Timeout,
-                    error => Skipped::Failed(error),
-                },
-                chat: Some(asked.elapsed()),
-            },
-        };
-        let mut reply = match bounded(
-            &mut self.cancel,
-            deadline,
-            endpoint.start_merge(&self.http, inputs, words),
-        )
-        .await
-        .finish()
-        {
-            Ok(reply) => reply,
-            Err(stop) => return stopped(stop),
-        };
-        let mut text = String::new();
-        loop {
-            match bounded(&mut self.cancel, deadline, reply.next())
-                .await
-                .finish()
-            {
-                Ok(Some(Piece::Text(piece))) => text.push_str(&piece),
-                Ok(Some(Piece::Thinking)) => {}
-                Ok(None) => break,
-                Err(stop) => return stopped(stop),
-            }
-        }
-        let text = text.trim();
-        let skipped = |why| Asked::Skipped {
-            why,
-            chat: Some(asked.elapsed()),
-        };
-        if !has_words(text) {
-            skipped(Skipped::Failed(WritingError::Empty))
-        } else if !merge::faithful(inputs, text) {
-            skipped(Skipped::Unfaithful)
-        } else {
-            Asked::Merged {
-                text: text.to_owned(),
-                chat: asked.elapsed(),
-            }
-        }
-    }
-
-    /// Records one merge: `chat` is the chat call's own latency, the duration what the merge added
-    /// after the ending.
-    fn merge_metric(
-        &self,
-        outcome: &str,
-        started: Instant,
-        writing: &Writing,
-        inputs: usize,
-        chat: Option<Duration>,
-    ) {
-        self.recorder.metric(
-            Event::Merge,
-            outcome,
-            Some(started.elapsed()),
-            json!({
-                "model": writing.model(),
-                "inputs": inputs,
-                "chat_ms": chat.map(millis),
-            }),
-        );
-    }
-
-    /// Sends the capture to every extra at once, each request in a task of its own.
-    fn ask_all(
-        &self,
-        uploads: &[ExtraEntry],
-        words: &WordList,
-        request: &CaptureRequest,
-        sent: &[Frame],
-        has_endings: bool,
-        dictation: &Dictation,
-    ) -> JoinSet<Answer> {
-        let sent: Arc<[Frame]> = Arc::from(sent);
-        let mut running = JoinSet::new();
-        for (index, entry) in uploads.iter().enumerate() {
-            let (http, entry, sent, dictation) = (
-                self.http.clone(),
-                entry.clone(),
-                Arc::clone(&sent),
-                dictation.clone(),
-            );
-            let words = words.clone();
-            let route = request.route;
-            running.spawn(async move {
-                let asked = Instant::now();
-                let heard = secondary::transcribe(&http, &entry.settings, &sent, &words)
-                    .await
-                    .map(|transcript| transcript.text)
-                    .map_err(Unheard::from);
-                Answer {
-                    index,
-                    extra: Extra::upload(&entry),
-                    dictation,
-                    route,
-                    has_endings,
-                    heard,
-                    took: asked.elapsed(),
-                }
-            });
-        }
-        running
-    }
-
-    /// Puts the answer in its slot, judged.
-    fn fill(&self, slots: &mut [Option<Judged>], joined: Result<Answer, JoinError>) {
-        if let Some(answer) = settled(joined) {
-            let judged = self.judge(answer);
-            if let Some(slot) = slots.get_mut(judged.answer.index) {
-                *slot = Some(judged);
-            }
-        }
-    }
-
-    /// Has the streaming extras of the capture drop their sessions; each is recorded as cancelled
-    /// once its task has.
-    fn drop_streams(&mut self) {
-        let tasks = std::mem::take(&mut self.streams).cancel();
-        if !tasks.is_empty() {
-            self.recorded_only.push(tasks);
-        }
-    }
-
-    fn judge(&self, answer: Answer) -> Judged {
-        let (outcome, agreed) = match &answer.heard {
-            Ok(raw) => match self.agreed(raw, answer.route, answer.has_endings, false) {
-                Some(agreed) => ("ok", Some(agreed)),
-                None => ("error", None),
-            },
-            Err(Unheard::Timeout) => ("timeout", None),
-            Err(Unheard::Cancelled) => ("cancelled", None),
-            Err(Unheard::Failed) => ("error", None),
-        };
-        Judged {
-            answer,
-            outcome,
-            agreed,
-        }
-    }
-
-    fn record_answer(&self, judged: &Judged, used: bool) {
-        let answer = &judged.answer;
-        if let Ok(raw) = &answer.heard {
-            self.recorder.text(
-                &answer.dictation,
-                format!("extra ({}): {raw}", answer.extra.name),
-            );
-        }
-        self.record_extra(&answer.extra, judged.outcome, answer.took, used);
-    }
-
-    /// Records an extra that finished after the delivery did not wait for it.
-    fn record_late(&self, answer: Answer) {
-        let judged = self.judge(answer);
-        self.record_answer(&judged, false);
-    }
-
     /// Whether an armed submit is cleaned before its confirmation, so that confirmation shows
     /// the text that will be sent. Paste is cleaned after its pause, in [`Self::conclude`].
     fn cleans_before_confirm(&self, pending: &PendingEnding) -> bool {
         pending.route == CaptureRoute::Submit
-            && self.submit_confirmation == SubmitConfirmation::Live
-            && self.final_pass.is_none()
             && self
                 .writing
                 .as_ref()
@@ -3476,58 +2727,6 @@ where
         }
     }
 
-    async fn confirm_final_submit(&mut self, request: CaptureRequest) -> CaptureOutcome {
-        let outcome = if self.writing.as_ref().is_some_and(Writing::clean_dictation)
-            && has_words(&request.text)
-        {
-            self.clean(request, Instant::now()).await
-        } else {
-            CaptureOutcome::Accepted(request)
-        };
-        let CaptureOutcome::Accepted(request) = outcome else {
-            return outcome;
-        };
-        let submit = CaptureRoute::Submit;
-        let pause = self
-            .pauses
-            .get(submit)
-            .max(EndingPauses::default().get(submit));
-        let preview = SubmitPreview::default();
-        let mut presentation = preview.watch();
-        self.set_state(EngineState::ConfirmingSubmit {
-            text: request.text.clone(),
-            pause,
-            preview,
-        });
-        let shown = tokio::select! {
-            biased;
-            _ = self.cancel.changed() => return CaptureOutcome::cancelled_with(request.text),
-            result = presentation.wait_for(|state| *state != Presentation::Waiting) => {
-                result.map_or(Presentation::Failed(PreviewError::Unavailable), |state| *state)
-            }
-            () = tokio::time::sleep(PREVIEW_WAIT) => Presentation::Failed(PreviewError::Unavailable),
-        };
-        let failure = match shown {
-            Presentation::Failed(error) => error,
-            Presentation::Waiting => PreviewError::Unavailable,
-            Presentation::Shown => tokio::select! {
-                biased;
-                _ = self.cancel.changed() => return CaptureOutcome::cancelled_with(request.text),
-                result = presentation.wait_for(|state| matches!(state, Presentation::Failed(_))) => {
-                    match result.as_deref() {
-                        Ok(Presentation::Failed(error)) => *error,
-                        _ => PreviewError::Unavailable,
-                    }
-                }
-                () = tokio::time::sleep(pause) => return CaptureOutcome::Accepted(request),
-            },
-        };
-        CaptureOutcome::Failed {
-            error: failure.into(),
-            recoverable_text: Some(request.text),
-        }
-    }
-
     /// Records and announces an armed ending. The caller publishes afterwards.
     fn arm_pending(&self, live: &mut Live<R::Session>) {
         let Some(pending) = live.text.pending() else {
@@ -3537,9 +2736,8 @@ where
         let route = pending.route;
         let window = pending.window;
         let without_ending = pending.without_ending;
-        live.submit_preview = (route == CaptureRoute::Submit
-            && self.submit_confirmation == SubmitConfirmation::Live)
-            .then(|| LivePreview::new(Instant::now()));
+        live.submit_preview =
+            (route == CaptureRoute::Submit).then(|| LivePreview::new(Instant::now()));
         self.ending_state(match (window, without_ending) {
             (QuietWindow::WaitingForQuiet, false) => "waiting_for_quiet",
             (QuietWindow::WaitingForQuiet, true) => "waiting_for_quiet_without_ending",
@@ -3558,12 +2756,10 @@ where
         }
     }
 
-    /// Whether delivery formats this route's text: a task never is, and an ordinary submit was
-    /// formatted before its confirmation, so only the settled ones still wait for formatting.
-    fn formats_on_delivery(&self, route: CaptureRoute) -> bool {
+    /// Whether delivery formats this route's text: a task never is, and a submit is formatted
+    /// before its confirmation.
+    fn formats_on_delivery(route: CaptureRoute) -> bool {
         matches!(route, CaptureRoute::Paste | CaptureRoute::Write)
-            || (route == CaptureRoute::Submit
-                && self.submit_confirmation == SubmitConfirmation::Settled)
     }
 
     /// `text` with its number words as digits; callers only pass formatted routes with digits on.
@@ -3894,74 +3090,6 @@ where
             },
         }
     }
-
-    fn record_extra(&self, extra: &Extra, outcome: &'static str, took: Duration, used: bool) {
-        self.recorder.metric(
-            Event::ExtraStt,
-            outcome,
-            Some(took),
-            json!({
-                "entry": extra.name,
-                "model": extra.model,
-                "api": extra.api,
-                "used": used,
-            }),
-        );
-    }
-
-    /// An extra's transcript without its ending phrase, when it ends the way the user did.
-    /// A capture without endings (a hold) agrees with the whole transcript as dictated text.
-    fn agreed(
-        &self,
-        raw: &str,
-        route: CaptureRoute,
-        has_endings: bool,
-        require_ending: bool,
-    ) -> Option<String> {
-        if !has_endings {
-            let mut parser = CaptureSession::without_endings();
-            return match parser.on_final(raw, Instant::now(), false) {
-                Ok(_) => Some(parser.text()).filter(|text| !text.is_empty()),
-                Err(_) => None,
-            };
-        }
-        let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
-        let mut text = match parser.on_final(raw, Instant::now(), false).ok()? {
-            FinalStep::Armed(pending) if pending.route == route => pending.text,
-            FinalStep::Continue { .. } if !require_ending && !parser.scratched() => {
-                return Some(parser.text()).filter(|text| !text.is_empty());
-            }
-            _ => return None,
-        };
-        // An extra can hear the spoken ending twice ("Yes. Submit. Submit."); every trailing copy is the ending.
-        loop {
-            let mut parser = CaptureSession::new(self.endings.clone(), self.pauses, Vec::new());
-            let Ok(FinalStep::Armed(PendingEnding {
-                route: ending_route,
-                text: stripped,
-                without_ending: false,
-                ..
-            })) = parser.on_final(&text, Instant::now(), false)
-            else {
-                break;
-            };
-            if ending_route != route {
-                break;
-            }
-            text = stripped;
-        }
-        if require_ending {
-            if let Some(before) = text
-                .strip_suffix('.')
-                .filter(|before| !before.ends_with('.'))
-            {
-                text.truncate(before.len());
-            }
-            has_words(&text).then_some(text)
-        } else {
-            (!text.is_empty()).then_some(text)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -3970,34 +3098,6 @@ mod tests {
     use crate::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
     use crate::hold::KeyState;
     use crate::recognizer::FakeRecognizer;
-
-    #[test]
-    fn a_task_ending_that_arms_itself_stops_stripping_when_text_is_unchanged() {
-        let config = DesktopConfig::from_json_str("{}").unwrap();
-        let (engine, _) = Engine::new(
-            Parts {
-                recognizer: FakeRecognizer::new().0,
-                wake: FakeWake::new().0,
-                cues: FakeCuePlayer::new().0,
-                gate: InputGate::default(),
-                chat: None,
-                http: reqwest::Client::new(),
-                hold: watch::channel(KeyState::default()).1,
-                notice: Box::new(|_| {}),
-                spotter: None,
-                spotter_off: None,
-                extras: Vec::new(),
-            },
-            &config,
-            Recorder::disabled(),
-        );
-        assert_eq!(
-            engine
-                .agreed("open google.com do that", CaptureRoute::Task, true, false)
-                .as_deref(),
-            Some("open google.com"),
-        );
-    }
 
     #[tokio::test]
     async fn dictation_wakes_when_its_score_crosses() {
@@ -4021,7 +3121,6 @@ mod tests {
                 notice: Box::new(|_| {}),
                 spotter: None,
                 spotter_off: None,
-                extras: Vec::new(),
             },
             &config,
             Recorder::disabled(),

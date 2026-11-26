@@ -117,7 +117,12 @@ its case and pinned toolchain there and its CI job; one that ships on Windows
 also runs its gate on `windows-2025-vs2026`. npm is the package manager; lockfiles
 are committed.
 
-Two required checks are not in the script:
+The `main` ruleset requires only `ci-ok` and `commits-ok`. Each waits for every
+other job of its workflow and fails when one failed, so a new job goes in its
+workflow's `-ok` `needs`, never in the ruleset;
+`.github/scripts/required-checks.test.py` fails when one is missing.
+
+Two CI checks are not in the script:
 
 - Dependencies (`deny.toml`, cargo-deny 0.20.2): `cargo deny --workspace --locked
   check advisories licenses sources`.
@@ -165,6 +170,8 @@ only `--in-diff` against the base with no desktop session and a throwaway
   when the PR merges. The Issues workflow reopens those issues when a merged
   `Reverts #N` PR takes the change out. Use `Refs #N` when a PR only touches
   one.
+- A PR merges once the required checks pass. One that changes a path in
+  `.github/CODEOWNERS` also waits for the owner's review.
 - Use `.github/pull_request_template.md` for every PR body, including PRs
   created through CLI tools; preserve its headings and remove instructional
   comments.

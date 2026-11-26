@@ -141,15 +141,12 @@ keeps a watch that binds them at a later config reload, and a refused key change
 ends the save before `Create`, as before. No writer of `desktop.json` or `AppState::config` and no
 lock is added, so the model and its three invariants are unchanged.
 
-The final-pass switch (#586) uses the existing Settings patch and validation path. The agent reports
-the final pass as a cancellable capture state, so a config saved while it waits is applied at the
-same boundary as other changes during capture. No writer, lock or temporary file changes.
-
-The merge switch (#589) adds `stt.merge` and reads it in `check_endpoint_kept`: removing the writing
-endpoint is refused only while an extra is on and the merge is on, and a form without the switch reads
-it as `any_extra`, as the loader does. That is the refusal `Store::check` already returns before
-`write_atomically`, under the save lock. `agent.rs` changes only in its tests module. No writer, lock
-or temporary file changes, so the model and its three invariants are unchanged.
+The one-recognizer change (#727) removes `stt.merge` and the extra recognizers, so
+`Store::check` no longer refuses a settings form that removes the writing endpoint while an
+extra is on, and `check_endpoint_kept` is gone. The rest of `Store::check`, `Store::save` and
+`write_atomically` keep their order and the same save lock; `agent.rs` changes only in its tests
+module. No writer, lock or temporary file changes, so the model and its three invariants are
+unchanged.
 
 The recognizer health fix (#673) changes `agent.rs`'s `state` reply only (`recognizer_phase` and the failure kind it reads) and one test. `settings_set`, `plan` and `plan_over` are unchanged, and no writer, lock or temporary file is added, so the model and its three invariants are unchanged.
 
