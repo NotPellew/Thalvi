@@ -835,16 +835,16 @@ async fn a_failed_reload_leaves_no_model_claimed_to_run() {
 }
 
 #[tokio::test]
-async fn the_load_reports_how_many_nodes_of_each_network_the_gpu_took() {
+async fn the_load_reports_how_many_encoder_nodes_the_gpu_took() {
     let gpu = Gpu {
         name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
         api: "Vulkan",
     };
-    let nodes = |on_gpu, total| Nodes { on_gpu, total };
     let placement = Placement {
-        encoder: nodes(4_950, 5_000),
-        decoder: nodes(12, 30),
-        joiner: nodes(6, 6),
+        encoder: Nodes {
+            on_gpu: 4_950,
+            total: 5_000,
+        },
     };
     let rig = rig_on(
         "placement",
@@ -863,14 +863,7 @@ async fn the_load_reports_how_many_nodes_of_each_network_the_gpu_took() {
         .iter()
         .find(|line| line["event"] == "desktop_speech_load")
         .expect("a load line");
-    for (key, value) in [
-        ("encoder_nodes_on_gpu", 4_950),
-        ("encoder_nodes", 5_000),
-        ("decoder_nodes_on_gpu", 12),
-        ("decoder_nodes", 30),
-        ("joiner_nodes_on_gpu", 6),
-        ("joiner_nodes", 6),
-    ] {
+    for (key, value) in [("encoder_nodes_on_gpu", 4_950), ("encoder_nodes", 5_000)] {
         assert_eq!(load[key], value, "{key}");
     }
 }

@@ -327,14 +327,6 @@ pub(crate) fn downloading(
     }
 }
 
-/// One of the three networks of a transducer; each is a session of its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Part {
-    Encoder,
-    Decoder,
-    Joiner,
-}
-
 /// One node of a loaded session: its operator, and whether the CPU provider runs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Placed {
@@ -359,27 +351,22 @@ impl Nodes {
     }
 }
 
-/// Where each session of a model loaded on the GPU put its nodes.
+/// Where the GPU encoder session of a model put its nodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placement {
     pub encoder: Nodes,
-    pub decoder: Nodes,
-    pub joiner: Nodes,
 }
 
 impl Placement {
-    /// `fields` of a speech metric with the node counts of each session added.
+    /// `fields` of a speech metric with the encoder's GPU node counts added.
     #[must_use]
     pub fn tag(&self, mut fields: Value) -> Value {
         if let Some(fields) = fields.as_object_mut() {
-            for (part, nodes) in [
-                ("encoder", self.encoder),
-                ("decoder", self.decoder),
-                ("joiner", self.joiner),
-            ] {
-                fields.insert(format!("{part}_nodes_on_gpu"), nodes.on_gpu.into());
-                fields.insert(format!("{part}_nodes"), nodes.total.into());
-            }
+            fields.insert(
+                "encoder_nodes_on_gpu".to_owned(),
+                self.encoder.on_gpu.into(),
+            );
+            fields.insert("encoder_nodes".to_owned(), self.encoder.total.into());
         }
         fields
     }
@@ -389,10 +376,10 @@ impl Placement {
 const MOST_ON_GPU: usize = 98;
 
 /// ONNX Runtime keeps shape arithmetic on the CPU, so "everything on the GPU" fails for every export. What
-/// matters is that no operator that does the arithmetic of the model is among them. Of the encoder, whose
-/// thousands of nodes make a slow round trip for each stray one, almost all must also be on the GPU.
+/// matters is that no operator that does the arithmetic of the model is among them, and that almost all of
+/// the encoder's thousands of nodes stay on the GPU without round trips.
 #[must_use]
-pub fn runs_fully_on_gpu(part: Part, nodes: &[Placed]) -> bool {
+pub fn runs_fully_on_gpu(nodes: &[Placed]) -> bool {
     let compute = |operator: &str| {
         matches!(
             operator,
@@ -404,7 +391,7 @@ pub fn runs_fully_on_gpu(part: Part, nodes: &[Placed]) -> bool {
     !nodes
         .iter()
         .any(|node| node.on_cpu && compute(&node.operator))
-        && (part != Part::Encoder || counts.on_gpu * 100 >= counts.total * MOST_ON_GPU)
+        && counts.on_gpu * 100 >= counts.total * MOST_ON_GPU
 }
 
 #[cfg(test)]
@@ -857,60 +844,37 @@ mod tests {
     }
 
     #[test]
-    fn no_session_may_leave_compute_on_the_cpu_and_the_encoder_alone_must_have_98_percent_of_its_nodes_on_the_gpu()
-     {
-        for (case, placed, encoder, others) in [
-            ("all on the GPU", nodes(100, &[]), true, true),
+    fn the_encoder_must_leave_no_compute_on_the_cpu_and_keep_98_percent_of_its_nodes_on_the_gpu() {
+        for (case, placed, expected) in [
+            ("all on the GPU", nodes(100, &[]), true),
             (
                 "two percent of shape ops",
                 nodes(98, &[("Unsqueeze", 2)]),
-                true,
                 true,
             ),
             (
                 "three percent of shape ops",
                 nodes(97, &[("Unsqueeze", 3)]),
                 false,
-                true,
             ),
-            (
-                "half shape ops, as the decoder has",
-                nodes(50, &[("Shape", 50)]),
-                false,
-                true,
-            ),
-            ("one MatMul", nodes(999, &[("MatMul", 1)]), false, false),
-            (
-                "an int8 MatMul",
-                nodes(999, &[("MatMulInteger", 1)]),
-                false,
-                false,
-            ),
+            ("one MatMul", nodes(999, &[("MatMul", 1)]), false),
+            ("an int8 MatMul", nodes(999, &[("MatMulInteger", 1)]), false),
             (
                 "a quantize op",
                 nodes(999, &[("DynamicQuantizeLinear", 1)]),
                 false,
-                false,
             ),
-            ("a convolution", nodes(999, &[("Conv", 1)]), false, false),
-            ("an LSTM", nodes(999, &[("LSTM", 1)]), false, false),
-            ("a softmax", nodes(999, &[("Softmax", 1)]), false, false),
+            ("a convolution", nodes(999, &[("Conv", 1)]), false),
+            ("an LSTM", nodes(999, &[("LSTM", 1)]), false),
+            ("a softmax", nodes(999, &[("Softmax", 1)]), false),
             (
                 "a layer norm",
                 nodes(999, &[("LayerNormalization", 1)]),
                 false,
-                false,
             ),
-            ("a gemm", nodes(999, &[("Gemm", 1)]), false, false),
+            ("a gemm", nodes(999, &[("Gemm", 1)]), false),
         ] {
-            assert_eq!(
-                runs_fully_on_gpu(Part::Encoder, &placed),
-                encoder,
-                "{case}: encoder"
-            );
-            for part in [Part::Decoder, Part::Joiner] {
-                assert_eq!(runs_fully_on_gpu(part, &placed), others, "{case}: {part:?}");
-            }
+            assert_eq!(runs_fully_on_gpu(&placed), expected, "{case}");
         }
     }
 
@@ -945,25 +909,15 @@ mod tests {
     }
 
     #[test]
-    fn a_metric_carries_the_node_counts_of_each_session() {
+    fn a_metric_carries_the_encoder_gpu_node_counts() {
         let placement = Placement {
             encoder: Nodes::of(&nodes(98, &[("Shape", 2)])),
-            decoder: Nodes {
-                on_gpu: 5,
-                total: 9,
-            },
-            joiner: Nodes {
-                on_gpu: 3,
-                total: 3,
-            },
         };
         assert_eq!(
             placement.tag(json!({"model": "m"})),
             json!({
                 "model": "m",
                 "encoder_nodes_on_gpu": 98, "encoder_nodes": 100,
-                "decoder_nodes_on_gpu": 5, "decoder_nodes": 9,
-                "joiner_nodes_on_gpu": 3, "joiner_nodes": 3,
             })
         );
     }

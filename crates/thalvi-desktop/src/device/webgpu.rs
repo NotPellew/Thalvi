@@ -13,7 +13,7 @@ use ort::ep::WebGPU;
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
 
-use super::{Adapter, Fallback, Gpu, Nodes, Part, Placed, runs_fully_on_gpu};
+use super::{Adapter, Fallback, Gpu, Nodes, Placed, runs_fully_on_gpu};
 
 /// Name of ONNX Runtime's CPU execution provider in the placement info.
 const CPU_PROVIDER: &str = "CPUExecutionProvider";
@@ -256,16 +256,12 @@ fn describe(adapter: *mut c_void) -> Adapter {
     found
 }
 
-/// Opens `path`, one `part` of the model, on the GPU, and only if ONNX Runtime put all of it there that matters.
+/// Opens `path`, the model's encoder, on the GPU, and only if ONNX Runtime put all of it there that matters.
 ///
 /// # Errors
 /// [`Fallback::DriverFailed`] when the session cannot start on the GPU, [`Fallback::CannotRunFully`] when it starts
 /// but leaves compute on the CPU.
-pub fn open(
-    builder: SessionBuilder,
-    path: &Path,
-    part: Part,
-) -> Result<(Session, Nodes), Fallback> {
+pub fn open(builder: SessionBuilder, path: &Path) -> Result<(Session, Nodes), Fallback> {
     let driver = |error: &dyn std::fmt::Display| {
         tracing::warn!(
             "The GPU session for {} did not start: {error}",
@@ -283,11 +279,11 @@ pub fn open(
     let placed = placement(&session)
         .ok_or_else(|| driver(&"ONNX Runtime did not report where it placed the model"))?;
     let nodes = Nodes::of(&placed);
-    if runs_fully_on_gpu(part, &placed) {
+    if runs_fully_on_gpu(&placed) {
         Ok((session, nodes))
     } else {
         tracing::warn!(
-            "The {part:?} {} has {} of {} nodes on the GPU, which is not enough",
+            "The encoder {} has {} of {} nodes on the GPU, which is not enough",
             path.display(),
             nodes.on_gpu,
             nodes.total

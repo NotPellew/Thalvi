@@ -11,7 +11,7 @@ use ort::value::Tensor;
 
 use crate::boosting::{Joiner, PhraseTree, TreeState, greedy};
 use crate::device::{
-    self, Adapters, Attempt, Device, Export, Fallback, Gpu, Nodes, Part, Placement, Provider, Step,
+    self, Adapters, Attempt, Device, Export, Fallback, Gpu, Nodes, Placement, Provider, Step,
 };
 use crate::fbank::{HOP, LogMel, MEL_BINS, MelFrame, WindowMel};
 use crate::frame::Frame;
@@ -256,13 +256,9 @@ fn open_on_cpu(path: &Path, threads: usize) -> Result<Session, TransducerError> 
 }
 
 /// Only what `device::open` reports about the GPU session is the GPU's failure; the CPU takes over from it.
-fn open_on_gpu(
-    path: &Path,
-    threads: usize,
-    part: Part,
-) -> Result<(Session, Nodes), Attempt<TransducerError>> {
+fn open_on_gpu(path: &Path, threads: usize) -> Result<(Session, Nodes), Attempt<TransducerError>> {
     let builder = builder(path, threads)?;
-    device::open(builder, path, part).map_err(Attempt::Fallback)
+    device::open(builder, path).map_err(Attempt::Fallback)
 }
 
 fn number(session: &Session, path: &Path, key: &str) -> Result<usize, TransducerError> {
@@ -302,24 +298,24 @@ impl Transducer {
         Self::assemble(sessions, None, files, phrases, Device::Cpu(reason))
     }
 
-    /// Like [`load`](Self::load), on `gpu`, the files being the fp16 export.
+    /// Like [`load`](Self::load), on `gpu`, the files being the fp16 export. Only the heavy encoder
+    /// runs on the GPU; the tiny 1×1 predictor and joiner stay on the CPU to avoid per-token GPU
+    /// dispatch round trips.
     ///
     /// # Errors
-    /// [`Attempt::Fallback`] when a session does not start on the GPU or the GPU does not take the model, else as
-    /// [`load`](Self::load).
+    /// [`Attempt::Fallback`] when the encoder session does not start on the GPU or the GPU does not
+    /// take it, else as [`load`](Self::load).
     pub fn load_gpu(
         files: &TransducerFiles,
         phrases: &WordList,
         gpu: Gpu,
     ) -> Result<Self, Attempt<TransducerError>> {
         let threads = threads();
-        let (encoder, encoder_nodes) = open_on_gpu(&files.encoder, threads, Part::Encoder)?;
-        let (decoder, decoder_nodes) = open_on_gpu(&files.decoder, 1, Part::Decoder)?;
-        let (joiner, joiner_nodes) = open_on_gpu(&files.joiner, 1, Part::Joiner)?;
+        let (encoder, encoder_nodes) = open_on_gpu(&files.encoder, threads)?;
+        let decoder = open_on_cpu(&files.decoder, 1).map_err(Attempt::Failed)?;
+        let joiner = open_on_cpu(&files.joiner, 1).map_err(Attempt::Failed)?;
         let placement = Placement {
             encoder: encoder_nodes,
-            decoder: decoder_nodes,
-            joiner: joiner_nodes,
         };
         Self::assemble(
             Sessions {
