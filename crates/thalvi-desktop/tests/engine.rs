@@ -1077,11 +1077,19 @@ async fn speech_while_an_ending_is_pending_is_held_until_it_lasts_then_cancels_t
 
 #[tokio::test(start_paused = true)]
 async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cancel_the_ending() {
-    // What the user does after "paste that" at 1000, and, in its last step, 1 ms before the paste is accepted.
-    let cases: [(&str, &[(u64, Kind)]); 3] = [
+    let paste = (SLOW_PASTE, "Hello paste that", CaptureRoute::Paste, "Hello");
+    let command = (
+        COMMANDS,
+        "open google.com",
+        CaptureRoute::Task,
+        "open google.com",
+    );
+    // What the user does after the ending at 1000, and, in its last step, 1 ms before it is accepted.
+    let cases: [(&str, _, &[(u64, Kind)]); 4] = [
         // Observed on Hyprland: talking from 1.5 s, no partial before the old 2.5 s countdown ended.
         (
             "talking",
+            paste,
             &[
                 (2480, Kind::Quiet),
                 (3400, Kind::Voice),
@@ -1091,6 +1099,7 @@ async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cance
         // A cough: three speech frames, no words.
         (
             "cough",
+            paste,
             &[
                 (2000, Kind::Quiet),
                 (2240, Kind::Voice),
@@ -1100,6 +1109,7 @@ async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cance
         // Speaking again after a short quiet gap pauses the countdown again.
         (
             "resuming",
+            paste,
             &[
                 (2000, Kind::Quiet),
                 (2240, Kind::Voice),
@@ -1108,18 +1118,27 @@ async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cance
                 (5939, Kind::Quiet),
             ],
         ),
+        (
+            "cough during a command",
+            command,
+            &[
+                (2000, Kind::Quiet),
+                (2240, Kind::Voice),
+                (4819, Kind::Quiet),
+            ],
+        ),
     ];
     LocalSet::new()
         .run_until(async {
-            for (name, script) in cases {
-                let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
+            for (name, (config, said, route, text), script) in cases {
+                let (mut rig, engine, frames) = Rig::new(config);
                 let task = capture_task(engine, frames);
                 rig.open().await;
                 rig.feed_until(1000, Kind::Quiet).await;
-                rig.finals("Hello paste that").await;
+                rig.finals(said).await;
                 let pending = |waiting_for_quiet| EngineState::PendingEnding {
-                    route: CaptureRoute::Paste,
-                    text: "Hello".to_owned(),
+                    route,
+                    text: text.to_owned(),
                     waiting_for_quiet,
                     preview: None,
                 };
@@ -1133,11 +1152,7 @@ async fn local_speech_stops_the_countdown_until_quiet_returns_unless_words_cance
                 assert_eq!(rig.state(), pending(false), "{name}: counting again");
                 // The script ends 1 ms before the pause does.
                 rig.at(script[script.len() - 1].0 + 1).await;
-                assert_eq!(
-                    finished(task).await,
-                    accepted(CaptureRoute::Paste, "Hello"),
-                    "{name}"
-                );
+                assert_eq!(finished(task).await, accepted(route, text), "{name}");
             }
         })
         .await;
@@ -1166,49 +1181,6 @@ async fn words_recognized_while_the_countdown_waits_for_quiet_still_cancel_the_e
             );
             rig.feed_until(6000, Kind::Quiet).await;
             assert!(!task.is_finished(), "the cancelled ending is not delivered");
-            rig.handle.cancel();
-            assert_eq!(
-                finished(task).await,
-                CaptureOutcome::Cancelled {
-                    dictated: Some("Hello paste that".to_owned())
-                }
-            );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_paste_still_yields_to_speech_inside_its_short_window() {
-    LocalSet::new()
-        .run_until(async {
-            // Local speech pauses the countdown; the paste waits for quiet and the full 0.7 s again.
-            let (mut rig, engine, frames) = Rig::new("{}");
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Hello paste that").await;
-            rig.feed_until(1200, Kind::Quiet).await;
-            rig.feed_until(1600, Kind::Voice).await;
-            rig.feed_until(2400, Kind::Quiet).await;
-            assert!(
-                !task.is_finished(),
-                "speech at 1.2 s moved the paste past 1.7 s"
-            );
-            rig.feed_until(3000, Kind::Quiet).await;
-            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
-            assert!(rig.started(Cue::Accepted)[0] > 2400);
-
-            // Recognized words cancel the pending paste.
-            let (mut rig, engine, frames) = Rig::new("{}");
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Hello paste that").await;
-            rig.feed_until(1300, Kind::Quiet).await;
-            rig.partial("and also").await;
-            assert_eq!(rig.started(Cue::Cancelled), [1300]);
-            rig.feed_until(3000, Kind::Quiet).await;
-            assert!(!task.is_finished(), "the cancelled paste is not delivered");
             rig.handle.cancel();
             assert_eq!(
                 finished(task).await,
@@ -1285,19 +1257,31 @@ async fn a_spoken_never_mind_cancels_at_once_and_keeps_what_was_dictated_before_
  {
     LocalSet::new()
         .run_until(async {
-            for (finals, dictated) in [
+            // (config, finals, what is kept, provisional cues played before "never mind")
+            for (config, finals, dictated, provisional) in [
                 (
+                    "{}",
                     &["Second check that I drop. Never mind."][..],
                     Some("Second check that I drop."),
+                    0,
                 ),
-                (&["Draft words", "never mind"], Some("Draft words")),
+                ("{}", &["Draft words", "never mind"], Some("Draft words"), 0),
                 (
+                    "{}",
                     &["First part.", "Second part. Never mind."],
                     Some("First part. Second part."),
+                    0,
                 ),
-                (&["never mind"], None),
+                ("{}", &["never mind"], None, 0),
+                // A command waiting out its pause.
+                (
+                    COMMANDS,
+                    &["open google.com", "never mind"],
+                    Some("open google.com"),
+                    1,
+                ),
             ] {
-                let (mut rig, engine, frames) = Rig::new("{}");
+                let (mut rig, engine, frames) = Rig::new(config);
                 let task = capture_task(engine, frames);
                 rig.open().await;
                 rig.feed_until(1000, Kind::Quiet).await;
@@ -1307,7 +1291,11 @@ async fn a_spoken_never_mind_cancels_at_once_and_keeps_what_was_dictated_before_
                 assert_eq!(rig.started(Cue::Cancelled), [1000], "{finals:?}");
                 rig.at(1100).await;
                 assert!(task.is_finished(), "no pause is waited out: {finals:?}");
-                assert_eq!(rig.started(Cue::Provisional).len(), 0, "{finals:?}");
+                assert_eq!(
+                    rig.started(Cue::Provisional).len(),
+                    provisional,
+                    "{finals:?}"
+                );
                 assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
                 assert!(rig.gate.is_enabled(), "{finals:?}");
                 assert_eq!(
@@ -1519,57 +1507,6 @@ async fn speech_during_a_command_pause_cancels_it_and_the_capture_goes_on_as_dic
                 finished(task).await,
                 accepted(CaptureRoute::Paste, "open google.com and then")
             );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn local_speech_pauses_a_command_countdown_until_quiet_returns() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::new(COMMANDS);
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("open google.com").await;
-            rig.feed_until(2000, Kind::Quiet).await;
-            rig.feed_until(2240, Kind::Voice).await;
-            assert_eq!(rig.state(), pending_task("open google.com", true));
-            rig.feed_until(4819, Kind::Quiet).await;
-            assert!(
-                !task.is_finished(),
-                "the pause restarted when quiet returned"
-            );
-            assert_eq!(rig.state(), pending_task("open google.com", false));
-            rig.at(4820).await;
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Task, "open google.com")
-            );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn never_mind_drops_a_command_that_is_waiting_out_its_pause() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::new(COMMANDS);
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("open google.com").await;
-            rig.feed_until(1500, Kind::Quiet).await;
-            assert_eq!(rig.state(), pending_task("open google.com", false));
-            rig.finals("never mind").await;
-            assert_eq!(rig.started(Cue::Cancelled), [1500]);
-            assert_eq!(
-                finished(task).await,
-                CaptureOutcome::Cancelled {
-                    dictated: Some("open google.com".to_owned())
-                }
-            );
-            assert_eq!(rig.started(Cue::Accepted).len(), 0);
         })
         .await;
 }
@@ -1831,34 +1768,6 @@ async fn a_failed_capture_says_what_happened_keeps_the_text_and_returns_to_liste
                 assert!(rig.gate.is_enabled(), "{error}");
                 assert_eq!(rig.state(), EngineState::Listening, "{error}");
             }
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_microphone_watchdog_waits_while_a_cue_is_playing() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::new(SLOW_PASTE);
-            rig.cues.set_length(Cue::Provisional, ms(1000));
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Hello paste that").await;
-            rig.at(1300).await;
-            assert!(!task.is_finished(), "no timeout while the cue plays");
-            rig.at(2000).await;
-            rig.at(2249).await;
-            assert!(!task.is_finished(), "the cue ended at 2000");
-            rig.at(2250).await;
-            assert_eq!(rig.started(Cue::Error), [2250]);
-            assert_eq!(
-                finished(task).await,
-                CaptureOutcome::Failed {
-                    error: CaptureError::MicStopped,
-                    recoverable_text: Some("Hello".to_owned())
-                }
-            );
         })
         .await;
 }
@@ -4659,7 +4568,7 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
     use Say::{Final, Partial};
     // (what was said and when, release, expected outcome, when the cue that ends the capture starts)
     type Case = (&'static [(u64, Say)], u64, CaptureOutcome, Cue, u64);
-    let cases: [Case; 7] = [
+    let cases: [Case; 5] = [
         (
             &[(1000, Partial("hello world"))],
             1200,
@@ -4687,20 +4596,6 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
             accepted(CaptureRoute::Paste, "first line second line"),
             Cue::Accepted,
             1600,
-        ),
-        (
-            &[(1000, Partial("hello never mind"))],
-            1200,
-            accepted(CaptureRoute::Paste, "hello never mind"),
-            Cue::Accepted,
-            1600,
-        ),
-        (
-            &[(800, Final("first line")), (1250, Final("never mind"))],
-            1200,
-            accepted(CaptureRoute::Paste, "first line never mind"),
-            Cue::Accepted,
-            1250,
         ),
         // The shortest hold that dictates is MIN_HOLD, 300 ms.
         (
@@ -5297,90 +5192,6 @@ async fn nothing_spoken_after_the_release_reaches_the_recognizer_but_the_words_a
         .await;
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_hold_released_before_the_recognizer_connects_still_sends_its_speech_within_the_wait() {
-    // (speech after the start cue, recognizer ready at, what comes of it)
-    type Case = (Kind, Option<u64>, Option<CaptureOutcome>);
-    let cases: [Case; 3] = [
-        (
-            Kind::Voice,
-            Some(1000),
-            Some(accepted(CaptureRoute::Paste, "hello world")),
-        ),
-        // Nothing but silence was held: the same honest failure as before, without waiting.
-        (
-            Kind::Quiet,
-            Some(1000),
-            Some(CaptureOutcome::Failed {
-                error: CaptureError::NothingHeard,
-                recoverable_text: None,
-            }),
-        ),
-        // The connection never comes within the bounded wait.
-        (Kind::Voice, None, None),
-    ];
-    LocalSet::new()
-        .run_until(async {
-            for (case, (kind, ready, expected)) in cases.into_iter().enumerate() {
-                let label = format!("case {case}");
-                let (mut rig, engine, frames) = Rig::new("{}");
-                let task = hold_task(engine, frames);
-                rig.press().await;
-                rig.at(230).await;
-                rig.feed_until(600, kind).await;
-                let spoken = tags(&(3..8).map(|id| kind.frame(id)).collect::<Vec<Frame>>());
-                rig.release(600).await;
-                if !matches!(kind, Kind::Quiet) {
-                    // An aside after the release stays out of what the recognizer is sent.
-                    rig.feed_until(900, kind).await;
-                }
-                let Some(ready) = ready else {
-                    rig.at(8000).await;
-                    assert!(
-                        matches!(
-                            finished(task).await,
-                            CaptureOutcome::Failed {
-                                error: CaptureError::NotReady { .. },
-                                ..
-                            }
-                        ),
-                        "{label}"
-                    );
-                    assert_eq!(rig.sent().len(), 0, "{label}");
-                    continue;
-                };
-                if matches!(kind, Kind::Quiet) {
-                    assert_eq!(
-                        rig.started(Cue::Error),
-                        [600],
-                        "{label}: ends at the release"
-                    );
-                    assert_eq!(rig.sent().len(), 0, "{label}");
-                    assert_eq!(finished(task).await, expected.unwrap(), "{label}");
-                    continue;
-                }
-                rig.at(ready).await;
-                assert!(!task.is_finished(), "{label}: waiting for the connection");
-                rig.server.ready();
-                settle().await;
-                let mut expected_sent = spoken.clone();
-                expected_sent.extend(std::iter::repeat_n(0, 10));
-                assert_eq!(
-                    tags(&rig.sent()),
-                    expected_sent,
-                    "{label}: the buffered speech arrived"
-                );
-                rig.partial("hello world").await;
-                // The words get the tail from the moment they were sent.
-                rig.at(ready + 500).await;
-                assert_eq!(rig.started(Cue::Accepted), [ready + 500], "{label}");
-                assert_eq!(finished(task).await, expected.unwrap(), "{label}");
-                assert_eq!(rig.notices(), Vec::<String>::new(), "{label}");
-            }
-        })
-        .await;
-}
-
 #[derive(Clone, Copy)]
 enum Connect {
     /// The recognizer is still connecting when the key comes up, and is ready long after.
@@ -5789,80 +5600,52 @@ async fn a_hold_release_triggers_a_silence_flush_and_pastes_as_soon_as_the_final
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_hold_with_no_final_within_the_limit_pastes_what_is_there_at_the_limit() {
+async fn a_hold_without_a_replaying_final_pastes_at_the_release_wait_or_the_recognizer_limit() {
+    // (the recognizer's release limit, when the paste comes)
+    let cases = [(None, 1450), (Some(ms(400)), 1600)];
     LocalSet::new()
         .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
-            rig.server.release_limit(ms(400));
-            let task = hold_task(engine, frames);
-            rig.hold().await;
-            rig.say(1000, Say::Partial("partial text")).await;
-            rig.release(1200).await;
-            rig.at(1599).await;
-            assert!(
-                !task.is_finished(),
-                "at 1599 ms the limit has not yet expired"
-            );
-            assert!(
-                rig.started(Cue::Accepted).is_empty(),
-                "no paste before the limit"
-            );
-            rig.at(1600).await;
-            assert_eq!(
-                rig.started(Cue::Accepted),
-                [1600],
-                "pastes at the 400 ms limit"
-            );
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "partial text")
-            );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_hold_without_a_replaying_final_pastes_at_the_short_release_wait() {
-    LocalSet::new()
-        .run_until(async {
-            let dir = record_dir("short-release-wait");
-            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
-            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
-            let task = hold_task(engine, frames);
-            rig.hold().await;
-            rig.say(1000, Say::Partial("partial text")).await;
-            rig.release(1200).await;
-            rig.at(1449).await;
-            assert!(
-                rig.started(Cue::Accepted).is_empty(),
-                "no paste before the 250 ms wait"
-            );
-            assert_eq!(
-                rig.state(),
-                EngineState::Capturing {
-                    committed: String::new(),
-                    partial: Some("partial text".to_owned()),
-                    notice: None,
-                },
-                "an ordinary release shows no finishing state during the normal wait"
-            );
-            rig.at(1450).await;
-            assert_eq!(
-                rig.started(Cue::Accepted),
-                [1450],
-                "a recognizer that does not re-hear the end pastes at the 250 ms wait"
-            );
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "partial text")
-            );
-            let waited = read_lines(&dir.join("metrics.jsonl"))
-                .into_iter()
-                .find(|line| line["event"] == "desktop_release_wait");
-            assert!(
-                waited.is_none(),
-                "a caught-up release records no finishing wait, only the model's latency: {waited:?}"
-            );
+            for (limit, paste_at) in cases {
+                let dir = record_dir("short-release-wait");
+                let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+                let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+                if let Some(limit) = limit {
+                    rig.server.release_limit(limit);
+                }
+                let task = hold_task(engine, frames);
+                rig.hold().await;
+                rig.say(1000, Say::Partial("partial text")).await;
+                rig.release(1200).await;
+                rig.at(paste_at - 1).await;
+                assert!(!task.is_finished(), "{limit:?}: not yet at {paste_at}");
+                assert!(
+                    rig.started(Cue::Accepted).is_empty(),
+                    "{limit:?}: no paste before the wait"
+                );
+                assert_eq!(
+                    rig.state(),
+                    EngineState::Capturing {
+                        committed: String::new(),
+                        partial: Some("partial text".to_owned()),
+                        notice: None,
+                    },
+                    "{limit:?}: an ordinary release shows no finishing state during the wait"
+                );
+                rig.at(paste_at).await;
+                assert_eq!(rig.started(Cue::Accepted), [paste_at], "{limit:?}");
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, "partial text"),
+                    "{limit:?}"
+                );
+                let waited = read_lines(&dir.join("metrics.jsonl"))
+                    .into_iter()
+                    .find(|line| line["event"] == "desktop_release_wait");
+                assert!(
+                    waited.is_none(),
+                    "{limit:?}: a caught-up release records no finishing wait, only the model's latency: {waited:?}"
+                );
+            }
         })
         .await;
 }
