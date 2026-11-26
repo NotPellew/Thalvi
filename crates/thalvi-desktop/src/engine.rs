@@ -2248,29 +2248,7 @@ where
                     live.is_hold(),
                 ))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
-                Step::Tail => match live.release {
-                    Release::Tail(at)
-                        if !live.session.buffers_audio()
-                            && live.heard.spoke
-                            && live.session.behind() =>
-                    {
-                        live.release = Release::Behind(at);
-                        self.publish(live);
-                        None
-                    }
-                    _ if live.session.buffers_audio() => Some(Done::Failed(
-                        CaptureError::Recognizer(RecognizerError::said(
-                            "The speech server took too long to transcribe this capture. Nothing was delivered.",
-                        )),
-                    )),
-                    release => {
-                        let done = self.finish_hold(live, held);
-                        if let Release::Behind(at) = release {
-                            self.release_waited(live, at, &done);
-                        }
-                        Some(done)
-                    }
-                },
+                Step::Tail => self.on_tail(live, held),
                 Step::Key(open) => {
                     key_open = open;
                     self.on_key(live, held, frames).await
@@ -2285,6 +2263,31 @@ where
                 if let Some(done) = self.prepare_submit(live, request, decided).await {
                     return (done, decided);
                 }
+            }
+        }
+    }
+
+    /// Ends a released hold: at once, or after the recognizer behind it catches up.
+    fn on_tail(&mut self, live: &mut Live<R::Session>, held: Option<&Held>) -> Option<Done> {
+        match live.release {
+            Release::Tail(at)
+                if !live.session.buffers_audio() && live.heard.spoke && live.session.behind() =>
+            {
+                live.release = Release::Behind(at);
+                self.publish(live);
+                None
+            }
+            _ if live.session.buffers_audio() => Some(Done::Failed(CaptureError::Recognizer(
+                RecognizerError::said(
+                    "The speech server took too long to transcribe this capture. Nothing was delivered.",
+                ),
+            ))),
+            release => {
+                let done = self.finish_hold(live, held);
+                if let Release::Behind(at) = release {
+                    self.release_waited(live, at, &done);
+                }
+                Some(done)
             }
         }
     }
