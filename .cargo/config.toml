@@ -1,9 +1,13 @@
 [alias]
 lint = "clippy --workspace --all-targets --locked -- --deny warnings"
 docs = "doc --no-deps --workspace"
+# Advisory (cargo-machete 0.9.2): check each result against source, including build scripts and platform modules,
+# before removing a dependency. The required check is cargo-deny.
 deps-audit = "machete"
 
 [env]
+# Required checks replay these cases. An exploratory run may override the seed and records it;
+# the case count is never lowered to pass a check.
 PROPTEST_CASES = "256"
 PROPTEST_RNG_ALGORITHM = "cc"
 PROPTEST_RNG_SEED = "20261115"

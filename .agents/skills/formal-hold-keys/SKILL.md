@@ -115,7 +115,7 @@ The pinned toolchain (`rust-toolchain.toml`) and `Cargo.lock` pin every version.
 Build output uses an existing `CARGO_TARGET_DIR`, otherwise
 `${XDG_CACHE_HOME:-~/.cache}/thalvi-formal/hold-keys-target`,
 never into the checkout. It needs the Cargo dependencies already fetched and the
-Linux build prerequisites from AGENTS.md. Nothing is installed.
+Linux build prerequisites listed in `.github/scripts/gates`. Nothing is installed.
 
 It runs 351,684 scenarios (85,770 of two plain keys, 265,914 of AltGr alone beside a plain key) in under a minute with a warm Cargo cache, most of that
 compiling; each run has a 600 s limit. It prints `EVIDENCE=...`; `harness.txt` there

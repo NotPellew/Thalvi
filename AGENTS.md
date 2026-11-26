@@ -106,35 +106,14 @@ can't break and doesn't slow down the next change.
 ## Gates
 
 CI runs these as required checks on `main`. `.github/scripts/gates <component>`
-runs a component's checks exactly as CI does and stops at the first failure.
-Components: `server` (the Rust workspace on Linux), `desktop-windows`, `desktop-ui`, `speech`,
-`issue-sync`, `release`, `formal`; `all` runs every gate this OS can run and says which it skipped.
-CI jobs call the script after their toolchain setup, so a new check goes in the
-script, and a new component adds its pinned toolchain here, its case in the
-script and its CI job; one that ships on Windows also runs its gate on
-`windows-latest`. npm is the package manager; lockfiles are committed.
-
-Prerequisites the script does not install:
-
-- Rust (`crates/`): the Rust toolchain; on Linux
-  `libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`; Node
-  pinned in `.node-version`. Packaging also builds the Whisper helpers
-  (`.github/scripts/whisper-helper`): git, cmake, a C++ compiler and, on Linux,
-  `libvulkan-dev glslc spirv-headers`; on Windows the Vulkan SDK that
-  `.github/scripts/vulkan-sdk.ps1` installs. `desktop-windows` needs the same toolchains on
-  `windows-latest` and runs from Git Bash. CI then runs
-  `.github/scripts/windows-smoke.ps1` on its installer: it checks the Whisper
-  helpers, installs and starts the app and opens Settings, and uploads screenshots.
-- Desktop UI: Node pinned in `.node-version`, and on Linux the system libraries Chromium needs (`ubuntu-latest`
-  has them; elsewhere `npm exec --prefix crates/thalvi-app/ui -- playwright-core install-deps chromium` as root).
-  The gate fetches the headless shell playwright-core pins.
-- Self-hosted recognizer: `pipx` and `uv` (Python pinned in
-  `speech/asr/.python-version`).
-- Issue sync: `pipx`.
-- Release (the updater signing and feed scripts): Node pinned in `.node-version`,
-  `minisign`, and `pipx`.
-- The formal source hash checks and the `server` lint-exception checks use the
-  standard library on the Python version pinned in `.python-version`.
+runs a component's checks exactly as CI does and stops at the first failure;
+`all` runs every gate this OS can run and says which it skipped. The script
+names its components and, above each gate, the toolchains and system packages
+that gate needs and does not install. CI jobs call the script after their
+toolchain setup, so a new check goes in the script, and a new component adds
+its case and pinned toolchain there and its CI job; one that ships on Windows
+also runs its gate on `windows-latest`. npm is the package manager; lockfiles
+are committed.
 
 Two required checks are not in the script:
 
@@ -146,53 +125,29 @@ Two required checks are not in the script:
 
 Locally, run checks in three stages; none replaces a required CI result.
 
-`cargo lint` needs the desktop frontend built first (`npm ci --prefix
-crates/thalvi-app/ui` then `npm run build --prefix crates/thalvi-app/ui`); the Rust
-component gates do this. Property tests default to 256 cases with the seed and
-algorithm in `.cargo/config.toml`. An exploratory run may override
-`PROPTEST_RNG_SEED`; record that seed and preserve a minimized regression for a
-failure. Do not lower the case count to pass a check.
-
-`cargo deps-audit` (cargo-machete 0.9.2) is advisory: inspect each result against
-source, including build scripts and platform modules, before removing a dependency.
-It does not replace the required cargo-deny check.
-
 - **Editing:** the closest check that sees the edit: `cargo test -p <crate> <filter>`,
   or the desktop UI test and `npm run typecheck` for the files touched. No
-  workspace tests, docs, mutation testing or packaging.
+  workspace tests, docs, mutation testing or packaging. `cargo lint` needs the
+  desktop UI built first (`npm ci`, then `npm run build`, each with
+  `--prefix crates/thalvi-app/ui`).
 - **Before pushing,** with the work committed: `.github/scripts/changed origin/main HEAD`
-  prints the affected units. Run each affected component's gate once:
-  - Units `desktop`, `app`, `desktop-ui` (any of them): `TESTS="<packages>" BUNDLE=false
-    .github/scripts/gates server`, where `<packages>` is `-p thalvi-desktop` and `-p thalvi-app` for
-    those of `desktop`, `app` printed, or `none`. `desktop-ui` also runs
+  prints the affected units. Run each distinct gate once:
+  - `desktop`, `app`, `desktop-ui`: one `TESTS="<packages>" BUNDLE=false .github/scripts/gates server`
+    (on Windows, `gates desktop-windows`), where `<packages>` is `-p thalvi-desktop` and
+    `-p thalvi-app` for those of `desktop` and `app` printed, or `none`. `desktop-ui` also runs
     `.github/scripts/gates desktop-ui`.
-  - Unit `speech`: `.github/scripts/gates speech`. Unit `issues`: `.github/scripts/gates issue-sync`.
-  - `none` (only Markdown outside `crates/` and `speech/`): run no gate.
-  - `all` (an empty, unreadable or shallow diff, or any path outside the mapped ones, such as
-    `crates/thalvi-app/tauri.conf.json`, its icons and build files): `.github/scripts/gates all`, unnarrowed.
-    That is the only case that builds the AppImage or NSIS package locally.
-  - A gate this OS can't run stays reported as skipped, never passed: off Windows, `desktop-windows`
-    (units `desktop`, `app`, `desktop-ui`; on Windows its command is `TESTS="<-p thalvi-desktop and
-    -p thalvi-app as printed, or none>" BUNDLE=false .github/scripts/gates desktop-windows`). Windows CI or a
-    Windows machine covers it.
-- **After pushing:** PR CI runs the affected tier, and the heavy run on `main` runs every gate.
+  - `speech`: `.github/scripts/gates speech`. `issues`: `.github/scripts/gates issue-sync`.
+    `none`: no gate.
+  - `all`: `.github/scripts/gates all`, unnarrowed. Only this case builds the AppImage or NSIS
+    package locally.
+  - A gate this OS can't run is reported as skipped, never passed.
+- **After pushing:** PR CI runs the steps the changed paths affect, and
+  `.github/workflows/heavy.yml` runs every gate on `main`, with Settings
+  exploration, the GNOME AppImage check and mutation testing.
 
-On a PR, CI runs only the steps its changed paths affect
-(`.github/scripts/changed`). The job names stay so required checks still
-report. `.github/workflows/heavy.yml` runs every gate on each push to `main`,
-nightly and on request, along with randomized Settings exploration, the
-GNOME AppImage check and mutation testing.
-Mutation testing runs `cargo mutants --in-place --in-diff <diff>`
-(cargo-mutants 27.1.0) over changes since `verified` in the files listed
-under `examine_globs` in `.cargo/mutants.toml`. Survivors, timeouts and
-baseline failures fail the shard. For survivors listed in the step summary,
-add a missing test or record a proven equivalent or OS-only wiring exclusion
-with a one-line reason. A full Heavy run on `main` moves `verified` only
-when `ci`, `mutants`, `explore` and `gnome-appimage` all succeed. A failed
-full run on `main` opens or updates the `ci-regression` issue.
-Run mutation testing locally only when an issue explicitly asks for it,
-and only `--in-diff` against the base with no desktop session and a
-throwaway `HOME`, since it runs tests against deliberately broken code.
+Run mutation testing locally only when an issue explicitly asks for it, and
+only `--in-diff` against the base with no desktop session and a throwaway
+`HOME`, since it runs tests against deliberately broken code.
 
 ## Git and PRs
 
