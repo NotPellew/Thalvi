@@ -35,7 +35,7 @@ check desktop-ui crates/thalvi-app/ui/src/main.ts
 check speech speech/asr/app.py speech/nemotron-asr.sh
 check issues .github/scripts/issue-refs.test.sh
 check 'desktop app desktop-ui' crates/thalvi-desktop/src/a.rs crates/thalvi-app/src/b.rs crates/thalvi-app/ui/src/c.ts
-check none README.md DECISIONS.md .agents/skills/verify-thalvi/SKILL.md .github/pull_request_template.md
+check none README.md decisions/app.md .agents/skills/verify-thalvi/SKILL.md .github/pull_request_template.md
 check speech speech/README.md
 check desktop-ui README.md crates/thalvi-app/ui/src/a.ts
 check all crates/thalvi-app/README.md

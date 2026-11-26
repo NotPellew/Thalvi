@@ -174,7 +174,7 @@ to make a run pass.
    window, or a new way of looking at presses. Keep the bounds; report any
    reduction. Update each `MUTATIONS` entry whose text moved.
 3. Change a property only for a promise that changed on purpose, with evidence
-   (a doc comment, test, DECISIONS.md entry or commit message), and record the
+   (a doc comment, test, `decisions/` entry or commit message), and record the
    old wording, the new wording and that evidence here.
 4. Update the SHA-256 in `source.json` (`sha256sum crates/thalvi-desktop/src/hold.rs`),
    and move `sync_commit` only after confirming the harness describes that

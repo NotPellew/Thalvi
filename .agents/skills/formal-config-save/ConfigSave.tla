@@ -236,7 +236,7 @@ RunningMatchesFile == Quiet => (File = mem /\ engine = mem.form)
 \* Once every save has returned, each form field holds the value of the last reported save
 \* that set it, so a save that sets one field never undoes another's; the switch holds the last
 \* reported switch: a Save never writes the switch, a switch never writes the form
-\* (DECISIONS.md, "Packaged desktop with an OS-held login entry").
+\* (decisions/app.md, "Packaged desktop with an OS-held login entry").
 EachFieldKeepsItsLastSave ==
     Quiet => (\A f \in Fields : File.form[f] = lastField[f]) /\ File.switch = lastSwitch
 ================================================================================

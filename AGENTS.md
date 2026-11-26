@@ -3,7 +3,7 @@
 Thalvi is a desktop voice accessory: it hears you at your computer and delivers
 the words to the window you are using, and remembers nothing beyond its
 settings. The goals are solid engineering, good UX, and a lean codebase. Decisions in force live in
-[DECISIONS.md](DECISIONS.md); read the areas your change touches before
+[decisions/](decisions/), one file per area; read the areas your change touches before
 writing code.
 
 Here, *the user* is the person using Thalvi, and *the developer* is the person
@@ -176,7 +176,7 @@ only `--in-diff` against the base with no desktop session and a throwaway
 ## Docs
 
 - Write only what the code cannot answer.
-- A DECISIONS.md bullet records a choice someone might revisit:
+- A `decisions/` bullet records a choice someone might revisit:
   `**Name.** Rule. Why: … Rejected: …`, four lines at most. Edit it in place,
   in the PR that changes the decision.
 - This file changes in the same PR as the convention it describes.
