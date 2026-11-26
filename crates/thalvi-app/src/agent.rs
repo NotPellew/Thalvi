@@ -1686,6 +1686,9 @@ mod tests {
             {"kind": "realtime", "id": "x", "name": "X", "active": false, "address": "ws://127.0.0.1:9", "model": "m"}
         ]}}"#;
         let rig = Rig::new("old-extra-flags", config);
+        rig.fake.saves.store.write(&rig.fake.config()).unwrap();
+        let file = rig.fake.folder.join("desktop.json");
+        let saved = std::fs::read(&file).unwrap();
         let before = rig.ask(&Request::SettingsGet)["settings"]["stt"]["entries"].clone();
         for flag in ["extra", "final_pass"] {
             let mut entries = before.clone();
@@ -1694,6 +1697,11 @@ mod tests {
             assert_eq!(set, json!({"ok": true, "changed": false}), "{flag}");
             let after = rig.ask(&Request::SettingsGet)["settings"]["stt"]["entries"].clone();
             assert_eq!(after, before, "{flag}");
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                saved,
+                "{flag}: the settings file is unchanged"
+            );
         }
     }
 
