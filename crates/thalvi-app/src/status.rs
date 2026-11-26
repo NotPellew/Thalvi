@@ -103,7 +103,7 @@ pub enum Status {
     Failed {
         notice: String,
         /// `notice` as one short line that fits the overlay.
-        headline: &'static str,
+        headline: String,
         /// The technical causes behind `notice`, outermost first, for the error report.
         causes: Vec<String>,
         kind: FailureKind,
@@ -149,7 +149,7 @@ pub enum FailureKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failure {
     pub notice: String,
-    pub headline: &'static str,
+    pub headline: String,
     pub causes: Vec<String>,
     pub kind: FailureKind,
 }
@@ -184,7 +184,7 @@ impl LastError {
         {
             *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(Failure {
                 notice: notice.clone(),
-                headline,
+                headline: headline.clone(),
                 causes: causes.clone(),
                 kind: *kind,
             });
@@ -354,7 +354,7 @@ impl View {
             },
             (Mode::Failed(failure), EngineState::Listening) => Status::Failed {
                 notice: failure.notice.clone(),
-                headline: failure.headline,
+                headline: failure.headline.clone(),
                 causes: failure.causes.clone(),
                 kind: failure.kind,
             },
@@ -658,7 +658,7 @@ mod tests {
         let failed = Mode::Failed(Failure {
             kind: FailureKind::Other,
             notice: "The microphone is off.".to_owned(),
-            headline: "Failed",
+            headline: "Failed".to_owned(),
             causes: Vec::new(),
         });
         let cases = [
@@ -728,7 +728,7 @@ mod tests {
                 Status::Failed {
                     kind: FailureKind::Other,
                     notice: "The microphone is off.".to_owned(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: Vec::new(),
                 },
             ),
@@ -843,7 +843,7 @@ mod tests {
                 Mode::Failed(Failure {
                     kind: FailureKind::Other,
                     notice: "The microphone is off.".to_owned(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: vec!["open failed".to_owned()],
                 }),
                 EngineState::Listening
@@ -851,7 +851,7 @@ mod tests {
             Status::Failed {
                 kind: FailureKind::Other,
                 notice: "The microphone is off.".to_owned(),
-                headline: "Failed",
+                headline: "Failed".to_owned(),
                 causes: vec!["open failed".to_owned()],
             }
         );
@@ -888,7 +888,7 @@ mod tests {
                 Mode::Failed(Failure {
                     kind: FailureKind::Other,
                     notice: "Old failure.".to_owned(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: Vec::new(),
                 }),
                 EngineState::Listening,
@@ -1002,7 +1002,7 @@ mod tests {
                 Status::Failed {
                     kind: FailureKind::Other,
                     notice: "No.".to_owned(),
-                    headline: "No",
+                    headline: "No".to_owned(),
                     causes: vec!["connection refused (os error 111)".to_owned()],
                 },
                 json!({"state": "failed", "notice": "No.", "headline": "No", "causes": ["connection refused (os error 111)"], "kind": "other"}),
@@ -1025,7 +1025,7 @@ mod tests {
         let failed = |notice: &str| Status::Failed {
             kind: FailureKind::Other,
             notice: notice.to_owned(),
-            headline: "Failed",
+            headline: "Failed".to_owned(),
             causes: vec![format!("cause of {notice}")],
         };
         let last = LastError::default();
@@ -1062,7 +1062,7 @@ mod tests {
             Failure {
                 kind: FailureKind::Other,
                 notice: error.to_string(),
-                headline: "Can't reach speech server — Settings",
+                headline: "Can't reach speech server — Settings".to_owned(),
                 causes: vec!["connection refused (os error 111)".to_owned()],
             }
         );

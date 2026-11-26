@@ -1272,6 +1272,16 @@ impl SpeechChoice {
             Self::Whisper(backend) => backend.name().to_owned(),
         }
     }
+
+    /// What the user knows the model by, as Settings lists it.
+    #[must_use]
+    pub fn title(&self) -> String {
+        match self {
+            Self::Catalog(catalog) => catalog.title().to_owned(),
+            Self::Folder(path) => path.display().to_string(),
+            Self::Whisper(backend) => backend.title().to_owned(),
+        }
+    }
 }
 
 /// Fetches the chosen model into the store and loads it.

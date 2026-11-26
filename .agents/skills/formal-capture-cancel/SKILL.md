@@ -221,6 +221,14 @@ admitting delivery, and `Engine::on_quiet` rechecks `Presentation::Shown` before
 `confirm_final_submit` keep the same cancellation writes and delivery fence, so the model actions
 are unchanged.
 
+Stopping an on-device recognition that fell 3 s behind the microphone (#455) makes
+`LocalSession::send_frame` return `RecognizerError::Behind`, which `Engine::feed` turns into the
+same `Stop::Failed` a failed frame send already produced, under the same cancellation-biased
+select. The session drops its queued frames and the capture delivers nothing; metrics record
+`cant_keep_up` and the lag when the worker ends. The owned `headline` in `UserError`, `Finished`
+and `Status` is display text only. No await, queue step or write to cancellation state is added,
+so the model actions and bounds are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty

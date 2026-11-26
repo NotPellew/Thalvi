@@ -31,6 +31,7 @@ use thalvi_desktop::models::CatalogSpeech;
 use thalvi_desktop::recognizer::{
     FakeCall, FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent, SpeechSource,
 };
+use thalvi_desktop::report::UserError;
 use thalvi_desktop::secondary::Language;
 use thalvi_desktop::spotter::KeywordSpotter;
 use thalvi_desktop::vad::VadDetector;
@@ -3665,6 +3666,43 @@ async fn a_failed_capture_records_which_kind_of_failure_and_its_calls() {
                     "{expected:?} missing from {seen:?}"
                 );
             }
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_capture_that_falls_behind_the_microphone_names_the_model_and_stops() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("cant-keep-up");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            let task = capture_task(engine, frames);
+            rig.open().await;
+            rig.feed_until(1_000, Kind::Quiet).await;
+            rig.server.emit(Err(RecognizerError::Behind {
+                model: "Nemotron 160ms".to_owned(),
+                lag: Duration::from_millis(3_040),
+            }));
+            let outcome = finished(task).await;
+            let CaptureOutcome::Failed { error, .. } = &outcome else {
+                panic!("the capture fails: {outcome:?}");
+            };
+            assert_eq!(
+                error.to_string(),
+                "This computer can't keep up with Nemotron 160ms. Nothing was delivered."
+            );
+            assert_eq!(error.headline(), "Nemotron 160ms is too slow");
+            assert!(rig.gate.is_enabled(), "listening goes on");
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let flow = lines
+                .iter()
+                .find(|line| line["event"] == "desktop_capture_flow")
+                .unwrap();
+            assert_eq!(
+                (flow["outcome"].as_str(), flow["reason"].as_str()),
+                (Some("failed"), Some("cant_keep_up"))
+            );
         })
         .await;
 }

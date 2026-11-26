@@ -208,23 +208,23 @@ pub enum RecognizerError {
     },
     /// A speech model that could not be provided; the headline is the model error's own.
     #[error("{message}")]
-    Model {
-        headline: &'static str,
-        message: String,
-    },
+    Model { headline: String, message: String },
+    /// The model on this computer fell `lag` behind the microphone, further than a capture may.
+    #[error("This computer can't keep up with {model}. Nothing was delivered.")]
+    Behind { model: String, lag: Duration },
     /// Text the recognizer wrote for the user itself.
     #[error("{0}")]
     Said(String),
 }
 
 impl UserError for RecognizerError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::Certificate { .. } => "Server certificate problem",
             Self::Unreachable { .. } => "Can't reach speech server — Settings",
             Self::Dropped { .. } => "Speech server hung up — Settings",
             Self::NotUnderstood { .. } => "Bad speech server reply — Settings",
-            Self::Model { headline, .. } => headline,
+            Self::Model { headline, .. } => return headline.clone(),
             Self::Reported { .. } | Self::Said(_) => "Speech recognition failed — Settings",
             Self::Transcription { failure, .. } => match failure {
                 TranscriptionFailure::Unreachable => "Can't reach speech server — Settings",
@@ -232,7 +232,9 @@ impl UserError for RecognizerError {
                 TranscriptionFailure::HttpStatus => "Speech server error — Settings",
                 TranscriptionFailure::BadReply => "Bad speech server reply — Settings",
             },
+            Self::Behind { model, .. } => return format!("{model} is too slow"),
         }
+        .to_owned()
     }
 }
 

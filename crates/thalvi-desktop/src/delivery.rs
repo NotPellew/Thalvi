@@ -51,8 +51,8 @@ pub fn submit_notice(state: &EngineState, window: &str) -> Option<String> {
 pub struct TerminalLines;
 
 impl UserError for TerminalLines {
-    fn headline(&self) -> &'static str {
-        "Copied — paste the lines yourself"
+    fn headline(&self) -> String {
+        "Copied — paste the lines yourself".to_owned()
     }
 }
 
@@ -68,7 +68,7 @@ pub struct Finished {
     /// Says what happened and where the dictated text went.
     pub notice: String,
     /// `notice` as one short line for the overlay.
-    pub headline: &'static str,
+    pub headline: String,
     /// The technical causes behind a failure, outermost first.
     pub causes: Vec<String>,
     /// The selected task's destination (the address opened or the app focused), when delivery
@@ -84,13 +84,13 @@ impl Finished {
             text_delivery: None,
             maybe_partial: false,
             notice,
-            headline: "Delivered",
+            headline: "Delivered".to_owned(),
             causes: Vec::new(),
             task_target: None,
         }
     }
 
-    fn kept(notice: String, headline: &'static str) -> Self {
+    fn kept(notice: String, headline: String) -> Self {
         Self {
             delivered: false,
             text_delivery: None,
@@ -190,7 +190,10 @@ where
         enter: bool,
     ) -> Finished {
         if text.is_empty() && !enter {
-            return Finished::kept("There was nothing to paste.".to_owned(), "Nothing to paste");
+            return Finished::kept(
+                "There was nothing to paste.".to_owned(),
+                "Nothing to paste".to_owned(),
+            );
         }
         let result = match (&bound.0, PasteText::new(text)) {
             (Ok(target), Ok(pasted)) => {
@@ -294,7 +297,7 @@ where
                     format!(
                         "{what_happened} Clipboard recovery failed: {copy_error} Your text follows:\n{text}"
                     ),
-                    "Clipboard failed — text in Settings",
+                    "Clipboard failed — text in Settings".to_owned(),
                 ),
             }
         };
@@ -788,7 +791,10 @@ mod tests {
         ];
         for (host, outcome, headline) in cases {
             let (finished, _) = finish(host, outcome).await;
-            assert_eq!(finished.map(|finished| finished.headline), Some(headline));
+            assert_eq!(
+                finished.map(|finished| finished.headline),
+                Some(headline.to_owned())
+            );
         }
     }
 

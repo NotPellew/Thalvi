@@ -170,11 +170,12 @@ pub enum RecorderError {
 }
 
 impl UserError for RecorderError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::NoDataDir => "No folder to record into",
             Self::Writer(_) => "Recording can't start",
         }
+        .to_owned()
     }
 }
 

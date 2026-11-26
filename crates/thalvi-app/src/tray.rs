@@ -505,7 +505,7 @@ mod tests {
                 Status::Failed {
                     kind: FailureKind::Other,
                     notice: "Your text follows: secret words".to_owned(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: Vec::new(),
                 },
                 Icon::Error,
@@ -647,7 +647,7 @@ mod tests {
                 Status::Failed {
                     kind: FailureKind::Other,
                     notice: String::new(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: Vec::new(),
                 },
                 false,

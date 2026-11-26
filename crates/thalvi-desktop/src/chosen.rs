@@ -131,6 +131,7 @@ impl Chosen {
                 recognizer: Arc::new(LocalRecognizer::new(
                     TransducerSource::new(store, choice.clone(), phrases, adapters),
                     choice.label(),
+                    choice.title(),
                     metrics,
                 )),
                 speech: entry.source(),

@@ -296,15 +296,16 @@ pub enum WakeError {
 }
 
 impl UserError for WakeError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::Config(_) => "Wake settings can't be used",
-            Self::Model(error) => error.headline(),
+            Self::Model(error) => return error.headline(),
             Self::Runtime(_) => "Wake word engine won't start",
             Self::Load { .. } => "Wake model can't be loaded",
             Self::Head { .. } => "Wake model can't be used",
             Self::Inference(_) => "Wake word detection failed",
         }
+        .to_owned()
     }
 }
 

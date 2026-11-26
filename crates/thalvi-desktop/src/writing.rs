@@ -707,7 +707,7 @@ impl WritingError {
 }
 
 impl UserError for WritingError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::NotSetUp => "Writing not set up — Settings",
             Self::Timeout => "Writing took too long",
@@ -721,6 +721,7 @@ impl UserError for WritingError {
             Self::BadResponse => "Writing reply unreadable",
             Self::Empty => "Writing returned no text",
         }
+        .to_owned()
     }
 }
 

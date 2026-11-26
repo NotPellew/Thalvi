@@ -608,7 +608,7 @@ impl Publisher {
             self.mode(Mode::Failed(Failure {
                 kind: FailureKind::Other,
                 notice: refusal.notice().to_owned(),
-                headline: refusal.headline(),
+                headline: refusal.headline().to_owned(),
                 causes: Vec::new(),
             }));
         }
@@ -632,7 +632,7 @@ impl Publisher {
                 publisher.mode(Mode::Failed(Failure {
                     kind: FailureKind::Other,
                     notice: notice.to_owned(),
-                    headline: "Dictation notice",
+                    headline: "Dictation notice".to_owned(),
                     causes: Vec::new(),
                 }));
             }
@@ -937,7 +937,7 @@ fn audio_thread_crashed(error: &tokio::task::JoinError) -> Failure {
     Failure {
         kind: FailureKind::Other,
         notice: "The microphone's audio thread crashed. Restart Thalvi.".to_owned(),
-        headline: "Microphone crashed — restart Thalvi",
+        headline: "Microphone crashed — restart Thalvi".to_owned(),
         causes: vec![error.to_string()],
     }
 }
@@ -1908,7 +1908,7 @@ fn told(mode: Mode, ignored: &[Refusal]) -> Mode {
         _ => Mode::Failed(Failure {
             kind: FailureKind::Other,
             notice: extra,
-            headline: first.headline(),
+            headline: first.headline().to_owned(),
             causes: Vec::new(),
         }),
     }
@@ -2007,7 +2007,7 @@ fn hold_failure(notice: String) -> Failure {
         kind: FailureKind::Other,
         causes: vec![notice.clone()],
         notice,
-        headline: "Hold key unavailable",
+        headline: "Hold key unavailable".to_owned(),
     }
 }
 
@@ -2543,7 +2543,7 @@ mod tests {
                     kind: FailureKind::Recognizer,
                     notice: "Could not download the speech model. Dictation will try again when you start it."
                         .to_owned(),
-                    headline: "Speech recognition failed — Settings",
+                    headline: "Speech recognition failed — Settings".to_owned(),
                     causes: Vec::new(),
                 }),
             ),
@@ -2555,6 +2555,7 @@ mod tests {
                     gate: std::sync::Mutex::new(Some(gate)),
                     fails,
                 },
+                "test",
                 "test",
                 Recorder::disabled().metrics(),
             );
@@ -2616,7 +2617,7 @@ mod tests {
         Mode::Failed(Failure {
             kind: FailureKind::Other,
             notice: "No microphone.".to_owned(),
-            headline: "No microphone",
+            headline: "No microphone".to_owned(),
             causes: Vec::new(),
         })
     }
@@ -2626,6 +2627,7 @@ mod tests {
      {
         let local = LocalRecognizer::new(
             FailsOnce(std::sync::atomic::AtomicBool::new(true)),
+            "test",
             "test",
             Recorder::disabled().metrics(),
         );
@@ -2659,6 +2661,7 @@ mod tests {
             let local = LocalRecognizer::new(
                 FailsOnce(std::sync::atomic::AtomicBool::new(true)),
                 "test",
+                "test",
                 Recorder::disabled().metrics(),
             );
             let (out, _status) = watch::channel(Status::Paused);
@@ -2676,11 +2679,13 @@ mod tests {
         let loaded = LocalRecognizer::new(
             FailsOnce(std::sync::atomic::AtomicBool::new(false)),
             "test",
+            "test",
             Recorder::disabled().metrics(),
         );
         loaded.load().await.unwrap();
         let unloaded = LocalRecognizer::new(
             FailsOnce(std::sync::atomic::AtomicBool::new(false)),
+            "test",
             "test",
             Recorder::disabled().metrics(),
         );
@@ -2760,6 +2765,7 @@ mod tests {
         let (steps, received) = mpsc::unbounded_channel();
         let local = Arc::new(LocalRecognizer::new(
             Streamed(std::sync::Mutex::new(Some(received))),
+            "test",
             "test",
             Recorder::disabled().metrics(),
         ));
@@ -2853,7 +2859,7 @@ mod tests {
         let failed = Mode::Failed(Failure {
             kind: FailureKind::Other,
             notice: "Could not download the model.".to_owned(),
-            headline: "Download failed",
+            headline: "Download failed".to_owned(),
             causes: Vec::new(),
         });
         // A retry after a failed download starts from Paused (the tray) or Failed (Settings).
@@ -3726,7 +3732,7 @@ mod tests {
             text_delivery: None,
             maybe_partial: false,
             notice: "Done.".to_owned(),
-            headline: "Done",
+            headline: "Done".to_owned(),
             causes: Vec::new(),
             task_target: None,
         };
@@ -3738,7 +3744,7 @@ mod tests {
             ),
             Mode::Failed(Failure {
                 notice: "Done.".to_owned(),
-                headline: "Done",
+                headline: "Done".to_owned(),
                 causes: Vec::new(),
                 kind: FailureKind::Delivery,
             }),
@@ -3806,7 +3812,7 @@ mod tests {
         let failure = Failure {
             kind: FailureKind::Delivery,
             notice: "It failed.".to_owned(),
-            headline: "Failed",
+            headline: "Failed".to_owned(),
             causes: Vec::new(),
         };
         let note =
@@ -3846,7 +3852,7 @@ mod tests {
         let failure = |notice: &str| Failure {
             kind: FailureKind::Other,
             notice: notice.to_owned(),
-            headline: "Nothing was pasted",
+            headline: "Nothing was pasted".to_owned(),
             causes: vec!["cause".to_owned()],
         };
         let done = Mode::Done {
@@ -3886,7 +3892,7 @@ mod tests {
             Mode::Failed(Failure {
                 kind: FailureKind::Other,
                 notice: Refusal::Capturing.notice().to_owned(),
-                headline: "Dictating — key ignored",
+                headline: "Dictating — key ignored".to_owned(),
                 causes: Vec::new(),
             }),
             "a cancelled capture has no result to add to"
@@ -4082,7 +4088,7 @@ mod tests {
 
         let other = Mode::Failed(Failure {
             kind: FailureKind::Other,
-            headline: "Another failure",
+            headline: "Another failure".to_owned(),
             notice: "Keep this.".to_owned(),
             causes: Vec::new(),
         });
@@ -4135,7 +4141,7 @@ mod tests {
         );
         let failure = hold_failure("Windows refused the hook.".to_owned());
         assert_eq!(
-            (failure.notice.as_str(), failure.headline),
+            (failure.notice.as_str(), failure.headline.as_str()),
             ("Windows refused the hook.", "Hold key unavailable")
         );
     }
@@ -5518,9 +5524,8 @@ mod tests {
                         matches!(
                             status,
                             Status::Failed {
-                                headline: "Paused — key ignored",
-                                ..
-                            }
+                                headline, ..
+                            } if headline == "Paused — key ignored"
                         )
                     },
                 )
@@ -5557,9 +5562,8 @@ mod tests {
                         matches!(
                             status,
                             Status::Failed {
-                                headline: "Paused — key ignored",
-                                ..
-                            }
+                                headline, ..
+                            } if headline == "Paused — key ignored"
                         )
                     },
                 )
@@ -5705,7 +5709,7 @@ mod tests {
                 .await;
                 let overlay_failure = || Failure {
                     kind: FailureKind::Other,
-                    headline: "Status overlay unavailable",
+                    headline: "Status overlay unavailable".to_owned(),
                     notice: "The overlay surface closed.".to_owned(),
                     causes: Vec::new(),
                 };
@@ -5763,6 +5767,7 @@ mod tests {
                         fails: false,
                     },
                     "test",
+                    "test",
                     Recorder::disabled().metrics(),
                 );
                 let mut script = FedRun::configured(
@@ -5794,6 +5799,7 @@ mod tests {
             .run_until(async {
                 let local = LocalRecognizer::new(
                     FailsOnce(std::sync::atomic::AtomicBool::new(true)),
+                    "test",
                     "test",
                     Recorder::disabled().metrics(),
                 );
