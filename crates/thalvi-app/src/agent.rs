@@ -2407,7 +2407,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_is_checked_where_it_enters_and_never_repeats_a_key() {
+    fn a_request_is_checked_where_it_enters_including_the_newer_commands_and_never_repeats_a_key() {
         let rig = Rig::new("entry", "{}");
         let set = rig
             .set(json!({"stt": {"entries": [entry("cybrex2", "realtime", true, Some(SECRET))]}}));
@@ -2418,6 +2418,8 @@ mod tests {
                 COMMANDS.join(", ")
             )
         };
+        let needs =
+            |command: &str| format!("The command {command} was sent without the details it needs.");
         for command in COMMANDS {
             let parsed = Request::parse(&json!({"command": command}).to_string());
             assert!(
@@ -2436,6 +2438,33 @@ mod tests {
             (
                 r#"{"command": "pause", "force": true}"#,
                 "The command pause takes no other details.".to_owned(),
+            ),
+            (r#"{"command": "feed"}"#, needs("feed")),
+            (
+                r#"{"command": "feed", "path": "/a.wav", "loop": true}"#,
+                needs("feed"),
+            ),
+            (
+                r#"{"command": "model-download", "name": "m"}"#,
+                needs("model-download"),
+            ),
+            (
+                r#"{"command": "model-download", "kind": "voice", "name": "m"}"#,
+                needs("model-download"),
+            ),
+            (
+                r#"{"command": "model-download", "kind": "wake"}"#,
+                needs("model-download"),
+            ),
+            (r#"{"command": "speech-check"}"#, needs("speech-check")),
+            (r#"{"command": "show", "page": 3}"#, needs("show")),
+            (
+                r#"{"command": "models", "all": true}"#,
+                "The command models takes no other details.".to_owned(),
+            ),
+            (
+                r#"{"command": "quit", "force": true}"#,
+                "The command quit takes no other details.".to_owned(),
             ),
             (r#"{"command": "rm"}"#, unknown()),
             (&format!(r#"{{"command": "{SECRET}"}}"#), unknown()),
@@ -2456,6 +2485,7 @@ mod tests {
         });
         assert!(!checked.to_string().contains(SECRET), "{checked}");
         assert_eq!(rig.fake.config().stt.entries.key_of("cybrex2"), SECRET);
+        assert_eq!(rig.fake.quit.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(target_os = "linux")]
@@ -2929,49 +2959,6 @@ mod tests {
             .filter_map(|line| line.split('"').next())
             .collect();
         assert_eq!(ids, PAGES);
-    }
-
-    #[test]
-    fn the_new_commands_are_checked_where_they_enter() {
-        let rig = Rig::new("new-entry", "{}");
-        let needs =
-            |command: &str| format!("The command {command} was sent without the details it needs.");
-        for (line, error) in [
-            (r#"{"command": "feed"}"#, needs("feed")),
-            (
-                r#"{"command": "feed", "path": "/a.wav", "loop": true}"#,
-                needs("feed"),
-            ),
-            (
-                r#"{"command": "model-download", "name": "m"}"#,
-                needs("model-download"),
-            ),
-            (
-                r#"{"command": "model-download", "kind": "voice", "name": "m"}"#,
-                needs("model-download"),
-            ),
-            (
-                r#"{"command": "model-download", "kind": "wake"}"#,
-                needs("model-download"),
-            ),
-            (r#"{"command": "speech-check"}"#, needs("speech-check")),
-            (r#"{"command": "show", "page": 3}"#, needs("show")),
-            (
-                r#"{"command": "models", "all": true}"#,
-                "The command models takes no other details.".to_owned(),
-            ),
-            (
-                r#"{"command": "quit", "force": true}"#,
-                "The command quit takes no other details.".to_owned(),
-            ),
-        ] {
-            assert_eq!(
-                rig.ask_line(line),
-                json!({"ok": false, "error": error}),
-                "{line}"
-            );
-        }
-        assert_eq!(rig.fake.quit.load(Ordering::SeqCst), 0);
     }
 
     #[test]

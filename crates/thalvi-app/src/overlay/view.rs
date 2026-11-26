@@ -808,7 +808,8 @@ mod tests {
     }
 
     #[test]
-    fn flipping_the_draft_switch_rebuilds_the_current_line_and_nothing_else() {
+    fn flipping_the_draft_switch_rebuilds_the_current_line_and_nothing_else_and_clears_the_words_a_working_delivery_keeps()
+     {
         let words = |committed: &str, partial: &str, caret| Line::Words {
             committed: committed.to_owned(),
             partial: partial.to_owned(),
@@ -850,10 +851,7 @@ mod tests {
             assert_eq!(view.line, shown, "{status:?} on again");
             assert_eq!(timing(&view), before, "{status:?}");
         }
-    }
 
-    #[test]
-    fn turning_the_draft_off_while_a_delivery_works_clears_the_words_it_keeps() {
         let mut view = View::new(false);
         view.set_status(
             Status::Writing {

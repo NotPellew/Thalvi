@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_and_tooltip_carry_the_updates_news_after_the_state() {
+    fn the_menu_texts_carry_the_news_the_opposite_intent_the_lighter_model_and_the_copy_state() {
         for (remark, expected) in [
             (None, "Thalvi: listening"),
             (
@@ -652,12 +652,30 @@ mod tests {
         ] {
             assert_eq!(headline("Thalvi: listening", remark), expected);
         }
-    }
-
-    #[test]
-    fn the_menu_offers_the_opposite_of_the_current_listening_intent() {
         for (paused, expected) in [(true, "Resume listening"), (false, "Pause listening")] {
             assert_eq!(toggle_text(paused), expected);
+        }
+        assert_eq!(
+            lighter_text(LighterModel {
+                name: "parakeet_tdt_v3",
+                title: "Parakeet TDT v3",
+            }),
+            "Use Parakeet TDT v3 (lighter)"
+        );
+        for (item, text, enabled) in [
+            (CopyItem::NoError, "No error to copy", false),
+            (CopyItem::Ready, "Copy last error", true),
+            (
+                CopyItem::Failed("wl-copy is not installed.".to_owned()),
+                "Could not copy: wl-copy is not installed.",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                (item.text().as_str(), item.enabled()),
+                (text, enabled),
+                "{item:?}"
+            );
         }
     }
 
@@ -706,36 +724,6 @@ mod tests {
             ),
         ] {
             assert_eq!(can_cancel(&status), cancellable, "{status:?}");
-        }
-    }
-
-    #[test]
-    fn the_lighter_model_item_names_the_model_it_switches_to() {
-        assert_eq!(
-            lighter_text(LighterModel {
-                name: "parakeet_tdt_v3",
-                title: "Parakeet TDT v3",
-            }),
-            "Use Parakeet TDT v3 (lighter)"
-        );
-    }
-
-    #[test]
-    fn the_copy_item_offers_the_last_error_when_there_is_one_and_says_why_a_copy_failed() {
-        for (item, text, enabled) in [
-            (CopyItem::NoError, "No error to copy", false),
-            (CopyItem::Ready, "Copy last error", true),
-            (
-                CopyItem::Failed("wl-copy is not installed.".to_owned()),
-                "Could not copy: wl-copy is not installed.",
-                true,
-            ),
-        ] {
-            assert_eq!(
-                (item.text().as_str(), item.enabled()),
-                (text, enabled),
-                "{item:?}"
-            );
         }
     }
 }

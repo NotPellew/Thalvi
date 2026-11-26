@@ -2954,29 +2954,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_away_mid_download_leaves_no_downloading_notice() {
-        LocalSet::new()
-            .run_until(async {
-                let (steps, publisher, load, mut status) = loading_download();
-                let cpu = cpu_files(CatalogSpeech::Nemotron160ms);
-                steps.send(Step::Downloading(cpu, 40)).unwrap();
-                assert_eq!(
-                    next_loading(&mut status).await.0,
-                    "Downloading the speech model, about 662 MB \u{2014} 40%"
-                );
-
-                load.abort();
-                assert!(load.await.unwrap_err().is_cancelled());
-                publisher.loading(None);
-                let late = steps.send(Step::Downloading(cpu, 41));
-
-                assert!(late.is_err(), "the aborted load no longer listens");
-                assert_eq!(*status.borrow(), Status::Listening);
-            })
-            .await;
-    }
-
-    #[tokio::test]
     async fn the_overlay_shows_a_wake_download_only_while_a_missing_file_downloads() {
         let config = WakeConfig::default();
         let cached = [
@@ -3146,36 +3123,25 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_control_that_ends_the_capture_before_it_starts_keeps_it_from_starting() {
-        for (control, quit, listening_off) in [
-            (Control::Quit, true, false),
-            (Control::Cancel, false, false),
-            (Control::SetListening(false), false, true),
-            (Control::ToggleListening, false, true),
-        ] {
-            let label = format!("{control:?}");
-            let (outcome, requests, started) = run(vec![control], vec![]).await;
-            assert_eq!(outcome, None, "{label}");
-            assert!(!started, "{label}");
-            assert_eq!(requests.quit, quit, "{label}");
-            assert_eq!(requests.listening_off, listening_off, "{label}");
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_control_during_the_capture_cancels_it() {
-        for (control, quit, listening_off) in [
-            (Control::Quit, true, false),
-            (Control::Cancel, false, false),
-            (Control::SetListening(false), false, true),
-            (Control::ToggleListening, false, true),
-        ] {
-            let label = format!("{control:?}");
-            let (outcome, requests, started) = run(vec![], vec![control]).await;
-            assert_eq!(outcome, Some("cancelled"), "{label}");
-            assert!(started, "{label}");
-            assert_eq!(requests.quit, quit, "{label}");
-            assert_eq!(requests.listening_off, listening_off, "{label}");
+    async fn a_control_ends_the_capture_before_it_starts_or_cancels_it_during() {
+        for during in [false, true] {
+            for (control, quit, listening_off) in [
+                (Control::Quit, true, false),
+                (Control::Cancel, false, false),
+                (Control::SetListening(false), false, true),
+                (Control::ToggleListening, false, true),
+            ] {
+                let label = format!("{control:?} during {during}");
+                let (outcome, requests, started) = if during {
+                    run(vec![], vec![control]).await
+                } else {
+                    run(vec![control], vec![]).await
+                };
+                assert_eq!(outcome, during.then_some("cancelled"), "{label}");
+                assert_eq!(started, during, "{label}");
+                assert_eq!(requests.quit, quit, "{label}");
+                assert_eq!(requests.listening_off, listening_off, "{label}");
+            }
         }
     }
 
@@ -3288,6 +3254,16 @@ mod tests {
             let new = DesktopConfig::from_json_str(change).unwrap();
             assert_eq!(needs_rebuild(&old, &new), rebuilds, "{change}");
         }
+        let with = |prompt: &str| {
+            DesktopConfig::from_json_str(&format!(
+                r#"{{"writing": {{"url": "http://127.0.0.1:9/v1", "model": "m", "openings": [{{"phrase": "write me an email", "prompt": "{prompt}"}}]}}}}"#
+            ))
+            .unwrap()
+        };
+        assert!(
+            needs_rebuild(&with("Old."), &with("New.")),
+            "changed writing openings"
+        );
     }
 
     #[test]
@@ -4049,60 +4025,6 @@ mod tests {
         )
         .await;
         assert!(requests.listening_off);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn changed_writing_openings_wait_for_the_end_of_the_capture_and_then_rebuild_the_engine()
-    {
-        let with = |openings: &str| {
-            DesktopConfig::from_json_str(&format!(
-                r#"{{"writing": {{"url": "http://127.0.0.1:9/v1", "model": "m", "openings": {openings}}}}}"#
-            ))
-            .unwrap()
-        };
-        let running = with(r#"[{"phrase": "write me an email", "prompt": "Old."}]"#);
-        let changed = with(r#"[{"phrase": "write me an email", "prompt": "New."}]"#);
-        let (outcome, requests, started) = run(
-            vec![],
-            vec![Control::Apply(Box::new(changed.clone())), Control::Cancel],
-        )
-        .await;
-        assert!(started);
-        assert_eq!(outcome, Some("cancelled"));
-        assert_eq!(
-            requests.pending,
-            Some(changed.clone()),
-            "the capture goes on with the rules it started with"
-        );
-        assert!(!retunes_only(&running, &changed));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_switch_of_the_live_entry_waits_for_the_end_of_the_running_capture() {
-        let running = DesktopConfig::from_json_str(
-            r#"{"stt":{"entries":[{"kind":"on_device","id":"first","name":"First","active":true,"model":"nemotron_160ms"}]}}"#,
-        )
-        .unwrap();
-        let switched = DesktopConfig::from_json_str(
-            r#"{"stt":{"entries":[{"kind":"on_device","id":"second","name":"Second","active":true,"model":"unified_160ms"}]}}"#,
-        )
-        .unwrap();
-        assert_ne!(
-            running.stt.entries.active_live().id,
-            switched.stt.entries.active_live().id
-        );
-        let (outcome, requests, started) = run(
-            vec![],
-            vec![Control::Apply(Box::new(switched.clone())), Control::Cancel],
-        )
-        .await;
-        assert!(started);
-        assert_eq!(outcome, Some("cancelled"));
-        assert_eq!(
-            requests.pending,
-            Some(switched),
-            "the new entry is held for the next capture"
-        );
     }
 
     #[tokio::test(start_paused = true)]

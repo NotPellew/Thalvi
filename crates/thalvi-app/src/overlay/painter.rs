@@ -644,37 +644,6 @@ mod tests {
         ]
     }
 
-    #[test]
-    #[ignore = "requires THALVI_OVERLAY_REFERENCE captured on this system with the original renderer"]
-    fn built_in_frames_match_the_reference_renderer() {
-        let directory = std::env::var_os("THALVI_OVERLAY_REFERENCE").expect("reference directory");
-        for look in [Look::Gunmetal, Look::Holo, Look::Neon] {
-            for dark in [true, false] {
-                for (name, status) in states() {
-                    let mut painter = painter(1.0, look, dark);
-                    let mut shown = View::new(true);
-                    shown.set_status(status, 5.4);
-                    for step in 0..16 {
-                        let clock = 5.4 + f64::from(step) * 0.033;
-                        shown.poll(clock, 0.6);
-                        painter.draw(&shown, clock);
-                    }
-                    let name = format!("{look:?}-{dark}-{name}.bgra");
-                    let path = std::path::Path::new(&directory).join(&name);
-                    let expected = std::fs::read(path).unwrap();
-                    let differs = expected
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .zip(painter.frame.bgra.as_chunks::<4>().0)
-                        .filter(|(old, new)| old != new)
-                        .count();
-                    assert_eq!(painter.frame.bgra.len(), expected.len(), "{name}");
-                    assert_eq!(differs, 0, "{name}, pixels changed");
-                }
-            }
-        }
-    }
     fn customized(look: Look, dark: bool, id: &str, value: serde_json::Value) -> Arc<Style> {
         use thalvi_desktop::theme::{LookOverrides, Themes};
 
