@@ -1345,6 +1345,7 @@ describe("the Recognition page", () => {
     stub.emit({ ...CANT_KEEP_UP, offer: null });
     await settle();
     expect(button(LIGHTER).hidden).toBe(true);
+    expect(root.querySelector("footer.bar")?.textContent).not.toContain(CANT_KEEP_UP.notice);
   });
 
   it("shows the Live recognizer with the next dictation and the extras, then the four groups by kind, then the word list", async () => {
