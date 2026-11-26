@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate Thalvi's owner hold from current GitHub API data."""
+"""Approve a pull request that may merge without the owner's review, from current GitHub API data."""
 
 import argparse
 from dataclasses import dataclass
@@ -13,7 +13,7 @@ import sys
 import time
 
 OWNER = "NotPellew"
-APPROVAL = "owner-ok"
+APPROVER = "github-actions[bot]"
 HOLD_PATHS = {
     "repository tooling": (".github/", ".githooks/", ".cargo/"),
     "verify skill": (".agents/skills/verify-thalvi/",),
@@ -37,19 +37,21 @@ class HoldError(Exception):
     """An incomplete or stale response prevents a decision."""
 
 
-def api(endpoint, *, paginate=False, post=False):
+def api(endpoint, *, paginate=False, method=None, fields=None):
     args = ["gh", "api"]
     if paginate:
         args += ["--paginate", "--slurp"]
-    if post:
-        args += ["--method", "POST"]
+    if method:
+        args += ["--method", method]
+    for name, value in (fields or {}).items():
+        args += ["-f", f"{name}={value}"]
     repo = os.environ["GITHUB_REPOSITORY"]
     result = subprocess.run(
         [*args, f"repos/{repo}/{endpoint}"], text=True, capture_output=True, check=False,
     )
     if result.returncode:
         raise HoldError(f"{endpoint}: {result.stderr.strip() or 'GitHub API request failed'}")
-    if post:
+    if method:
         return
     response = json.loads(result.stdout)
     if paginate and (not isinstance(response, list) or not response):
@@ -84,7 +86,6 @@ def code(value):
 class PullRequest:
     body: str | None
     author: str
-    labels: frozenset[str]
     state: str
     updated: str
     head_sha: str
@@ -96,25 +97,9 @@ class PullRequest:
     def read(cls, number):
         pr = api(f"pulls/{number}")
         return cls(
-            pr["body"], pr["user"]["login"], label_names(pr), pr["state"], pr["updated_at"],
+            pr["body"], pr["user"]["login"], pr["state"], pr["updated_at"],
             pr["head"]["sha"], pr["base"]["sha"], pr["base"]["ref"], pr["changed_files"],
         )
-
-
-def approval_warning(number):
-    events = records(api(f"issues/{number}/events?per_page=100", paginate=True))
-    transitions = (
-        event for event in events
-        if event["event"] in {"labeled", "unlabeled"} and event["label"]["name"] == APPROVAL
-    )
-    latest = max(transitions, key=lambda event: (event["created_at"], event["id"]), default=None)
-    if latest and latest["event"] == "labeled":
-        actor = latest["actor"]
-        if actor and actor["login"] == OWNER:
-            return None
-        if actor:
-            return f"owner-ok added by {code(actor['login'])}. Only {OWNER} can approve."
-    return f"owner-ok has no current approval from {OWNER}."
 
 
 def issue_reason(number):
@@ -175,15 +160,6 @@ def evaluate(number, head, base):
     if pr.author == OWNER:
         return True, ["The owner authored this PR."]
 
-    notes = []
-    if APPROVAL in pr.labels:
-        warning = approval_warning(number)
-        if PullRequest.read(number) != pr:
-            raise HoldError("PR changed while checking owner approval")
-        if warning is None:
-            return True, ["The owner approved this PR."]
-        notes.append(warning)
-
     refs = closing_refs(pr.body)
     reasons = [] if refs else ["closes no issue."]
     for ref in refs:
@@ -193,27 +169,49 @@ def evaluate(number, head, base):
     if PullRequest.read(number) != pr:
         raise HoldError("PR changed while checking the policy")
     if reasons:
-        return False, notes + reasons
+        return False, reasons
     issues = ", ".join(f"#{ref}" for ref in refs)
-    return True, notes + [f"Closes qualifying fixes ({issues}) and changes no protected paths."]
+    return True, [f"Closes qualifying fixes ({issues}) and changes no protected paths."]
+
+
+def settle(number, head, approve):
+    """Leave this script's approval standing on `head` exactly when `approve` is set."""
+    reviews = records(api(f"pulls/{number}/reviews?per_page=100", paginate=True))
+    standing = [
+        review for review in reviews
+        if review["user"] and review["user"]["login"] == APPROVER and review["state"] == "APPROVED"
+    ]
+    if not approve:
+        for review in standing:
+            api(
+                f"pulls/{number}/reviews/{review['id']}/dismissals", method="PUT",
+                fields={"message": "This PR no longer qualifies to merge without the owner's review."},
+            )
+    elif not any(review["commit_id"] == head for review in standing):
+        api(
+            f"pulls/{number}/reviews", method="POST",
+            fields={"event": "APPROVE", "commit_id": head, "body": "The hold policy lets this PR merge without the owner's review."},
+        )
 
 
 def check(number, head, base):
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SCRIPTS, text=True).strip()
+    status = 0
     try:
-        passed, reasons = evaluate(number, head, base)
-        heading = "hold: passed" if passed else "hold: waiting for the owner"
+        approve, reasons = evaluate(number, head, base)
+        settle(number, head, approve)
+        heading = "hold: approved" if approve else "hold: left for the owner's review"
         summary = [heading, "", *(f"- {reason}" for reason in reasons)]
-        if not passed:
-            summary.extend(("", "The owner can release this PR by adding the owner-ok label."))
+        if not approve:
+            summary.extend(("", "The owner releases this PR by approving it."))
     except (HoldError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as error:
         print(f"hold: {error}", file=sys.stderr)
-        passed = False
+        status = 1
         summary = ["hold: error", "", code(str(error))]
     summary.extend(("", f"Policy commit: {sha}"))
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
         print("\n".join(summary), file=file)
-    return 0 if passed else 1
+    return status
 
 
 def latest_runs(pending):
@@ -250,7 +248,7 @@ def rerun(number):
             if run is None or run["status"] != "completed":
                 continue
             try:
-                api(f"actions/runs/{run['id']}/rerun", post=True)
+                api(f"actions/runs/{run['id']}/rerun", method="POST")
                 print(f"Requested {title} rerun ({run['id']}).")
             except HoldError as error:
                 failures.append(str(error))
