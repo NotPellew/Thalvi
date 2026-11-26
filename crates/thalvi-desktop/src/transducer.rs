@@ -1040,21 +1040,37 @@ impl ReplayState {
     }
 }
 
-/// Replays the tentative suffix with left context; a final replays the complete speech stretch.
+/// Replays the tentative suffix with left context; a decoding that goes quiet while the speech
+/// goes on is replayed from the start, so the text never stops following a long dictation.
 pub struct Replayed<B> {
     backend: B,
     mel: WindowMel,
     prefix: Vec<Vec<usize>>,
     anchor: ReplayState,
+    /// Encoder frames committed since the last one that emitted a token.
+    quiet: usize,
 }
 
 impl<B: Backend> Replayed<B> {
+    const FRAME: usize = 1280;
+    /// Frames re-heard before the committed text, so the new window has a word's onset.
+    const LEFT: usize = 8;
+    /// Frames a window holds before all but the newest are committed.
+    const COMMIT: usize = 24;
+    /// Newest frames left tentative, for the words they still gain from the audio after them.
+    const REVISE: usize = 16;
+    /// Frames committed without a token that mean the decoding lost the speech: a windowed
+    /// encode's frames differ from the stretch's, so the greedy search can wander off and never
+    /// emit again while the speech goes on.
+    const QUIET: usize = 24;
+
     fn new(backend: B) -> Self {
         Self {
             backend,
             mel: WindowMel::new(),
             prefix: Vec::new(),
             anchor: ReplayState::default(),
+            quiet: 0,
         }
     }
 
@@ -1071,32 +1087,35 @@ impl<B: Backend> Replayed<B> {
         }
         self.backend.encode(features, window)
     }
-}
 
-impl<B: Backend> SnapshotDecoder for Replayed<B> {
-    fn snapshot(&mut self, audio: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
-        const FRAME: usize = 1280;
-        const LEFT: usize = 8;
-        const WINDOW: usize = 24;
-        const REVISE: usize = 16;
+    /// Commits the frames that now have their look-behind; `rest` commits the newest too.
+    fn commit(&mut self, audio: &[f32], rest: bool) -> Result<Vec<Vec<usize>>, RecognizerError> {
         let start = self.prefix.len();
-        let offset = start.saturating_sub(LEFT);
-        let heard = self.hear(&audio[offset * FRAME..])?;
+        let offset = start.saturating_sub(Self::LEFT);
+        let heard = self.hear(&audio[offset * Self::FRAME..])?;
         let from = start - offset;
         let mut carried = self.anchor.clone();
         let mut all = self.prefix.clone();
-        let cut = if heard.count - from >= WINDOW {
-            heard.count - REVISE
+        let cut = if rest {
+            heard.count
+        } else if heard.count - from >= Self::COMMIT {
+            heard.count - Self::REVISE
         } else {
             from
         };
         if cut > from {
-            all.extend(self.backend.decode(
+            let committed = self.backend.decode(
                 &heard.values,
                 heard.stride,
                 from..cut,
                 &mut carried.decoding(),
-            )?);
+            )?;
+            self.quiet = if committed.iter().any(|tokens| !tokens.is_empty()) {
+                0
+            } else {
+                self.quiet + cut - from
+            };
+            all.extend(committed);
             if all.iter().any(|tokens| !tokens.is_empty()) {
                 self.anchor = carried.clone();
                 self.prefix.clone_from(&all);
@@ -1111,22 +1130,49 @@ impl<B: Backend> SnapshotDecoder for Replayed<B> {
         Ok(all)
     }
 
-    fn finish(&mut self, audio: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+    /// Replays the whole stretch, replacing the committed text and the state it stands on.
+    fn replay(&mut self, audio: &[f32], pad: bool) -> Result<Vec<Vec<usize>>, RecognizerError> {
         let mut padded = audio.to_vec();
-        padded.resize(padded.len() + 12_800, 0.0);
+        if pad {
+            padded.resize(padded.len() + 12_800, 0.0);
+        }
         let heard = self.hear(&padded)?;
-        let count = audio.len().div_ceil(1280).min(heard.count);
-        self.backend.decode(
-            &heard.values,
-            heard.stride,
-            0..count,
-            &mut ReplayState::default().decoding(),
-        )
+        let count = audio.len().div_ceil(Self::FRAME).min(heard.count);
+        let mut state = ReplayState::default();
+        let frames =
+            self.backend
+                .decode(&heard.values, heard.stride, 0..count, &mut state.decoding())?;
+        self.quiet = 0;
+        self.prefix.clone_from(&frames);
+        self.anchor = state;
+        Ok(frames)
+    }
+}
+
+impl<B: Backend> SnapshotDecoder for Replayed<B> {
+    fn snapshot(
+        &mut self,
+        audio: &[f32],
+        speech: bool,
+    ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        if speech && self.quiet >= Self::QUIET {
+            return self.replay(audio, false);
+        }
+        self.commit(audio, false)
+    }
+
+    fn finish(&mut self, audio: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+        let all = self.commit(audio, true)?;
+        if self.quiet >= Self::QUIET {
+            return self.replay(audio, true);
+        }
+        Ok(all)
     }
 
     fn next_segment(&mut self) {
         self.prefix.clear();
         self.anchor = ReplayState::default();
+        self.quiet = 0;
     }
 }
 
@@ -1927,13 +1973,13 @@ mod tests {
     }
 
     #[test]
-    fn replayed_windows_keep_each_frame_once_and_the_final_reconsiders_the_whole_stretch() {
+    fn replayed_windows_keep_each_frame_once_and_the_final_commits_what_was_tentative() {
         let backend = ReplayFake::default();
         let windows = Arc::clone(&backend.windows);
         let decoded = Arc::clone(&backend.decoded);
         let mut stream = Replayed::new(backend);
         for count in [8, 16, 24, 32, 40, 48, 56, 64] {
-            let frames = stream.snapshot(&sound(count * 1280, 0)).unwrap();
+            let frames = stream.snapshot(&sound(count * 1280, 0), false).unwrap();
             assert_eq!(
                 frames.concat(),
                 (0..count).collect::<Vec<_>>(),
@@ -1952,13 +1998,90 @@ mod tests {
         );
         assert_eq!(
             windows.lock().unwrap().last(),
-            Some(&74),
-            "the final encoder hears 800 ms of look-ahead"
+            Some(&24),
+            "the final hears the newest window instead of the whole stretch"
         );
         stream.next_segment();
         assert_eq!(
-            stream.snapshot(&sound(8 * 1280, 0)).unwrap().concat(),
+            stream
+                .snapshot(&sound(8 * 1280, 0), false)
+                .unwrap()
+                .concat(),
             (0..8).collect::<Vec<_>>()
+        );
+    }
+
+    /// A model whose windowed decoding loses the speech after its first words.
+    #[derive(Clone, Default)]
+    struct Wanders {
+        encoded: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Backend for Wanders {
+        fn encode(
+            &mut self,
+            _features: Vec<f32>,
+            valid: usize,
+        ) -> Result<Encoding, RecognizerError> {
+            let count = valid / 8;
+            self.encoded.lock().unwrap().push(count);
+            Ok(Encoding {
+                values: Vec::new(),
+                stride: count,
+                count,
+            })
+        }
+
+        fn decode(
+            &mut self,
+            _encoded: &[f32],
+            _stride: usize,
+            range: std::ops::Range<usize>,
+            _carried: &mut Decoding<'_>,
+        ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            let whole = range.start == 0;
+            Ok(range
+                .map(|frame| if whole { vec![frame] } else { Vec::new() })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn a_decoding_that_goes_quiet_while_the_speech_goes_on_is_replayed_whole() {
+        for (speech, expected) in [(true, 56), (false, 8)] {
+            let backend = Wanders::default();
+            let encoded = Arc::clone(&backend.encoded);
+            let mut stream = Replayed::new(backend);
+            for count in [8, 16, 24, 32, 40, 48] {
+                stream.snapshot(&sound(count * 1280, 0), false).unwrap();
+            }
+            let frames = stream
+                .snapshot(&sound(56 * 1280, 0), speech)
+                .unwrap()
+                .concat();
+            assert_eq!(
+                frames,
+                (0..expected).collect::<Vec<_>>(),
+                "the text covers the whole stretch again only with speech: {speech}"
+            );
+            assert!(
+                !speech || encoded.lock().unwrap().last() == Some(&56),
+                "the whole stretch is heard again"
+            );
+        }
+    }
+
+    #[test]
+    fn the_final_of_a_decoding_that_went_quiet_replays_the_whole_stretch() {
+        let backend = Wanders::default();
+        let mut stream = Replayed::new(backend);
+        for count in [8, 16, 24, 32, 40, 48] {
+            stream.snapshot(&sound(count * 1280, 0), false).unwrap();
+        }
+        assert_eq!(
+            stream.finish(&sound(56 * 1280, 0)).unwrap().concat(),
+            (0..56).collect::<Vec<_>>(),
+            "the final holds every word heard"
         );
     }
 
@@ -2009,13 +2132,19 @@ mod tests {
         let mut stream = Replayed::new(LateWord);
         for count in [8, 16, 24] {
             assert_eq!(
-                stream.snapshot(&sound(count * 1280, 0)).unwrap().concat(),
+                stream
+                    .snapshot(&sound(count * 1280, 0), false)
+                    .unwrap()
+                    .concat(),
                 [] as [usize; 0]
             );
         }
         for count in [32, 40] {
             assert_eq!(
-                stream.snapshot(&sound(count * 1280, 0)).unwrap().concat(),
+                stream
+                    .snapshot(&sound(count * 1280, 0), false)
+                    .unwrap()
+                    .concat(),
                 [0],
                 "the opening word is still available at frame {count}"
             );
