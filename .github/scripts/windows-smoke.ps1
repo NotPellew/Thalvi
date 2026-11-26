@@ -1,8 +1,34 @@
 # Installs the built desktop app, checks its Whisper helpers, starts it, opens Settings, feeds a
-# dictation fixture into Notepad, and saves screenshots of the desktop.
-param([Parameter(Mandatory)][string]$Installer, [Parameter(Mandatory)][string]$OutDir)
+# dictation fixture into Notepad, and saves screenshots of the desktop. Heavy CI can instead run a
+# signed local update on a fresh account and record the NSIS process exit status.
+param(
+  [Parameter(Mandatory)][string]$Installer,
+  [Parameter(Mandatory)][string]$OutDir,
+  [string]$UpdateFeed,
+  [string]$ExpectedInstaller
+)
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $OutDir | Out-Null
+
+if ($UpdateFeed) {
+  $source = 'ThalviFixtureInstaller'
+  Register-CimIndicationEvent -Query "SELECT * FROM Win32_ProcessStopTrace WHERE ProcessName = '$ExpectedInstaller'" `
+    -SourceIdentifier $source | Out-Null
+  try {
+    python (Join-Path $PSScriptRoot 'e2e/update-fixture.py') drive $Installer $OutDir $UpdateFeed
+    if ($LASTEXITCODE -ne 0) { throw "the signed update fixture exited with $LASTEXITCODE" }
+    $event = Wait-Event -SourceIdentifier $source -Timeout 15
+    if ($null -eq $event) { throw 'the NSIS updater did not report an exit status' }
+    $stopped = $event.SourceEventArgs.NewEvent
+    @{ process = $stopped.ProcessName; pid = $stopped.ProcessID; exit_code = $stopped.ExitStatus } |
+      ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutDir 'update-installer.json')
+    if ($stopped.ExitStatus -ne 0) { throw "the NSIS updater exited with $($stopped.ExitStatus)" }
+  } finally {
+    Unregister-Event -SourceIdentifier $source
+    Get-Event -SourceIdentifier $source -ErrorAction SilentlyContinue | Remove-Event
+  }
+  return
+}
 
 $config = Join-Path $env:APPDATA 'thalvi\desktop.json'
 New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null

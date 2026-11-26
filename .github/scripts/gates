@@ -136,9 +136,13 @@ gate_issue_sync() {
 
 # Needs Node pinned in .node-version, minisign, jq and pipx.
 gate_release() {
+  step .github/scripts/release-no-update-fixture .github/workflows/release.yml
   step npm ci --ignore-scripts --prefix crates/thalvi-app/ui
   step "${SHELLCHECK[@]}" .github/scripts/updater-feed .github/scripts/updater-feed.test.sh \
-    .github/scripts/newer-version .github/scripts/newer-version.test.sh
+    .github/scripts/newer-version .github/scripts/newer-version.test.sh \
+    .github/scripts/release-no-update-fixture .github/scripts/release-no-update-fixture.test.sh \
+    .github/scripts/update-ab
+  step .github/scripts/release-no-update-fixture.test.sh
   step .github/scripts/updater-feed.test.sh
   step .github/scripts/newer-version.test.sh
 }
