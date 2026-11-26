@@ -3492,6 +3492,7 @@ mod tests {
                                 partials.push(text);
                             }
                             RecognizerEvent::Final(text) => break text,
+                            RecognizerEvent::Ended => {}
                         },
                         _ = pace.tick(), if ended.is_none() => {
                             if let Some(frame) = frames.next() {
