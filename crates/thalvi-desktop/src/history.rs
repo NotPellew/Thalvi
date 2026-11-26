@@ -606,9 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn the_oldest_entries_go_first_when_the_limit_is_passed_or_lowered() {
+    fn the_oldest_entries_go_first_when_the_limit_is_passed_or_lowered_unless_history_is_off() {
         let dir = TempDir::new("rotation");
         let store = Store::at(dir.file());
+        store.trim(config(r#"{"limit": 1}"#)).unwrap();
+        assert!(!dir.0.exists(), "trimming nothing creates nothing");
         let three = config(r#"{"limit": 3}"#);
         for text in ["a", "b", "c"] {
             store.record(three, capture(text)).unwrap();
@@ -620,7 +622,14 @@ mod tests {
         );
         store.record(three, capture("d")).unwrap();
         assert_eq!(texts(&store), ["d", "c", "b"]);
-
+        store.trim(config(r#"{"limit": 10}"#)).unwrap();
+        assert_eq!(texts(&store), ["d", "c", "b"], "within the limit");
+        store
+            .trim(config(r#"{"enabled": false, "limit": 1}"#))
+            .unwrap();
+        assert_eq!(texts(&store), ["d", "c", "b"], "off deletes nothing");
+        store.trim(config(r#"{"limit": 2}"#)).unwrap();
+        assert_eq!(texts(&store), ["d", "c"], "a lowered limit trims at once");
         store
             .record(config(r#"{"limit": 1}"#), capture("e"))
             .unwrap();
@@ -629,27 +638,6 @@ mod tests {
             ["e"],
             "a lower limit applies on the next write"
         );
-    }
-
-    #[test]
-    fn a_lowered_limit_trims_at_once_but_a_switched_off_history_keeps_everything() {
-        let dir = TempDir::new("trim");
-        let store = Store::at(dir.file());
-        store.trim(config(r#"{"limit": 1}"#)).unwrap();
-        assert!(!dir.0.exists(), "trimming nothing creates nothing");
-        for text in ["a", "b", "c", "d"] {
-            store
-                .record(HistoryConfig::default(), capture(text))
-                .unwrap();
-        }
-        store.trim(config(r#"{"limit": 10}"#)).unwrap();
-        assert_eq!(texts(&store), ["d", "c", "b", "a"], "within the limit");
-        store
-            .trim(config(r#"{"enabled": false, "limit": 1}"#))
-            .unwrap();
-        assert_eq!(texts(&store), ["d", "c", "b", "a"], "off deletes nothing");
-        store.trim(config(r#"{"limit": 2}"#)).unwrap();
-        assert_eq!(texts(&store), ["d", "c"]);
     }
 
     #[test]

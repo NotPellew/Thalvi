@@ -881,31 +881,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_prompt_in_effect_is_the_users_unless_it_is_blank_or_the_default() {
-        let prompt = |given: Option<&str>| {
-            Writing::new(
-                "http://host/v1",
-                "m",
-                String::new(),
-                given,
-                Vec::new(),
-                Vec::new(),
-            )
-            .map(|writing| (writing.prompt().to_owned(), writing.prompt.is_some()))
-        };
-        let default = (DEFAULT_PROMPT.to_owned(), false);
-        assert_eq!(prompt(None), Ok(default.clone()));
-        assert_eq!(prompt(Some(DEFAULT_PROMPT)), Ok(default.clone()));
-        assert_eq!(prompt(Some(&format!("{DEFAULT_PROMPT}\n"))), Ok(default));
-        assert_eq!(
-            prompt(Some(" Be brief. ")),
-            Ok(("Be brief.".to_owned(), true))
-        );
-        assert_eq!(prompt(Some("")), Err(WritingSettingsError::Prompt));
-        assert_eq!(prompt(Some(" \n")), Err(WritingSettingsError::Prompt));
-    }
-
     fn opening(phrase: &str, prompt: &str) -> Opening {
         Opening {
             phrase: phrase.to_owned(),

@@ -674,49 +674,36 @@ mod tests {
     }
 
     #[test]
-    fn the_first_cue_reuses_the_warmed_output_without_playing_during_warmup() {
-        let (engine, output) = fake_engine();
-        engine.warm_up();
-        assert!(
-            output.plays.lock().unwrap().is_empty(),
-            "warming never plays audio"
-        );
-        assert!(
-            output.paused.load(Ordering::SeqCst),
-            "the warmed output stays stopped"
-        );
-        let first = engine
-            .play(Cue::Wake, Mic::Open, Instant::now())
-            .unwrap()
-            .unwrap();
-        assert!(!first.rebuilt, "the first cue reuses the warmed output");
-        assert_eq!(*output.builds.lock().unwrap(), [0]);
-        assert!(output.paused.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn a_failed_warmup_leaves_the_first_cue_to_rebuild_and_report_it() {
-        let (engine, output) = fake_engine();
-        output.fail_build.store(true, Ordering::SeqCst);
-        engine.warm_up();
-        assert!(
-            output.plays.lock().unwrap().is_empty(),
-            "a failed warmup plays nothing"
-        );
-        output.fail_build.store(false, Ordering::SeqCst);
-        let first = engine
-            .play(Cue::Wake, Mic::Open, Instant::now())
-            .unwrap()
-            .unwrap();
-        assert!(
-            first.rebuilt,
-            "the first cue reports its successful rebuild"
-        );
-        assert_eq!(
-            *output.builds.lock().unwrap(),
-            [0, 0],
-            "the first cue retries the failed warmup"
-        );
+    fn the_first_cue_reuses_a_warmed_output_and_rebuilds_after_a_failed_warmup() {
+        // (the warmup fails, the outputs built by the end)
+        for (fails, builds) in [(false, &[0][..]), (true, &[0, 0])] {
+            let (engine, output) = fake_engine();
+            output.fail_build.store(fails, Ordering::SeqCst);
+            engine.warm_up();
+            assert!(
+                output.plays.lock().unwrap().is_empty(),
+                "warming never plays audio, failed: {fails}"
+            );
+            if !fails {
+                assert!(
+                    output.paused.load(Ordering::SeqCst),
+                    "the warmed output stays stopped"
+                );
+            }
+            output.fail_build.store(false, Ordering::SeqCst);
+            let first = engine
+                .play(Cue::Wake, Mic::Open, Instant::now())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                first.rebuilt, fails,
+                "the first cue reuses the warmed output or reports its rebuild"
+            );
+            assert_eq!(*output.builds.lock().unwrap(), builds, "failed: {fails}");
+            if !fails {
+                assert!(output.paused.load(Ordering::SeqCst));
+            }
+        }
     }
 
     #[test]

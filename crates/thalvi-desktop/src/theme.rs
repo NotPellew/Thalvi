@@ -2196,28 +2196,21 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_themes_value_is_kept_and_names_no_look() {
+    fn an_empty_or_unreadable_themes_value_is_kept_and_names_no_look() {
+        let not_an_object =
+            Some("Your look customizations could not be read (themes must be an object).");
         for (json, notice) in [
+            ("{}", None),
             (
                 r##"{"version":9,"holo":{"colors":{"dark":{"accent":"#ffffff"}},"future":true}}"##,
-                "Your look customizations could not be read (themes.version 9 is newer than this Thalvi).",
+                Some(
+                    "Your look customizations could not be read (themes.version 9 is newer than this Thalvi).",
+                ),
             ),
-            (
-                r#""bad""#,
-                "Your look customizations could not be read (themes must be an object).",
-            ),
-            (
-                "[]",
-                "Your look customizations could not be read (themes must be an object).",
-            ),
-            (
-                "1",
-                "Your look customizations could not be read (themes must be an object).",
-            ),
-            (
-                "true",
-                "Your look customizations could not be read (themes must be an object).",
-            ),
+            (r#""bad""#, not_an_object),
+            ("[]", not_an_object),
+            ("1", not_an_object),
+            ("true", not_an_object),
         ] {
             let loaded = themes(json);
             assert!(loaded.of(Look::Gunmetal).is_none(), "{json}");
@@ -2226,15 +2219,20 @@ mod tests {
                 "{json}: no look is invented"
             );
             assert!(loaded.of(Look::Neon).is_none(), "{json}");
+            // An empty object is written back with its version; anything unreadable as it came.
+            let kept = if notice.is_some() {
+                json
+            } else {
+                r#"{"version":1}"#
+            };
             assert_eq!(
                 loaded.to_value(),
-                serde_json::from_str::<Value>(json).unwrap(),
+                serde_json::from_str::<Value>(kept).unwrap(),
                 "{json}"
             );
-            assert!(!loaded.is_empty(), "{json}");
-            assert_eq!(loaded.notices().len(), 1, "{json}");
-            assert_eq!(loaded.notices()[0], notice, "{json}");
-            assert!(!loaded.notices()[0].contains("Holo"), "{json}");
+            assert_eq!(loaded.is_empty(), notice.is_none(), "{json}");
+            assert_eq!(loaded.notices(), Vec::from_iter(notice), "{json}");
+            assert!(!loaded.notices().concat().contains("Holo"), "{json}");
             for look in [Look::Neon, Look::Holo, Look::Gunmetal] {
                 let style = Style::resolve(look, loaded.of(look));
                 assert_eq!(style, Style::resolve(look, None), "{json}");
@@ -2242,14 +2240,6 @@ mod tests {
             let holo = Style::resolve(Look::Holo, loaded.of(Look::Holo));
             assert_eq!(holo.dark.accent.to_hex(), "#6bf8ff", "{json}");
         }
-    }
-
-    #[test]
-    fn an_empty_themes_object_is_empty() {
-        let loaded = themes("{}");
-        assert!(loaded.is_empty());
-        assert_eq!(loaded.notices(), Vec::<String>::new());
-        assert!(loaded.of(Look::Gunmetal).is_none());
     }
 
     #[test]

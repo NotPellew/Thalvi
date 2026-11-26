@@ -417,57 +417,73 @@ mod tests {
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Paste, "hi"),
-                Some((true, "Delivered")),
+                Some((true, "Delivered", &[][..])),
             ),
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Submit, "hi"),
-                Some((true, "Delivered")),
+                Some((true, "Delivered", &[])),
             ),
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Task, "switch to editor"),
-                Some((true, "Delivered")),
+                Some((true, "Delivered", &[])),
             ),
             (
                 deliver_fails("No."),
                 accepted(CaptureRoute::Paste, "hi"),
-                Some((false, "Nothing was pasted — Settings")),
+                Some((false, "Nothing was pasted — Settings", &[])),
             ),
             (
                 deliver_fails("Nope."),
                 accepted(CaptureRoute::Paste, "text"),
-                Some((false, "Nothing was pasted — Settings")),
+                Some((false, "Nothing was pasted — Settings", &[])),
             ),
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Paste, ""),
-                Some((false, "Nothing to paste")),
+                Some((false, "Nothing to paste", &[])),
             ),
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Task, "unknown phrase"),
-                Some((false, "That task isn't configured yet")),
+                Some((false, "That task isn't configured yet", &[])),
             ),
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Task, "do a backflip"),
-                Some((false, "That task isn't configured yet")),
+                Some((false, "That task isn't configured yet", &[])),
             ),
             (
                 FakeHost::default(),
                 failed(CaptureError::MicStopped),
-                Some((false, "Microphone stopped mid-capture")),
+                Some((false, "Microphone stopped mid-capture", &[])),
             ),
             (
                 FakeHost::default(),
                 failed(CaptureError::Audio(AudioError::Busy)),
-                Some((false, "Microphone is used by another app")),
+                Some((false, "Microphone is used by another app", &[])),
             ),
             (
                 no_clipboard(),
                 failed(CaptureError::Audio(AudioError::Busy)),
-                Some((false, "Clipboard failed — text in Settings")),
+                Some((false, "Clipboard failed — text in Settings", &[])),
+            ),
+            (
+                FakeHost::default(),
+                CaptureOutcome::Failed {
+                    error: CaptureError::Recognizer(RecognizerError::Unreachable {
+                        speech: SpeechSource::direct("Office", "ws://127.0.0.1:8080".to_owned()),
+                        reason: ConnectFailure::Refused,
+                        detail: Detail("Connection refused (os error 111)".to_owned()),
+                    }),
+                    recoverable_text: None,
+                },
+                Some((
+                    false,
+                    "Can't reach speech server — Settings",
+                    &["Connection refused (os error 111)"],
+                )),
             ),
             (
                 FakeHost::default(),
@@ -477,8 +493,12 @@ mod tests {
         ] {
             let (finished, _) = finish(host, outcome.clone()).await;
             assert_eq!(
-                finished.map(|finished| (finished.delivered, finished.headline)),
-                expected.map(|(delivered, headline)| (delivered, headline.to_owned())),
+                finished.map(|finished| (finished.delivered, finished.headline, finished.causes)),
+                expected.map(|(delivered, headline, causes)| (
+                    delivered,
+                    headline.to_owned(),
+                    causes.iter().map(|cause| (*cause).to_owned()).collect()
+                )),
                 "{outcome:?}"
             );
         }
@@ -734,26 +754,6 @@ mod tests {
         assert_eq!(
             notice.as_deref(),
             Some("Nope. Clipboard recovery failed: No clipboard. Your text follows:\nkeep me")
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_capture_hands_on_the_technical_causes() {
-        let (finished, _) = finish(
-            FakeHost::default(),
-            CaptureOutcome::Failed {
-                error: CaptureError::Recognizer(RecognizerError::Unreachable {
-                    speech: SpeechSource::direct("Office", "ws://127.0.0.1:8080".to_owned()),
-                    reason: ConnectFailure::Refused,
-                    detail: Detail("Connection refused (os error 111)".to_owned()),
-                }),
-                recoverable_text: None,
-            },
-        )
-        .await;
-        assert_eq!(
-            finished.map(|finished| finished.causes),
-            Some(vec!["Connection refused (os error 111)".to_owned()])
         );
     }
 

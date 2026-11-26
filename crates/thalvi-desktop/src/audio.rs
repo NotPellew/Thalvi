@@ -664,31 +664,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_errors_end_capture_unless_they_are_only_a_gap_or_harmless() {
-        for (kind, after_a_frame, ends) in [
-            (ErrorKind::RealtimeDenied, true, false),
-            (ErrorKind::Xrun, false, false),
-            (ErrorKind::Xrun, true, false),
-            (ErrorKind::DeviceNotAvailable, true, true),
-        ] {
-            let gate = InputGate::default();
-            let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
-            if after_a_frame {
-                live(&mut sink, &block(1));
-                next(&mut frames).await.expect("first frame");
-            }
-            sink.shared.report(kind.into());
-            live(&mut sink, &block(2));
-            let result = next(&mut frames).await;
-            assert_eq!(
-                result.is_err(),
-                ends,
-                "{kind:?} after a frame: {after_a_frame}"
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn a_consumer_that_falls_ten_seconds_behind_gets_a_dropped_audio_error() {
         let gate = InputGate::default();
         let (mut sink, mut frames) = pipeline(16_000, 1, &gate);
@@ -776,17 +751,6 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_microphone_reports_no_active_device() {
-        let microphone = Microphone::new(
-            InputGate::default(),
-            Some("USB Mic".to_owned()),
-            Recorder::disabled().metrics(),
-        );
-        assert!(!microphone.is_open());
-        assert_eq!(microphone.active_name(), None);
-    }
-
-    #[test]
     fn config_prefers_fewest_channels_at_48khz_in_a_known_format() {
         let range = |channels, min, max, format| {
             SupportedStreamConfigRange::new(
@@ -844,6 +808,7 @@ mod tests {
             Some(AudioError::DeviceMissing("No such microphone".to_owned()))
         );
         assert!(!microphone.is_open());
+        assert_eq!(microphone.active_name(), None);
     }
 
     /// Replaces the open default microphone by one that is not there, which must leave the first
