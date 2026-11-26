@@ -221,6 +221,12 @@ admitting delivery, and `Engine::on_quiet` rechecks `Presentation::Shown` before
 `confirm_final_submit` keep the same cancellation writes and delivery fence, so the model actions
 are unchanged.
 
+A longer release wait (#449 repair): `RELEASE_LIMIT` rises from 250 ms to 400 ms. `Live::tail`
+returns `at + RELEASE_LIMIT` for a recognizer that does not buffer audio, so a hold pastes its
+final up to 400 ms after the release instead of 250 ms. The tail deadline is not a modeled action,
+await boundary or delivery guard, and a control queued before the final empty receive still
+prevents admission, so the model actions are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
