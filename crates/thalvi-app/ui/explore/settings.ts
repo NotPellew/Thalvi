@@ -471,7 +471,7 @@ async function offerLayout(session: Session, size: { width: number; height: numb
       if (!(row instanceof HTMLElement) || row.hidden) return ["the recovery row is missing or hidden"];
       for (const node of row.querySelectorAll<HTMLElement>("button, .note")) {
         if (!node.checkVisibility() || node.getClientRects().length === 0) continue;
-        const label = `${node.tagName.toLowerCase()} "${node.textContent?.trim() ?? ""}"`;
+        const label = `${node.tagName.toLowerCase()} "${node.textContent.trim()}"`;
         if (node.scrollHeight > node.clientHeight + 1) bad.push(`${label}: its text runs below its box`);
         if (node.scrollWidth > node.clientWidth + 1) bad.push(`${label}: its text runs past its box`);
         const rect = node.getBoundingClientRect();
