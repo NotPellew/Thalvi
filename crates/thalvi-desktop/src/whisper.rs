@@ -944,7 +944,7 @@ pub struct WhisperSession<L: Launcher = ProcessLauncher> {
     previewed_frames: usize,
     /// The text of the last preview shown.
     shown: String,
-    /// The language a preview detected for this capture, reused to skip re-detecting.
+    /// The language the latest non-empty preview detected, which the final pass reuses.
     language: Option<String>,
 }
 
@@ -959,6 +959,7 @@ impl<L: Launcher> Shared<L> {
         outcome: &str,
         at: Instant,
         reading: Reading,
+        reused_language: bool,
         seconds: Option<f64>,
     ) {
         let mut fields = json!({"engine": "whisper_helper", "model": self.name});
@@ -967,6 +968,9 @@ impl<L: Launcher> Shared<L> {
         }
         if reading == Reading::Preview {
             fields["preview"] = json!(true);
+        }
+        if reused_language {
+            fields["preview_language"] = json!(true);
         }
         self.metrics.metric(
             Event::LocalStt,
@@ -984,11 +988,14 @@ impl<L: Launcher> WhisperSession<L> {
         let running = Arc::clone(&self.running);
         let shared = Arc::clone(&self.shared);
         let prompt = self.shared.prompt.clone();
-        let (format, lang) = match (reading, self.language.as_deref()) {
-            (_, Some(language)) => ("json", language.to_owned()),
-            (Reading::Preview, None) => ("verbose_json", "auto".to_owned()),
-            (Reading::Final, None) => ("json", "auto".to_owned()),
+        let (format, lang) = match reading {
+            Reading::Preview => ("verbose_json", "auto".to_owned()),
+            Reading::Final => (
+                "json",
+                self.language.as_deref().unwrap_or("auto").to_owned(),
+            ),
         };
+        let reused_language = reading == Reading::Final && self.language.is_some();
         let at = Instant::now();
         let task = tokio::spawn(async move {
             let seconds = audio_seconds(frames.len());
@@ -1013,6 +1020,7 @@ impl<L: Launcher> WhisperSession<L> {
                 if result.is_ok() { "ok" } else { "error" },
                 at,
                 reading,
+                reused_language,
                 Some(seconds),
             );
             let _ = sender.send(result.map_err(|failure| failure.error()));
@@ -1048,6 +1056,7 @@ impl<L: Launcher> WhisperSession<L> {
             "cancelled",
             preview.at,
             Reading::Preview,
+            false,
             Some(audio_seconds(self.previewed_frames)),
         );
         true
@@ -1118,7 +1127,6 @@ impl<L: Launcher> RecognizerSession for WhisperSession<L> {
                     self.preview = None;
                     let text = if let Ok(Ok(transcript)) = answer {
                         if !transcript.text.is_empty()
-                            && self.language.is_none()
                             && let Some(language) = transcript.language
                         {
                             self.language = Some(language);
@@ -1158,6 +1166,7 @@ impl<L: Launcher> Drop for WhisperSession<L> {
                     "cancelled",
                     *at,
                     Reading::Final,
+                    self.language.is_some(),
                     None,
                 );
                 busy = true;
@@ -2874,32 +2883,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_detected_preview_language_is_reused_for_later_previews_and_the_final_and_resets_for_the_next_capture()
-     {
-        let scratch = Scratch::with_files("language-lock");
+    async fn every_preview_detects_the_language_and_the_final_reuses_the_latest_one_of_its_capture()
+    {
+        let scratch = Scratch::with_files("language-latest");
+        let recorder = Recorder::in_dir(
+            RecordKinds {
+                metrics: true,
+                text: false,
+                audio: false,
+            },
+            scratch.0.join("recordings"),
+        )
+        .unwrap();
         let fake = Fake::new([vulkan(vec![
+            Reply::WithLanguage("Hello", "english"),
+            Reply::WithLanguage("Hallo", "german"),
             Reply::WithLanguage("", "french"),
             Reply::WithLanguage("hm", "auto"),
-            Reply::WithLanguage("Hallo", "german"),
-            Reply::Text("Hallo Welt"),
             Reply::Text("Hallo Welt."),
-            Reply::WithLanguage("Hello", "english"),
-            Reply::Text("Hello."),
+            Reply::WithLanguage("", "french"),
+            Reply::Text("Zwei."),
+            Reply::WithLanguage("Hi", "english"),
+            Reply::Text("Hi."),
         ])]);
-        let recognizer = recognizer(&fake, WhisperBackend::Vulkan, &scratch);
+        let recognizer = recognizer_with(
+            &fake,
+            WhisperBackend::Vulkan,
+            &scratch,
+            FAKE_FILES,
+            recorder.metrics(),
+            &no_words(),
+        );
         let frames = numbered(43);
 
         let mut first = within(recognizer.connect()).await.unwrap();
         send_all(&mut first, &frames[..13]).await;
         send_all(&mut first, &frames[13..23]).await;
-        assert_eq!(within(first.next_event()).await.unwrap(), partial("hm"));
+        assert_eq!(within(first.next_event()).await.unwrap(), partial("Hello"));
         send_all(&mut first, &frames[23..33]).await;
         assert_eq!(within(first.next_event()).await.unwrap(), partial("Hallo"));
         send_all(&mut first, &frames[33..43]).await;
-        assert_eq!(
-            within(first.next_event()).await.unwrap(),
-            partial("Hallo Welt")
-        );
+        assert_eq!(within(first.next_event()).await.unwrap(), partial("hm"));
         first.finish_audio().await.unwrap();
         assert_eq!(
             within(first.next_event()).await.unwrap(),
@@ -2908,12 +2932,19 @@ mod tests {
 
         let mut second = within(recognizer.connect()).await.unwrap();
         send_all(&mut second, &frames[..13]).await;
-        assert_eq!(within(second.next_event()).await.unwrap(), partial("Hello"));
+        fake.helper(0).seen_requests(7).await;
         second.finish_audio().await.unwrap();
         assert_eq!(
             within(second.next_event()).await.unwrap(),
-            the_final("Hello.")
+            the_final("Zwei.")
         );
+
+        let mut third = within(recognizer.connect()).await.unwrap();
+        send_all(&mut third, &frames[..13]).await;
+        assert_eq!(within(third.next_event()).await.unwrap(), partial("Hi"));
+        third.finish_audio().await.unwrap();
+        assert_eq!(within(third.next_event()).await.unwrap(), the_final("Hi."));
+        recorder.finish().await;
 
         let seen = fake.helper(0).seen();
         let pairs: Vec<(Option<&str>, Option<&str>)> = seen[1..]
@@ -2926,12 +2957,28 @@ mod tests {
                 (Some("verbose_json"), Some("auto")),
                 (Some("verbose_json"), Some("auto")),
                 (Some("verbose_json"), Some("auto")),
+                (Some("verbose_json"), Some("auto")),
                 (Some("json"), Some("german")),
-                (Some("json"), Some("german")),
+                (Some("verbose_json"), Some("auto")),
+                (Some("json"), Some("auto")),
                 (Some("verbose_json"), Some("auto")),
                 (Some("json"), Some("english")),
             ],
-            "empty and auto answers do not lock; the first real language carries through the capture and resets for the next"
+            "previews always detect; a later language replaces an earlier one, an empty or auto answer keeps it, and the next capture starts with none"
+        );
+
+        let written =
+            std::fs::read_to_string(scratch.0.join("recordings").join("metrics.jsonl")).unwrap();
+        let reused: Vec<bool> = written
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|line| line["event"] == "desktop_local_stt" && line["preview"].is_null())
+            .map(|line| line["preview_language"].as_bool().unwrap_or(false))
+            .collect();
+        assert_eq!(
+            reused,
+            [true, false, true],
+            "a final says when it reused a preview's language"
         );
     }
 
