@@ -17,7 +17,7 @@ const editors = [
   ["Add an after-you-stop server", "Edit LLM Gateway", "open_ai"],
   ["Add an on-device model", "Edit On this computer", "on_device"],
 ] as const;
-const controls = "button, input:not([type=hidden]), select, textarea, summary, a[href], label, legend, .what > span, [role=button], [role=switch], [role=tab], [tabindex]:not([tabindex='-1'])";
+const controls = "button, input:not([type=hidden]), select, textarea, summary, a[href], label, legend, .what > span, .trow > .phrase, [role=button], [role=switch], [role=tab], [tabindex]:not([tabindex='-1'])";
 
 async function check(page: Page, state: string): Promise<void> {
   const { width, height } = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
