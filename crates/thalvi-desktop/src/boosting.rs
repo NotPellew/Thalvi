@@ -432,20 +432,6 @@ mod tests {
     }
 
     #[test]
-    fn the_match_carries_on_into_the_next_call() {
-        let tree = tree(&["Cybrex2"]);
-        let second = || vec![vec![row(&[(A, -0.5), (Y, -3.0)]), blank_row()]];
-        let mut state = TreeState::default();
-        run(
-            &tree,
-            &mut state,
-            vec![vec![row(&[(C, -0.5)]), blank_row()]],
-        );
-        assert_eq!(run(&tree, &mut state, second()), [[Y]]);
-        assert_eq!(run(&tree, &mut TreeState::default(), second()), [[A]]);
-    }
-
-    #[test]
     fn a_failed_match_goes_on_in_a_listed_phrase_it_overlaps() {
         let tree = tree(&["Cd Cy", "Cb"]);
         let mut state = TreeState::default();

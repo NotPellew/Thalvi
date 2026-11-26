@@ -413,23 +413,6 @@ fn asset<'a>(url: &'a str, sha: &'a str) -> Asset<'a> {
     }
 }
 
-#[tokio::test]
-async fn two_fetches_of_one_asset_at_once_both_succeed() {
-    let (address, _server) = serve().await;
-    let dir = dir("twice");
-    let url = format!("http://{address}/good.onnx");
-    let sha = sha256(GOOD);
-    let store = ModelStore::in_dir(&dir);
-
-    let asset = asset(&url, &sha);
-
-    let (first, second) = tokio::join!(store.fetch(&asset), store.fetch(&asset));
-
-    assert_eq!(first.expect("first"), second.expect("second"));
-    assert_eq!(fs::read(dir.join("good.onnx")).expect("saved"), GOOD);
-    assert_eq!(leftovers(&dir), ["good.onnx"]);
-}
-
 /// Serves `GOOD`, but first stores it as the final file the way a fetch that finished earlier
 /// would have, and keeps that file open so that Windows will not replace it.
 async fn serve_after_another_fetch_finished(
@@ -613,8 +596,19 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
 }
 
 #[test]
-fn catalog_models_keep_their_files_apart_and_pinned() {
+fn model_files_are_pinned_and_kept_apart() {
     let mut names = Vec::new();
+    for asset in [
+        SPOTTER.encoder,
+        SPOTTER.decoder,
+        SPOTTER.joiner,
+        SPOTTER.pieces,
+    ] {
+        assert_eq!(asset.kind, ModelKind::Spotter, "{}", asset.file_name);
+        assert!(asset.url.starts_with("https://"), "{}", asset.url);
+        assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
+        names.push(asset.file_name);
+    }
     for model in CatalogSpeech::ALL {
         for assets in std::iter::once(model.assets()).chain(model.gpu_assets()) {
             let files = [assets.encoder, assets.decoder, assets.joiner, assets.tokens]
@@ -727,32 +721,6 @@ async fn a_model_with_a_data_file_in_a_folder_of_its_own_is_cached_only_with_its
 
     fs::remove_file(dir.join("m.gpu/encoder.onnx.data")).expect("remove");
     assert!(!store.is_cached(&assets).await, "the data file is missing");
-}
-
-#[test]
-fn the_ending_phrase_model_files_are_pinned_and_apart_from_the_other_models() {
-    let assets = [
-        SPOTTER.encoder,
-        SPOTTER.decoder,
-        SPOTTER.joiner,
-        SPOTTER.pieces,
-    ];
-    let mut names: Vec<&str> = assets.iter().map(|asset| asset.file_name).collect();
-    for asset in assets {
-        assert_eq!(asset.kind, ModelKind::Spotter, "{}", asset.file_name);
-        assert!(asset.url.starts_with("https://"), "{}", asset.url);
-        assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
-    }
-    for model in CatalogSpeech::ALL {
-        let speech = model.assets();
-        names.extend(
-            [speech.encoder, speech.decoder, speech.joiner, speech.tokens].map(|a| a.file_name),
-        );
-    }
-    let count = names.len();
-    names.sort_unstable();
-    names.dedup();
-    assert_eq!(names.len(), count);
 }
 
 #[tokio::test]

@@ -57,6 +57,7 @@ async fn serve() -> (String, tokio::sync::mpsc::UnboundedReceiver<Value>) {
             let seen = match message {
                 Message::Binary(audio) => json!({"audio_bytes": audio.len()}),
                 Message::Text(end) => serde_json::from_str(&end).expect("json"),
+                Message::Close(_) => json!("close frame"),
                 _ => continue,
             };
             seen_tx.send(seen).expect("report");
@@ -80,6 +81,10 @@ async fn audio_reaches_the_entry_and_closing_or_cancelling_ends_its_stream() {
             .expect("connects")
             .expect("ready");
         assert_eq!(session.final_wait(), Duration::from_secs(11));
+        assert!(
+            !session.buffers_audio(),
+            "realtime audio streams as it arrives"
+        );
         session
             .send_frame(&[100; FRAME_SAMPLES])
             .await
@@ -92,6 +97,7 @@ async fn audio_reaches_the_entry_and_closing_or_cancelling_ends_its_stream() {
             "{how}"
         );
         assert_eq!(next().await, Some(json!({"type": "endStream"})), "{how}");
+        assert_eq!(next().await, Some(json!("close frame")), "{how}");
     }
 }
 
