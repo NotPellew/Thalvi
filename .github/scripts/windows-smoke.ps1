@@ -11,6 +11,9 @@ Set-Content $config '{"stt":{"entries":[{"kind":"on_device","id":"ci","name":"On
 Start-Process $Installer -ArgumentList '/S' -Wait
 $exe = Join-Path $env:LOCALAPPDATA 'Programs\Thalvi\thalvi-desktop.exe'
 if (-not (Test-Path $exe)) { throw "the installer left no app at $exe" }
+foreach ($dll in 'webgpu_dawn.dll', 'dxcompiler.dll') {
+  if (-not (Test-Path (Join-Path (Split-Path $exe) $dll))) { throw "the installer left no $dll beside $exe" }
+}
 
 function Wait-Until([scriptblock]$Done, [string]$What, [int]$Seconds = 60) {
   $deadline = (Get-Date).AddSeconds($Seconds)

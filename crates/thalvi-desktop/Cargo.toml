@@ -15,7 +15,7 @@ jiff.workspace = true
 cpal.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
-ort.workspace = true
+ort = { workspace = true, features = ["webgpu", "api-24", "copy-dylibs"] }
 reqwest.workspace = true
 rtrb.workspace = true
 rustls.workspace = true
@@ -31,7 +31,6 @@ webrtc-vad.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk.workspace = true
-ort = { workspace = true, features = ["webgpu", "api-24", "copy-dylibs"] }
 nix.workspace = true
 rustix.workspace = true
 smithay-client-toolkit.workspace = true

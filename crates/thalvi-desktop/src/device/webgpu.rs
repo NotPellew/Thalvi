@@ -1,4 +1,4 @@
-//! The Linux GPU backend: Dawn's adapter check, a WebGPU session, and the read of where ONNX Runtime placed its nodes.
+//! The GPU backend: Dawn's adapter check, a WebGPU session, and the read of where ONNX Runtime placed its nodes.
 
 #![expect(
     unsafe_code,
@@ -13,7 +13,7 @@ use ort::ep::WebGPU;
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
 
-use super::{Adapter, Fallback, Gpu, Nodes, Part, Placed, runs_fully_on_gpu};
+use super::{Adapter, Fallback, Gpu, Nodes, Placed, runs_fully_on_gpu};
 
 /// Name of ONNX Runtime's CPU execution provider in the placement info.
 const CPU_PROVIDER: &str = "CPUExecutionProvider";
@@ -77,7 +77,7 @@ struct FutureWaitInfo {
     completed: u32,
 }
 
-// Linked through ONNX Runtime's own dependency on `libwebgpu_dawn.so`.
+// Linked through ONNX Runtime's own dependency on Dawn (`libwebgpu_dawn.so` / `webgpu_dawn.dll`).
 unsafe extern "C" {
     fn wgpuCreateInstance(descriptor: *const c_void) -> *mut c_void;
     fn wgpuInstanceRelease(instance: *mut c_void);
@@ -101,6 +101,18 @@ const REQUEST_SUCCESS: u32 = 1;
 const CALLBACK_WAIT_ANY_ONLY: u32 = 1;
 const FEATURE_LEVEL_CORE: u32 = 2;
 const ADAPTER_DISCRETE: u32 = 1;
+const ADAPTER_INTEGRATED: u32 = 2;
+/// AMD Strix Halo (Radeon 8050S/8060S): unified-memory APU whose 32–40 CUs beat CPU int8 on Unified.
+const VENDOR_AMD: u32 = 0x1002;
+const DEVICE_STRIX_HALO: u32 = 0x1586;
+
+/// Whether Dawn's adapter is fast enough for Nemotron Unified: discrete GPUs and AMD Strix Halo APUs.
+fn usable_adapter(adapter_type: u32, vendor_id: u32, device_id: u32) -> bool {
+    adapter_type == ADAPTER_DISCRETE
+        || (adapter_type == ADAPTER_INTEGRATED
+            && vendor_id == VENDOR_AMD
+            && device_id == DEVICE_STRIX_HALO)
+}
 
 /// Dawn's `WGPUBackendType` names, for the backends a desktop GPU can use.
 fn backend_name(backend: u32) -> &'static str {
@@ -149,8 +161,8 @@ fn text(view: &StringView) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// What Dawn's default adapter is. Only a discrete one counts: ONNX Runtime runs happily on a software
-/// rasteriser, and integrated GPUs were slower than the CPU for every model measured.
+/// What Dawn's default adapter is. Software rasterisers and ordinary integrated GPUs are rejected:
+/// small integrated GPUs were slower than the CPU for every model measured; AMD Strix Halo is allowed.
 pub fn adapter() -> Adapter {
     // SAFETY: a null descriptor asks for the default instance; the instance is released before returning.
     let instance = unsafe { wgpuCreateInstance(std::ptr::null()) };
@@ -231,7 +243,7 @@ fn describe(adapter: *mut c_void) -> Adapter {
     if status != REQUEST_SUCCESS {
         return Adapter::Unusable;
     }
-    let found = if info.adapter_type == ADAPTER_DISCRETE {
+    let found = if usable_adapter(info.adapter_type, info.vendor_id, info.device_id) {
         Adapter::Discrete(Gpu {
             name: text(&info.device),
             api: backend_name(info.backend_type),
@@ -244,16 +256,12 @@ fn describe(adapter: *mut c_void) -> Adapter {
     found
 }
 
-/// Opens `path`, one `part` of the model, on the GPU, and only if ONNX Runtime put all of it there that matters.
+/// Opens `path`, the model's encoder, on the GPU, and only if ONNX Runtime put all of it there that matters.
 ///
 /// # Errors
 /// [`Fallback::DriverFailed`] when the session cannot start on the GPU, [`Fallback::CannotRunFully`] when it starts
 /// but leaves compute on the CPU.
-pub fn open(
-    builder: SessionBuilder,
-    path: &Path,
-    part: Part,
-) -> Result<(Session, Nodes), Fallback> {
+pub fn open(builder: SessionBuilder, path: &Path) -> Result<(Session, Nodes), Fallback> {
     let driver = |error: &dyn std::fmt::Display| {
         tracing::warn!(
             "The GPU session for {} did not start: {error}",
@@ -271,11 +279,11 @@ pub fn open(
     let placed = placement(&session)
         .ok_or_else(|| driver(&"ONNX Runtime did not report where it placed the model"))?;
     let nodes = Nodes::of(&placed);
-    if runs_fully_on_gpu(part, &placed) {
+    if runs_fully_on_gpu(&placed) {
         Ok((session, nodes))
     } else {
         tracing::warn!(
-            "The {part:?} {} has {} of {} nodes on the GPU, which is not enough",
+            "The encoder {} has {} of {} nodes on the GPU, which is not enough",
             path.display(),
             nodes.on_gpu,
             nodes.total
@@ -394,5 +402,35 @@ mod tests {
         };
         assert!(!succeeded(failure));
         assert!(succeeded(ort::sys::OrtStatusPtr::default()));
+    }
+
+    #[test]
+    fn only_discrete_adapters_and_strix_halo_unified_gpus_count_as_usable() {
+        for (case, adapter_type, vendor_id, device_id, expected) in [
+            ("discrete NVIDIA", ADAPTER_DISCRETE, 0x10de, 0x2c05, true),
+            ("discrete AMD", ADAPTER_DISCRETE, VENDOR_AMD, 0x744c, true),
+            (
+                "Strix Halo",
+                ADAPTER_INTEGRATED,
+                VENDOR_AMD,
+                DEVICE_STRIX_HALO,
+                true,
+            ),
+            (
+                "small AMD iGPU",
+                ADAPTER_INTEGRATED,
+                VENDOR_AMD,
+                0x164e,
+                false,
+            ),
+            ("Intel UHD iGPU", ADAPTER_INTEGRATED, 0x8086, 0x9b41, false),
+            ("software rasteriser", 3, 0x1414, 0x008c, false),
+        ] {
+            assert_eq!(
+                usable_adapter(adapter_type, vendor_id, device_id),
+                expected,
+                "{case}"
+            );
+        }
     }
 }

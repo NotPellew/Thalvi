@@ -92,7 +92,7 @@ jobs:
           - os: ubuntu-latest
             bundle: appimage
             files: target/release/bundle/appimage/*.AppImage
-          - os: windows-latest
+          - os: windows-2025-vs2026
             bundle: nsis
             files: target/release/bundle/nsis/*-setup.exe
     steps:
@@ -103,7 +103,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libvulkan-dev glslc spirv-headers
-      - if: matrix.os == 'windows-latest'
+      - if: matrix.os == 'windows-2025-vs2026'
         run: .github/scripts/vulkan-sdk.ps1
         shell: pwsh
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -115,7 +115,22 @@ jobs:
       - run: npm run build --prefix crates/thalvi-app/ui
       - run: .github/scripts/whisper-helper crates/thalvi-app/helpers/whisper
         shell: bash
-      - run: npm exec --prefix ui -- tauri build --bundles ${{ matrix.bundle }} --config tauri.whisper.json --config "{\"version\":\"$VERSION\"}" -- --locked
+      - if: matrix.os == 'windows-2025-vs2026'
+        run: |
+          cargo build --release --locked -p thalvi-app
+          mkdir -p crates/thalvi-app/helpers/webgpu
+          for dll in webgpu_dawn.dll dxcompiler.dll; do
+            src="target/release/$dll"
+            if [[ ! -f $src && -n ${LOCALAPPDATA:-} ]]; then
+              src=$(find "$LOCALAPPDATA/ort.pyke.io" -name "$dll" -type f 2>/dev/null | head -n 1 || true)
+            fi
+            cp "$src" "crates/thalvi-app/helpers/webgpu/$dll"
+          done
+        shell: bash
+      - run: |
+          extra=()
+          if [[ "${{ matrix.bundle }}" == nsis ]]; then extra=(--config tauri.webgpu.windows.json); fi
+          npm exec --prefix ui -- tauri build --bundles ${{ matrix.bundle }} --config tauri.whisper.json "${extra[@]}" --config "{\"version\":\"$VERSION\"}" -- --locked
         working-directory: crates/thalvi-app
         shell: bash
         env:

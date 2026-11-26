@@ -36,13 +36,13 @@ Turning speech into text: on-device models, speech servers, the word list, extra
 - **Local boosting fuses NeMo's phrase tree into the greedy search at alpha 2.** Why: "Cybrex2", digit
   and all, in 8 of 8 dictations, no new errors on 48 takes with a two-entry list, about 1 ms more per
   step. Rejected: a beam of 4 (0 of 8 at alpha 1, twice the step time), NeMo's alpha 1 (0 of 8).
-- **ONNX Runtime from ort's prebuilt binaries, linked in.** On Linux its WebGPU build also needs
-  `libwebgpu_dawn.so` beside the executable (rpath `$ORIGIN`, shipped in the AppImage). Why: one way
+- **ONNX Runtime from ort's prebuilt binaries, linked in.** Its WebGPU build also needs
+  `libwebgpu_dawn.so` beside the executable on Linux (rpath `$ORIGIN`, shipped in the AppImage) and
+  `webgpu_dawn.dll` + `dxcompiler.dll` beside the executable on Windows (shipped in NSIS, built with MSVC 14.50+ on `windows-2025-vs2026`). Why: one way
   to provide it. Rejected: a system or bundled dynamic ONNX Runtime (a version and a file per OS).
-- **WebGPU for on-device recognition, discrete GPUs only.** Linux runs Nemotron Unified (fp16 export) on
-  one, else on the CPU with the reason in Settings, also until its 1.3 GB are downloaded; other models and
-  Windows (#317) stay on the CPU. Why: partial lag p50 73 → 32 ms at the same word errors; Streaming and
-  Parakeet were no faster. Rejected: CUDA (NVIDIA only, 1.65 GiB, wrong fp16 in #282), DirectML, integrated GPUs.
+- **WebGPU for on-device recognition, discrete GPUs and AMD Strix Halo.** Linux and Windows run Nemotron Unified's fp16 encoder on
+  discrete GPUs and AMD Strix Halo (`0x1002:0x1586`, Radeon 8050S/8060S), else on the CPU with the reason in Settings, also until its 1.3 GB are downloaded; the tiny 1×1 decoder/joiner and other models
+  stay on the CPU. Why: Linux RTX 5070 Ti partial lag p50 73 → 32 ms; Windows Radeon 8060S D3D12 steady-state encoder 190 → 80 ms (cosine parity 0.958–0.989, 0 NaNs), while decoder/joiner were 6–8× faster on CPU (0.45/0.17 ms vs 3.84/1.01 ms on WebGPU). Rejected: CUDA (NVIDIA only, 1.65 GiB, wrong fp16 in #282), DirectML (corrupt fp16 output on Radeon 8060S: cosine 0.41–0.68), ordinary integrated GPUs.
 - **Model files checked once, on download.** A pinned model file must match its SHA-256 as it is
   downloaded; a file already on disk counts as intact when it has the pinned size, else it is replaced.
   Why: hashing 0.6–1.9 GB on every load made switching back to a model take 11–20 s (#494).
