@@ -108,3 +108,4 @@ Releases are built on `desktop-vX.Y.Z` tags on `main` (and `X.Y.Z-dev.N` prerele
 Thalvi began during the [Meta Global AI Developer Hackathon](https://cerebralvalley.ai/e/meta-ai-developer-hackathon) (October 26 – November 4, 2026); code up to [`hackathon-submission`](https://github.com/NotPellew/Thalvi/tree/hackathon-submission) was written during the hackathon, and spoken conversation lived here up to [`conversation-final`](https://github.com/NotPellew/Thalvi/tree/conversation-final). Later work continues in the same open history with merge commits on `main`, and commits made with coding agents carry `Co-Authored-By` trailers.
 
 Licensed under [Apache License 2.0](LICENSE). Speech, wake, and chat models downloaded by the app keep their own licenses, shown beside each model in Settings.
+
