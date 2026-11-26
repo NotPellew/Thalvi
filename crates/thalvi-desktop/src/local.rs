@@ -33,10 +33,7 @@ impl Backlog {
     /// Stamps the next frame, or refuses it when the oldest unprocessed one is older than [`KEEP_UP`].
     fn send(&self, model: &str) -> Result<(), RecognizerError> {
         let now = Sent::now();
-        let mut waiting = self
-            .waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(oldest) = waiting.front() {
             let lag = now.saturating_duration_since(*oldest);
             if lag > KEEP_UP {
@@ -338,10 +335,11 @@ impl RecognizerSession for LocalSession {
         &mut self,
         frame: &Frame,
     ) -> impl Future<Output = Result<(), RecognizerError>> + Send {
-        let sent = self
-            .backlog
-            .send(&self.model)
-            .and_then(|()| self.frames.send((Instant::now(), *frame)).map_err(|_| stopped()));
+        let sent = self.backlog.send(&self.model).and_then(|()| {
+            self.frames
+                .send((Instant::now(), *frame))
+                .map_err(|_| stopped())
+        });
         std::future::ready(sent)
     }
 
@@ -441,7 +439,11 @@ impl<S: SpeechStream> Work<S> {
         if let Some(lag) = behind {
             fields["lag_ms"] = json!(lag.as_secs_f64() * 1000.0);
         }
-        self.metrics
-            .metric(Event::LocalStt, outcome, Some(tally.model), self.device.tag(fields));
+        self.metrics.metric(
+            Event::LocalStt,
+            outcome,
+            Some(tally.model),
+            self.device.tag(fields),
+        );
     }
 }

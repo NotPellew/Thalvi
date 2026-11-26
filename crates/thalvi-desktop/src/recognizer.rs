@@ -208,10 +208,7 @@ pub enum RecognizerError {
     },
     /// A speech model that could not be provided; the headline is the model error's own.
     #[error("{message}")]
-    Model {
-        headline: String,
-        message: String,
-    },
+    Model { headline: String, message: String },
     /// The model on this computer fell `lag` behind the microphone, further than a capture may.
     #[error("This computer can't keep up with {model}. Nothing was delivered.")]
     Behind { model: String, lag: Duration },
