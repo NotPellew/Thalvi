@@ -229,6 +229,14 @@ select. The session drops its queued frames and the capture delivers nothing; me
 and `Status` is display text only. No await, queue step or write to cancellation state is added,
 so the model actions and bounds are unchanged.
 
+The lighter-model offer (#705) reads a failed capture's `RecognizerError::Behind` after
+`Settling::settle` has decided the outcome and attaches a display-only offer to the failure
+status, or appends a hint to the notice when the active model has no lighter catalog model.
+The new `Control::DismissError` and `Control::OfferFailed` return false from `Requests::take`,
+like `Overlay`, so they neither set nor clear `ended`; the tray switch and the Settings save
+run on their own tasks and end no capture. No await, queue step or write to cancellation
+state is added, so the model actions and bounds are unchanged.
+
 The five checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
