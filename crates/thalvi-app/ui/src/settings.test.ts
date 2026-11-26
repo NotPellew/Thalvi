@@ -1288,6 +1288,7 @@ describe("the Recognition page", () => {
     button(LIGHTER).click();
     await settle();
     expect(recognition().textContent).toContain(message);
+    expect(summaryText()).toContain("Nemotron Streaming");
     expect(stub.applied().length).toBe(0);
   });
 
