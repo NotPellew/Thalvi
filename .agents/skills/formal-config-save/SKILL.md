@@ -196,8 +196,10 @@ downloaded, `commands::switch_to_lighter_model` builds a whole form with `settin
 plus the new `switched_to_lighter_model` and hands it to `commands::save`, so `Store::check` and
 `SyncedConfig::save_form` still run under the same lock with the same temporary name.
 `commands::dismiss_error` sends a runner control and writes no config, `agent.rs`'s `state` only
-reports the offer, and `app.rs`'s tray arm calls that same save path. No new writer, lock or
-temporary file is added, so the model and its three invariants are unchanged.
+reports the offer, and `app.rs`'s tray arm calls that same save path. A successful switch also
+sends the open window the settings-elsewhere event so its page shows the model it saved; that is a
+notification, not a writer. No new writer, lock or temporary file is added, so the model and its
+three invariants are unchanged.
 
 | Code | Model action and boundary |
 | --- | --- |
