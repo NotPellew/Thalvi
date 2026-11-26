@@ -8,23 +8,15 @@ use serde_json::{Value, json};
 
 use crate::models::SpeechProgress;
 
-#[cfg(target_os = "linux")]
 mod webgpu;
-#[cfg(target_os = "windows")]
-mod windows;
 
-#[cfg(target_os = "linux")]
-use self::webgpu as native;
-#[cfg(target_os = "windows")]
-use self::windows as native;
+pub(crate) use self::webgpu::open;
 
-pub(crate) use native::open;
-
-/// A discrete graphics adapter that can run recognition.
+/// A graphics adapter that can run recognition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gpu {
     pub name: String,
-    /// The graphics API, such as Vulkan.
+    /// The graphics API, such as Vulkan or D3D12.
     pub api: &'static str,
 }
 
@@ -32,17 +24,15 @@ pub struct Gpu {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Adapter {
     Discrete(Gpu),
-    /// No adapter, or only an integrated or software one.
+    /// No adapter, or only a slow integrated or software one.
     Unusable,
-    /// This OS runs recognition on the CPU only.
-    Unsupported,
 }
 
 /// Why recognition runs on the CPU. Each is shown to the user next to the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fallback {
     NoUsableGpu,
-    /// A discrete adapter was found, but a session on it did not start.
+    /// A usable adapter was found, but a session on it did not start.
     DriverFailed,
     /// The session started but ONNX Runtime left compute on the CPU.
     CannotRunFully,
@@ -50,7 +40,6 @@ pub enum Fallback {
     GpuFilesMissing,
     /// Only Nemotron Unified is faster on a GPU.
     CpuModel,
-    WindowsUnsupported,
     /// The entry is the Whisper CPU helper, which never uses a GPU.
     CpuChoice,
 }
@@ -65,7 +54,6 @@ impl Fallback {
             Self::CannotRunFully => "the model can't run fully on the GPU",
             Self::GpuFilesMissing => "the GPU model isn't downloaded",
             Self::CpuModel => "this model runs on the CPU",
-            Self::WindowsUnsupported => "GPU recognition isn't supported on Windows yet",
             Self::CpuChoice => "you chose the CPU entry",
         }
     }
@@ -77,7 +65,6 @@ impl Fallback {
             Self::CannotRunFully => "cannot_run_fully",
             Self::GpuFilesMissing => "gpu_files_missing",
             Self::CpuModel => "cpu_model",
-            Self::WindowsUnsupported => "windows_unsupported",
             Self::CpuChoice => "cpu_choice",
         }
     }
@@ -91,7 +78,7 @@ pub enum Device {
 }
 
 impl Device {
-    /// Where a model will be loaded first: on the GPU if it uses one and the adapter check finds a discrete one.
+    /// Where a model will be loaded first: on the GPU if it uses one and the adapter check finds a usable one.
     /// The adapter is checked only for a model that uses a GPU.
     #[must_use]
     pub fn plan(model_uses_gpu: bool, adapter: impl FnOnce() -> Adapter) -> Self {
@@ -101,7 +88,6 @@ impl Device {
         match adapter() {
             Adapter::Discrete(gpu) => Self::Gpu(gpu),
             Adapter::Unusable => Self::Cpu(Fallback::NoUsableGpu),
-            Adapter::Unsupported => Self::Cpu(Fallback::WindowsUnsupported),
         }
     }
 
@@ -148,7 +134,7 @@ pub struct Adapters {
 
 impl Default for Adapters {
     fn default() -> Self {
-        Self::checking(native::adapter)
+        Self::checking(webgpu::adapter)
     }
 }
 
@@ -450,12 +436,6 @@ mod tests {
                 true,
                 Adapter::Unusable,
                 Device::Cpu(Fallback::NoUsableGpu),
-            ),
-            (
-                "windows",
-                true,
-                Adapter::Unsupported,
-                Device::Cpu(Fallback::WindowsUnsupported),
             ),
             (
                 "model without a GPU export",
@@ -785,11 +765,7 @@ mod tests {
     async fn a_cpu_plan_loads_the_cpu_files_with_its_reason_and_never_touches_the_gpu_files() {
         use Export::Cpu;
         use Step::{Fetching, Reading};
-        for fallback in [
-            Fallback::NoUsableGpu,
-            Fallback::CpuModel,
-            Fallback::WindowsUnsupported,
-        ] {
+        for fallback in [Fallback::NoUsableGpu, Fallback::CpuModel] {
             let expected = format!("cpu of Cpu: {}", fallback.reason());
             check(
                 "files on disk",
@@ -957,10 +933,6 @@ mod tests {
             ),
             (Fallback::GpuFilesMissing, "the GPU model isn't downloaded"),
             (Fallback::CpuModel, "this model runs on the CPU"),
-            (
-                Fallback::WindowsUnsupported,
-                "GPU recognition isn't supported on Windows yet",
-            ),
         ] {
             assert_eq!(
                 lines(Device::Cpu(fallback)),

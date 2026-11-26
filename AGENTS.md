@@ -112,7 +112,7 @@ names its components and, above each gate, the toolchains and system packages
 that gate needs and does not install. CI jobs call the script after their
 toolchain setup, so a new check goes in the script, and a new component adds
 its case and pinned toolchain there and its CI job; one that ships on Windows
-also runs its gate on `windows-latest`. npm is the package manager; lockfiles
+also runs its gate on `windows-2025-vs2026`. npm is the package manager; lockfiles
 are committed.
 
 Two required checks are not in the script:

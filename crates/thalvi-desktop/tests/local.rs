@@ -488,11 +488,6 @@ async fn the_load_and_each_recognition_report_the_device_and_any_reason_for_the_
             Device::Cpu(Fallback::CpuModel),
             serde_json::json!({"device": "cpu", "fallback": "cpu_model"}),
         ),
-        (
-            "windows",
-            Device::Cpu(Fallback::WindowsUnsupported),
-            serde_json::json!({"device": "cpu", "fallback": "windows_unsupported"}),
-        ),
     ] {
         let rig = rig_on(&format!("device-{name}"), device, None, dictation, None, 0);
         let mut session = rig.recognizer.connect().await.expect("connects");
