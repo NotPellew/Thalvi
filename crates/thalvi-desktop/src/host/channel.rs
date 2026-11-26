@@ -556,8 +556,12 @@ mod tests {
         })
         .unwrap();
 
-        // A client that connects and leaves again sent no request.
-        drop(UnixStream::connect(dir.socket()).unwrap());
+        // A client that connects and stops writing sent no request: it gets no reply and runs no handler.
+        let mut empty = UnixStream::connect(dir.socket()).unwrap();
+        empty.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut reply = Vec::new();
+        std::io::Read::read_to_end(&mut empty, &mut reply).unwrap();
+        assert_eq!(reply, b"", "the closed connection got no reply");
         assert_eq!(ask(&dir, "state").unwrap(), Some("answered".to_owned()));
         assert_eq!(
             received.try_iter().collect::<Vec<_>>(),
