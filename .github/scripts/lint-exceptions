@@ -362,44 +362,37 @@ def skip_one_meta(text: str, index: int) -> int:
 
 
 def parse_meta_attribute(text: str, index: int) -> tuple[list[Expectation], int]:
-    start = skip_trivia(text, index)
-    name, after = read_simple_name(text, start)
-    if name is None and after == start:
-        return [], start
-    cursor = skip_trivia(text, after)
-    if cursor < len(text) and text[cursor] == "(":
-        if name == "expect":
-            return lints_of_expect(text, cursor)
-        if name == "cfg_attr":
-            return expects_after_cfg_condition(text, cursor)
-        return [], skip_group(text, cursor)
-    if cursor < len(text) and text[cursor] == "=":
-        return [], skip_value(text, cursor + 1)
-    return [], cursor
-
-
-def expects_after_cfg_condition(text: str, open_paren: int) -> tuple[list[Expectation], int]:
-    # The first argument is the cfg condition, not an attribute.
     found: list[Expectation] = []
-    index = skip_one_meta(text, open_paren + 1)
-    while index < len(text):
-        index = skip_trivia(text, index)
+    cfg_depth = 0
+    while True:
+        start = skip_trivia(text, index)
+        name, after = read_simple_name(text, start)
+        cursor = skip_trivia(text, after)
+        if cursor < len(text) and text[cursor] == "(":
+            if name == "expect":
+                expectations, cursor = lints_of_expect(text, cursor)
+                found.extend(expectations)
+            elif name == "cfg_attr":
+                cfg_depth += 1
+                # The first argument is the cfg condition.
+                cursor = skip_one_meta(text, cursor + 1)
+            else:
+                cursor = skip_group(text, cursor)
+        elif cursor < len(text) and text[cursor] == "=":
+            cursor = skip_value(text, cursor + 1)
+        if cfg_depth == 0:
+            return found, cursor
+
+        index = skip_trivia(text, cursor)
+        while index < len(text) and text[index] == ")":
+            cfg_depth -= 1
+            index = skip_trivia(text, index + 1)
+            if cfg_depth == 0:
+                return found, index
         if index >= len(text):
             return found, index
-        if text[index] == ")":
-            return found, index + 1
-        if text[index] != ",":
+        if text[index] == "," or index == start:
             index += 1
-            continue
-        index = skip_trivia(text, index + 1)
-        if index >= len(text):
-            return found, index
-        if text[index] == ")":
-            return found, index + 1
-        item, next_index = parse_meta_attribute(text, index)
-        found.extend(item)
-        index = next_index if next_index > index else index + 1
-    return found, index
 
 
 def parse_attribute(text: str, index: int) -> tuple[list[Expectation], bool, int]:
@@ -427,8 +420,8 @@ def precedes_module(text: str, index: int) -> bool:
             index = skip_trivia(text, skip_group(text, index))
         name, index = read_ident(text, index)
     if name == "unsafe":
-        name, _ = read_ident(text, skip_trivia(text, index))
-    return name == "mod"
+        name, index = read_ident(text, skip_trivia(text, index))
+    return name == "mod" and skip_trivia(text, index) > index
 
 
 def expect_lints(text: str) -> tuple[list[Expectation], list[int]]:

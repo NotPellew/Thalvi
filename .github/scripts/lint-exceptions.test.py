@@ -49,7 +49,7 @@ fn outer() {}
             '#![{attribute}]\nfn item() {{}}',
             '#![cfg_attr(unix, cfg_attr(all(), {attribute}))]\nfn item() {{}}',
             '#[{attribute}]\n#[cfg(unix)]\n/* comment */ pub(crate) mod demo;',
-            '#[cfg_attr(unix, {attribute})]\n/// docs\npub mod demo {{}}',
+            '#[cfg_attr(unix, {attribute})]\n/// docs\npub mod/* layout */demo {{}}',
         ):
             for reason, accepted in (
                 (', reason = "platform: FFI"', True),
@@ -67,6 +67,18 @@ fn outer() {}
                         self.assertIn('crates/demo.rs:1', result.stdout)
                         self.assertIn('platform:', result.stdout)
 
+    def test_a_field_whose_name_starts_with_mod_is_not_a_module(self):
+        result = run_check(
+            '"dead_code" = 1\n',
+            demo='''\
+pub struct Holder {
+    #[expect(dead_code, reason = "only the field")]
+    modération: i32,
+}
+''',
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_each_expect_in_a_module_cfg_attr_needs_its_own_reason(self):
         result = run_check(
             '"unsafe_code" = 1\n"dead_code" = 1\n',
@@ -81,6 +93,20 @@ mod demo;
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn('crates/demo.rs:2', result.stdout)
         self.assertIn('crates/demo.rs:3', result.stdout)
+
+    def test_deep_cfg_attr_nesting_applies_the_same_module_rule(self):
+        for reason, code in (("platform: FFI", 0), ("FFI", 1)):
+            with self.subTest(reason=reason):
+                leaf = f'expect(unsafe_code, reason = "{reason}")'
+                attribute = 'cfg_attr(all(), ' * 520 + leaf + ')' * 520
+                result = run_check(
+                    '"unsafe_code" = 1\n',
+                    demo=f'#![recursion_limit = "4096"]\n#[{attribute}]\nmod demo {{}}',
+                )
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                if code:
+                    self.assertIn('crates/demo.rs:2', result.stdout)
+                    self.assertIn('platform:', result.stdout)
 
     def test_ignores_comments_strings_and_the_cfg_condition(self):
         result = run_check(
