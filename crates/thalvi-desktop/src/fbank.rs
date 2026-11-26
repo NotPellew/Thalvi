@@ -467,7 +467,7 @@ impl WindowMel {
         }
         #[expect(
             clippy::cast_precision_loss,
-            reason = "a desktop capture is at most 3600 s (360000 hops); larger offline counts round to f32"
+            reason = "the one-hour desktop cap plus decoder padding is below 2^24 hops, where f32 counts can start to round"
         )]
         let (mean_divisor, variance_divisor) = (count as f32, (count - 1) as f32);
         for bin in 0..MEL_BINS {
