@@ -127,6 +127,57 @@ fn quiet_english_keeps_all_its_words() {
     }
 }
 
+/// The twelve-second dictation of issue #449, `dict12.wav`: three sentences, 0.2 s apart.
+const DICTATION: [&str; 3] = [
+    "quarterly report covers",
+    "revenue grew by",
+    "costs rose more",
+];
+
+#[test]
+#[ignore = "needs THALVI_SPEECH_MODEL and THALVI_TEST_WAVS local folders"]
+fn the_tentative_text_of_a_twelve_second_dictation_holds_all_three_sentences() {
+    let wavs = PathBuf::from(std::env::var("THALVI_TEST_WAVS").expect("THALVI_TEST_WAVS"));
+    let mut stream = model().stream();
+    let mut last = String::new();
+    for frame in wav_frames(&wavs.join("dict12.wav")) {
+        for event in stream.accept(&frame).expect("frame recognized") {
+            match event {
+                RecognizerEvent::Partial(text) if !text.is_empty() => last = words(&text),
+                RecognizerEvent::Final(text) => panic!("ended early with {text:?}"),
+                RecognizerEvent::Partial(_) => {}
+            }
+        }
+    }
+    for opening in DICTATION {
+        assert!(
+            last.contains(opening),
+            "the tentative text at the end of the audio lost {opening:?}: {last:?}"
+        );
+    }
+    println!("dict12.wav tentative text: {last}");
+
+    let mut finals = Vec::new();
+    for _ in 0..40 {
+        for event in stream
+            .accept(&[0; FRAME_SAMPLES])
+            .expect("frame recognized")
+        {
+            if let RecognizerEvent::Final(text) = event {
+                finals.push(words(&text));
+            }
+        }
+    }
+    let final_text = finals.join(" ");
+    for opening in DICTATION {
+        assert!(
+            final_text.contains(opening),
+            "the final lost {opening:?}: {final_text:?}"
+        );
+    }
+    println!("dict12.wav final: {final_text}");
+}
+
 #[test]
 #[ignore = "needs THALVI_SPEECH_MODEL and THALVI_TEST_WAVS local folders"]
 fn english_survives_seven_seconds_of_digital_silence() {
