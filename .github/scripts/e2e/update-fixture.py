@@ -3,6 +3,7 @@
 
 import argparse
 from contextlib import contextmanager
+import csv
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -261,16 +262,23 @@ class Desktop:
     def stop(self):
         if self.cli("quit"):
             wait_for("the current Thalvi to stop", lambda: self.cli("settings", "get") is None)
-        if self.app is not None:
-            app, self.app = self.app, None
-            try:
-                code = app.wait(timeout=10)
-                require(code == 0, f"The original Thalvi process exited with {code}")
-                return code
-            finally:
-                if app.poll() is None:
-                    app.kill()
-                    app.wait()
+        app, self.app = self.app, None
+        try:
+            code = app.wait(timeout=10)
+            require(code == 0, f"The original Thalvi process exited with {code}")
+        finally:
+            if app.poll() is None:
+                app.kill()
+                app.wait()
+        if WINDOWS:
+            # A relaunched process can still own Tauri's single-instance lock after IPC closes.
+            wait_for("the Windows Thalvi process to exit", self.windows_stopped, 30)
+        return code
+
+    def windows_stopped(self):
+        listing = subprocess.check_output(["tasklist.exe", "/FI", f"IMAGENAME eq {self.exe.name}",
+                                           "/FO", "CSV", "/NH"], text=True, timeout=10)
+        return all(row[0].casefold() != self.exe.name.casefold() for row in csv.reader(listing.splitlines()) if row)
 
     def metric(self, step, outcome, current):
         try:
