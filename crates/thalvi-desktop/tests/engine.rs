@@ -4781,7 +4781,7 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
             1200,
             accepted(CaptureRoute::Paste, "hello world"),
             Cue::Accepted,
-            1450,
+            1600,
         ),
         (
             &[(1000, Partial("hello world")), (1250, Final("hello world"))],
@@ -4802,14 +4802,14 @@ async fn releasing_the_key_pastes_what_was_said_without_a_countdown_or_enter() {
             1200,
             accepted(CaptureRoute::Paste, "first line second line"),
             Cue::Accepted,
-            1450,
+            1600,
         ),
         (
             &[(1000, Partial("hello never mind"))],
             1200,
             accepted(CaptureRoute::Paste, "hello never mind"),
             Cue::Accepted,
-            1450,
+            1600,
         ),
         (
             &[(800, Final("first line")), (1250, Final("never mind"))],
@@ -5048,8 +5048,8 @@ async fn spoken_endings_are_text_during_a_hold_and_act_after_the_wake_word() {
                 rig.hold().await;
                 rig.say(1000, Say::Final(said)).await;
                 rig.release(1200).await;
-                rig.at(1450).await;
-                assert_eq!(rig.started(Cue::Accepted), [1450], "hold: {said}");
+                rig.at(1600).await;
+                assert_eq!(rig.started(Cue::Accepted), [1600], "hold: {said}");
                 assert_eq!(rig.started(Cue::Provisional).len(), 0, "hold: {said}");
                 assert_eq!(
                     finished(task).await,
@@ -5952,20 +5952,20 @@ async fn a_hold_with_no_final_within_the_limit_pastes_what_is_there_at_the_limit
             rig.hold().await;
             rig.say(1000, Say::Partial("partial text")).await;
             rig.release(1200).await;
-            rig.at(1449).await;
+            rig.at(1599).await;
             assert!(
                 !task.is_finished(),
-                "at 1449 ms the limit has not yet expired"
+                "at 1599 ms the limit has not yet expired"
             );
             assert!(
                 rig.started(Cue::Accepted).is_empty(),
                 "no paste before the limit"
             );
-            rig.at(1450).await;
+            rig.at(1600).await;
             assert_eq!(
                 rig.started(Cue::Accepted),
-                [1450],
-                "pastes at the 250 ms limit"
+                [1600],
+                "pastes at the 400 ms limit"
             );
             assert_eq!(
                 finished(task).await,
