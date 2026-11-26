@@ -18,6 +18,11 @@ Branches, CI, checks and releases.
   OpenCode and Hex gate only their protected paths this way. Rejected: the `hold` workflow, which
   approved a fix-only PR as GitHub Actions and held every other agent PR (about 700 lines to keep in step with
   the ruleset), the `owner-ok` label, a pending status (agent runs wait on it).
+- **One required check per workflow.** The ruleset requires only `ci-ok` and `commits-ok`, which wait
+  for every other job of their workflow; a test fails when a job is missing from their `needs`. Why: each
+  renamed or added job needed an owner edit of the ruleset. A branch from before a new job can merge
+  without it; heavy.yml's run on `main` then runs it and files a ci-regression issue on failure.
+  Rejected: naming every job in the ruleset (Vardli's list missed six gates); a glob (rulesets have none).
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit
   history are record enough. Rejected: an issue for every change.
 - **`unsafe` only at native FFI boundaries.** The workspace denies `unsafe`; Windows host modules and
