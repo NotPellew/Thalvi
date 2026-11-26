@@ -54,12 +54,95 @@ pub fn item_path(id: &str) -> String {
 /// Whether the tray host lists the item at `item`, registering it again when it does not.
 #[must_use]
 pub fn ensure_registered(bus: &gio::DBusConnection, item: &str) -> Outcome {
-    let _ = (bus, item);
-    Outcome::Listed
+    let Some(unique) = bus.unique_name() else {
+        return Outcome::Refused("Thalvi has no name on the session bus.".to_owned());
+    };
+    let listed = match listed_items(bus) {
+        Ok(listed) => listed,
+        Err(outcome) => return outcome,
+    };
+    let ours = format!("{unique}/");
+    if listed.iter().any(|listed| listed.starts_with(&ours)) {
+        return Outcome::Listed;
+    }
+    let call = bus.call_sync(
+        Some(WATCHER),
+        WATCHER_PATH,
+        WATCHER,
+        "RegisterStatusNotifierItem",
+        Some(&(item,).to_variant()),
+        None,
+        gio::DBusCallFlags::NONE,
+        CALL_TIMEOUT_MS,
+        gio::Cancellable::NONE,
+    );
+    match call {
+        Ok(_) => Outcome::Registered,
+        Err(error) => Outcome::Refused(error.message().to_owned()),
+    }
 }
 
+/// The items the tray host lists, or what to report instead when it cannot say.
+fn listed_items(bus: &gio::DBusConnection) -> Result<Vec<String>, Outcome> {
+    let reply = bus
+        .call_sync(
+            Some(WATCHER),
+            WATCHER_PATH,
+            PROPERTIES,
+            "Get",
+            Some(&(WATCHER, ITEMS).to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            CALL_TIMEOUT_MS,
+            gio::Cancellable::NONE,
+        )
+        .map_err(|_| Outcome::NoHost)?;
+    let value = reply
+        .get::<(glib::Variant,)>()
+        .ok_or_else(|| Outcome::Refused("The tray host sent no item list.".to_owned()))?;
+    value.0.get::<Vec<String>>().ok_or_else(|| {
+        Outcome::Refused("The tray host sent an item list of another type.".to_owned())
+    })
+}
+
+/// Watches the host, so a reload or a start after Thalvi registers the item again.
 fn follow(item: &str) {
-    let _ = (item, INTERVAL, CALL_TIMEOUT_MS);
+    let bus = match gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
+        Ok(bus) => bus,
+        Err(error) => {
+            eprintln!(
+                "The tray icon cannot follow the tray host: {}.",
+                error.message()
+            );
+            return;
+        }
+    };
+    // The tray was just built, so a host that is missing right away is what gets reported.
+    let mut previous = Outcome::Listed;
+    loop {
+        std::thread::sleep(INTERVAL);
+        let outcome = ensure_registered(&bus, item);
+        announce(&previous, &outcome);
+        previous = outcome;
+    }
+}
+
+/// Says what changed in words, once per change, so a missing host is not reported every second.
+fn announce(previous: &Outcome, outcome: &Outcome) {
+    match outcome {
+        Outcome::NoHost if !matches!(previous, Outcome::NoHost) => {
+            eprintln!("No tray host is running. The tray icon appears when one starts.");
+        }
+        Outcome::Listed | Outcome::Registered
+            if matches!(previous, Outcome::NoHost | Outcome::Refused(_)) =>
+        {
+            eprintln!("The tray host is back. The tray icon is registered again.");
+        }
+        Outcome::Refused(reason) if !matches!(previous, Outcome::Refused(_)) => {
+            eprintln!("The tray icon could not be registered: {reason}");
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -91,7 +174,10 @@ mod tests {
             .env("THALVI_TRAY_WATCH_TEST_BUS", "1")
             .status()
             .expect("dbus-run-session");
-        assert!(status.success(), "the test failed on its private session bus");
+        assert!(
+            status.success(),
+            "the test failed on its private session bus"
+        );
         false
     }
 
@@ -115,7 +201,11 @@ mod tests {
     #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
     impl FakeHost {
         fn register_status_notifier_item(&self, service: &str) {
-            self.shown.lock().unwrap().registered.push(service.to_owned());
+            self.shown
+                .lock()
+                .unwrap()
+                .registered
+                .push(service.to_owned());
         }
 
         #[zbus(property)]

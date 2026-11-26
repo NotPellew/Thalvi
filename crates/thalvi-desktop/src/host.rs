@@ -24,18 +24,18 @@ pub use line::{MAX_REQUEST, refusal};
 /// The title of the status overlay window, by which a desktop recognises it.
 pub const OVERLAY_TITLE: &str = "Thalvi overlay";
 
-/// The host for the desktop Thalvi runs on, and its status overlay's own surface and waker.
-#[cfg(target_os = "linux")]
-pub use linux::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker, Session};
-/// The host for the desktop Thalvi runs on, and its status overlay's own surface and waker.
-#[cfg(target_os = "windows")]
-pub use windows::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker};
 /// Keeps the tray item registered when the desktop's tray host restarts or forgets it.
 #[cfg(target_os = "linux")]
 pub use linux::keep_tray_registered;
+/// The host for the desktop Thalvi runs on, and its status overlay's own surface and waker.
+#[cfg(target_os = "linux")]
+pub use linux::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker, Session};
 /// Keeps the tray item registered when the desktop's tray host restarts or forgets it.
 #[cfg(target_os = "windows")]
 pub use windows::keep_tray_registered;
+/// The host for the desktop Thalvi runs on, and its status overlay's own surface and waker.
+#[cfg(target_os = "windows")]
+pub use windows::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker};
 
 /// One overlay frame: `width` × `height` pixels of premultiplied BGRA, row by row.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

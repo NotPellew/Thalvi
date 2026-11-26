@@ -16,6 +16,9 @@ const SIZE: u8 = 32;
 /// Samples per axis and pixel; more samples give smoother edges.
 const SAMPLES: u8 = 4;
 
+/// The tray's id, by which the desktop's tray host knows it.
+const ID: &str = "thalvi";
+
 pub const TOGGLE: &str = "toggle";
 pub const CANCEL: &str = "cancel";
 pub const COPY_ERROR: &str = "copy-error";
@@ -327,7 +330,7 @@ impl Tray {
                 &quit,
             ],
         )?;
-        let icon = TrayIconBuilder::with_id("thalvi")
+        let icon = TrayIconBuilder::with_id(ID)
             .icon(Image::new_owned(
                 Icon::of(status).pixels(),
                 u32::from(SIZE),
@@ -337,6 +340,8 @@ impl Tray {
             .menu(&menu)
             .on_menu_event(|app, event| crate::app::on_menu(app, event.id().as_ref()))
             .build(app)?;
+        // The host that lists the item may restart or reload: a watcher keeps it listed across that.
+        thalvi_desktop::host::keep_tray_registered(ID);
         Ok(Self {
             icon,
             header,
