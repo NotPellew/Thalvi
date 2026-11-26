@@ -12,10 +12,10 @@ Branches, CI, checks and releases.
   integration branch (a workflow faked issue closing for it), a version commit per dev build.
 - **Code owners, no required approval.** The `main` ruleset requires no approving review, only the
   required checks and the code-owner review: a PR that changes a path in `.github/CODEOWNERS` (tooling,
-  agent rules, decisions, toolchain settings, dependencies) waits for the owner's review, and any other
+  agent rules, decisions, the updater and installer, toolchain settings, dependencies) waits for the owner's review, and any other
   merges on green CI. The owner bypasses the ruleset to merge their own PRs. Why: the owner approves
   what agents build when an issue is marked `ready`, so a second check at merge only repeats it; T3 Code,
-  OpenCode and Hex gate only their release boundary this way. Rejected: the `hold` workflow, which
+  OpenCode and Hex gate only their protected paths this way. Rejected: the `hold` workflow, which
   approved a fix-only PR as GitHub Actions and held every other agent PR (about 700 lines to keep in step with
   the ruleset), the `owner-ok` label, a pending status (agent runs wait on it).
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit

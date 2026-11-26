@@ -11,6 +11,15 @@
 /CLAUDE.md @NotPellew
 /decisions/ @NotPellew
 /.agents/skills/verify-thalvi/ @NotPellew
+/.claude/ @NotPellew
+
+# Updater, installer and app permissions
+/crates/thalvi-app/tauri.conf.json @NotPellew
+/crates/thalvi-app/capabilities/ @NotPellew
+/crates/thalvi-app/src/updater.rs @NotPellew
+/crates/thalvi-app/src/updater/ @NotPellew
+/crates/thalvi-app/windows/ @NotPellew
+build.rs @NotPellew
 
 # Toolchain, lint and security settings
 /deny.toml @NotPellew
@@ -25,3 +34,5 @@ Cargo.toml @NotPellew
 Cargo.lock @NotPellew
 package.json @NotPellew
 package-lock.json @NotPellew
+pyproject.toml @NotPellew
+uv.lock @NotPellew
