@@ -77,8 +77,9 @@ pub const MIN_HOLD: Duration = Duration::from_millis(300);
 const RELEASE_SILENCE_FRAMES: usize = 10;
 
 /// How long after the release the engine waits for that final before pasting what has arrived.
-/// Measured on the server recognizer, the last word was in the text by 200 ms in every run.
-const RELEASE_LIMIT: Duration = Duration::from_millis(250);
+/// A final re-hears the last words of a long stretch, measured at 75-180 ms warm; 400 ms keeps the
+/// wait under the half-second goal while a loaded machine finishes a short stretch's whole decode.
+const RELEASE_LIMIT: Duration = Duration::from_millis(400);
 
 /// How long Submit waits for the overlay to confirm that the full review text is on screen.
 const PREVIEW_WAIT: Duration = Duration::from_secs(1);
