@@ -365,16 +365,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
     ],
   },
   {
-    issue: 547,
-    title: "Cancel a new extra recognizer",
-    pinned: true,
-    steps: [
-      { kind: "click", name: "Recognition" },
-      { kind: "click", name: "Add an extra-only server" },
-      { kind: "click", name: "Cancel" },
-    ],
-  },
-  {
     issue: 551,
     title: "Listening, Restore default after changing the hold key",
     pinned: true,
@@ -392,17 +382,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
     steps: [
       { kind: "click", name: "Commands" },
       { kind: "click", name: "Remove script 1" },
-    ],
-  },
-  {
-    issue: 553,
-    title: "Go to the endpoint setting with its Details collapsed",
-    pinned: true,
-    steps: [
-      { kind: "click", name: "Chat model" },
-      { kind: "click", name: "Details" },
-      { kind: "click", name: "Recognition" },
-      { kind: "click", name: "Go to the endpoint setting" },
     ],
   },
   {

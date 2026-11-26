@@ -75,9 +75,10 @@ keep their bodies unchanged. No hold observation, handoff, key event or bound ch
 `hold.rs` and its recorded hash are unchanged. The harness and its mutations still describe
 these callers; no model update is needed.
 
-For the final-pass deadline (#586), `Cutoff` keeps the time alongside the event's existing frame
-order. Both are set by the same first release. The press events, ownership, observation order and
-bounds in the harness are unchanged. The capture engine tests the deadline on its paused clock.
+`Cutoff` kept a release time for the final-pass deadline (#586). The one-recognizer change (#727)
+removes that deadline, so `released_at` and the stored `Instant` are gone: `Cutoff` records only the
+release's `Order`, set by the same first release, and `precedes` compares it as before. The press
+events, ownership, observation order and bounds in the harness are unchanged.
 
 | Code | In the harness |
 | --- | --- |

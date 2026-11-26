@@ -1,4 +1,4 @@
-//! Owns the optional secondary transcription of a finished capture: its validated settings and the `OpenAI` or Meta WAV upload.
+//! Owns an OpenAI-compatible speech server's validated settings and the requests that transcribe a capture through it.
 
 use std::{fmt, time::Duration};
 
@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{frame::Frame, phrases::WordList, recognizer::Upsampler};
+use crate::{frame::Frame, recognizer::Upsampler};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const SAMPLE_RATE: u32 = 24_000;
@@ -26,104 +26,40 @@ pub(crate) fn base_url(url: &str) -> Option<String> {
     .then(|| parsed.as_str().trim_end_matches('/').to_string())
 }
 
-/// Which transcription API the secondary endpoint speaks.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SecondaryApi {
-    #[default]
-    OpenAi,
-    Meta,
-}
-
-/// Why secondary settings were refused.
+/// Why a speech server's settings were refused.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SecondarySttError {
     #[error(
-        "stt.secondary.url must be an http or https URL with a host, no credentials, query or fragment."
+        "The speech server address must be an http or https URL with a host, no credentials, query or fragment."
     )]
     Url,
-    #[error("stt.secondary.model must be nonempty text.")]
+    #[error("The speech server model must be nonempty text.")]
     Model,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSecondaryStt {
-    #[serde(default)]
-    enabled: bool,
-    url: String,
-    model: String,
-    #[serde(default)]
-    api_key: String,
-    #[serde(default)]
-    api: SecondaryApi,
-}
-
-/// Settings of the secondary transcription endpoint; it runs only when `enabled`.
-#[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(try_from = "RawSecondaryStt")]
+/// Settings of an OpenAI-compatible speech server.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecondaryStt {
-    enabled: bool,
     url: String,
     model: String,
     api_key: String,
-    api: SecondaryApi,
-}
-
-impl fmt::Debug for SecondaryStt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SecondaryStt")
-            .field("enabled", &self.enabled)
-            .field("url", &self.url)
-            .field("model", &self.model)
-            .field("api", &self.api)
-            .finish_non_exhaustive()
-    }
 }
 
 impl SecondaryStt {
     /// # Errors
-    /// Fails when `enabled` and `url` is not an `http` or `https` base URL without credentials, query or fragment, or `model` is blank. When not `enabled`, the endpoint is kept as written without validation.
-    pub fn new(
-        url: &str,
-        model: &str,
-        api_key: String,
-        api: SecondaryApi,
-        enabled: bool,
-    ) -> Result<Self, SecondarySttError> {
-        if !enabled {
-            return Ok(Self {
-                enabled,
-                url: url.trim().trim_end_matches('/').to_string(),
-                model: model.trim().to_string(),
-                api_key,
-                api,
-            });
-        }
+    /// Fails when `url` is not an `http` or `https` base URL without credentials, query or fragment,
+    /// or `model` is blank.
+    pub fn new(url: &str, model: &str, api_key: String) -> Result<Self, SecondarySttError> {
         let url = base_url(url).ok_or(SecondarySttError::Url)?;
         let model = model.trim();
         if model.is_empty() {
             return Err(SecondarySttError::Model);
         }
         Ok(Self {
-            enabled,
             url,
             model: model.to_string(),
             api_key,
-            api,
         })
-    }
-
-    /// Whether the secondary transcription runs.
-    #[must_use]
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    /// The same settings, run or not.
-    #[must_use]
-    pub fn with_enabled(self, enabled: bool) -> Self {
-        Self { enabled, ..self }
     }
 
     /// The endpoint's base address.
@@ -142,20 +78,6 @@ impl SecondaryStt {
     #[must_use]
     pub fn model(&self) -> &str {
         &self.model
-    }
-
-    /// Which request format the endpoint speaks.
-    #[must_use]
-    pub fn api(&self) -> SecondaryApi {
-        self.api
-    }
-}
-
-impl TryFrom<RawSecondaryStt> for SecondaryStt {
-    type Error = SecondarySttError;
-
-    fn try_from(raw: RawSecondaryStt) -> Result<Self, Self::Error> {
-        Self::new(&raw.url, &raw.model, raw.api_key, raw.api, raw.enabled)
     }
 }
 
@@ -357,18 +279,18 @@ pub struct OpenAiLive {
     pub language: Option<Language>,
 }
 
-/// Why the secondary transcription produced no text.
+/// Why a speech server's request produced no text.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SecondaryError {
     #[error("The transcription server's secure connection failed. {0}")]
     Certificate(crate::report::CertificateProblem),
-    #[error("The second transcription took too long.")]
+    #[error("The transcription took too long.")]
     Timeout,
-    #[error("The second transcription could not be reached.")]
+    #[error("The transcription server could not be reached.")]
     Unreachable,
-    #[error("The second transcription failed with status {0}.")]
+    #[error("The transcription server failed with status {0}.")]
     Status(u16),
-    #[error("The second transcription returned an unexpected answer.")]
+    #[error("The transcription server returned an unexpected answer.")]
     BadResponse,
 }
 
@@ -405,98 +327,6 @@ fn wav(frames: &[Frame]) -> Vec<u8> {
     out
 }
 
-/// Sends the capture to the secondary endpoint and returns its raw transcript.
-///
-/// # Errors
-/// Fails with [`SecondaryError`] on timeout, an unreachable or failing endpoint, or an unexpected answer.
-pub async fn transcribe(
-    client: &reqwest::Client,
-    settings: &SecondaryStt,
-    frames: &[Frame],
-    words: &WordList,
-) -> Result<Transcript, SecondaryError> {
-    let (endpoint, header, hint, file_field, text_field) = match settings.api {
-        SecondaryApi::OpenAi => (
-            "/audio/transcriptions",
-            format!(
-                "Content-Disposition: form-data; name=\"model\"\r\n\r\n{}",
-                settings.model
-            ),
-            if words.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n{}\r\n",
-                    words.hint()
-                )
-            },
-            "file",
-            "text",
-        ),
-        SecondaryApi::Meta => {
-            let mut request = json!({
-                "mode": "PUSH_TO_TALK",
-                "model": settings.model,
-                "audioEncoding": "WAV",
-            });
-            if !words.is_empty() {
-                request["keywords"] = json!(words.phrases());
-            }
-            (
-                "/asr/transcribe",
-                format!(
-                    "Content-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n{request}"
-                ),
-                String::new(),
-                "audio",
-                "transcript",
-            )
-        }
-    };
-    let mut body = format!(
-        "--{BOUNDARY}\r\n{header}\r\n{hint}--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"capture.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
-    )
-    .into_bytes();
-    body.extend_from_slice(&wav(frames));
-    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-
-    let mut request = client
-        .post(format!("{}{endpoint}", settings.url))
-        .header(
-            "Content-Type",
-            format!("multipart/form-data; boundary={BOUNDARY}"),
-        )
-        .header("Accept", "application/json")
-        .body(body);
-    if !settings.api_key.is_empty() {
-        request = request.bearer_auth(&settings.api_key);
-    }
-    let answer = async {
-        let response = request
-            .send()
-            .await
-            .map_err(|error| SecondaryError::connection(&error))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(SecondaryError::Status(status.as_u16()));
-        }
-        response
-            .json::<Value>()
-            .await
-            .map_err(|_| SecondaryError::BadResponse)
-    };
-    let answer = tokio::time::timeout(TIMEOUT, answer)
-        .await
-        .map_err(|_| SecondaryError::Timeout)??;
-    match answer.get(text_field) {
-        Some(Value::String(text)) => Ok(Transcript {
-            text: text.clone(),
-            language: detected_language(&answer),
-        }),
-        _ => Err(SecondaryError::BadResponse),
-    }
-}
-
 /// The language an answer names, as a code or as an API's English name.
 fn detected_language(answer: &Value) -> Option<Language> {
     answer
@@ -520,15 +350,6 @@ pub async fn transcribe_events(
     emit: impl FnMut(crate::recognizer::RecognizerEvent),
 ) -> Result<Transcript, SecondaryError> {
     request_audio(client, entry, frames, prompt, emit).await
-}
-
-pub(crate) async fn transcribe_finished(
-    client: &reqwest::Client,
-    entry: &OpenAiLive,
-    frames: &[Frame],
-    prompt: &str,
-) -> Result<Transcript, SecondaryError> {
-    request_audio(client, entry, frames, prompt, |_| {}).await
 }
 
 async fn request_audio(

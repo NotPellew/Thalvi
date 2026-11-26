@@ -19,9 +19,9 @@ use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureError, CaptureOutcome, CpalCuePlayer, CuePlayer, Engine, EngineHandle, EngineState,
-    FrameSource, Parts, StreamingExtra, WakeDetector, WakeTrigger,
+    FrameSource, Parts, WakeDetector, WakeTrigger,
 };
-use thalvi_desktop::entries::{Entries, FinalEntry, LiveEntry, LiveKind};
+use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
@@ -799,24 +799,13 @@ pub(crate) struct Loaded<S: Rig> {
     chat: Option<thalvi_desktop::chat::Chat>,
     spotter: Option<Box<dyn KeywordSpotter>>,
     spotter_off: Option<String>,
-    extras: Vec<StreamingExtra<S::Recognizer>>,
     local: Option<Arc<dyn Preload>>,
-    extra_locals: Vec<Arc<dyn Preload>>,
 }
 
 struct DesktopRig {
     http: reqwest::Client,
     devices: Arc<SpeechDevices>,
     whisper_helpers: PathBuf,
-}
-
-/// Live recognizers that need streaming construction before the engine starts.
-fn streaming_entries(entries: &Entries) -> Vec<&LiveEntry> {
-    match entries.final_pass() {
-        Some(FinalEntry::Live(entry)) if !matches!(entry.kind, LiveKind::OpenAi(_)) => vec![entry],
-        Some(_) => Vec::new(),
-        None => entries.streaming_extras().collect(),
-    }
 }
 
 impl Rig for DesktopRig {
@@ -868,18 +857,6 @@ impl Rig for DesktopRig {
                 &self.whisper_helpers,
             )
         };
-        let entries = &config.stt.entries;
-        let extras: Vec<_> = streaming_entries(entries)
-            .into_iter()
-            .map(|entry| StreamingExtra {
-                entry: entry.clone(),
-                recognizer: Arc::new(chosen(entry, store.clone())),
-            })
-            .collect();
-        let extra_locals = extras
-            .iter()
-            .filter_map(|extra| extra.recognizer.local())
-            .collect();
         let chat = (config.writing.as_ref())
             .and_then(thalvi_desktop::writing::Writing::on_computer)
             .map(|requested| thalvi_desktop::chat::Chat::on_computer(store.clone(), requested));
@@ -895,9 +872,7 @@ impl Rig for DesktopRig {
             chat,
             spotter,
             spotter_off,
-            extras,
             local,
-            extra_locals,
         })
     }
 
@@ -911,8 +886,6 @@ struct Session<S: Rig> {
     engine: Engine<S::Recognizer, S::Wake, S::Cues>,
     /// The local recognizer, whose model loads ahead of the first dictation.
     local: Option<Arc<dyn Preload>>,
-    /// The on-device recognizers of the streaming extras, loaded ahead the same way.
-    extra_locals: Vec<Arc<dyn Preload>>,
     handle: EngineHandle,
     gate: InputGate,
     device: Option<String>,
@@ -1154,35 +1127,17 @@ impl<S: Rig> Runner<S> {
             .session
             .as_ref()
             .and_then(|session| session.local.clone());
-        let extras = self
-            .session
-            .as_ref()
-            .map(|session| session.extra_locals.clone())
-            .unwrap_or_default();
         let first = local.as_ref().map(|local| *local.steps().borrow());
         if let Some(first) = first {
             println!("{}", load_notice(first));
         }
         self.publisher.loading(first);
-        if local.is_none() && extras.is_empty() {
+        let Some(local) = local else {
             return;
-        }
+        };
         let publisher = Arc::clone(&self.publisher);
         self.loading = Some(tokio::task::spawn_local(async move {
-            // An extra whose model cannot load fails per capture, with its own notice.
-            let preload = async {
-                for extra in &extras {
-                    if let Err(error) = extra.load().await {
-                        println!("{error}");
-                    }
-                }
-            };
-            match local {
-                Some(local) => {
-                    tokio::join!(load_showing(&local, &publisher), preload);
-                }
-                None => preload.await,
-            }
+            load_showing(&local, &publisher).await;
         }));
     }
 
@@ -1226,9 +1181,7 @@ async fn build_session<S: Rig>(
         chat,
         spotter,
         spotter_off,
-        extras,
         local,
-        extra_locals,
     } = rig.load(config, &gate, publisher).await?;
     let metrics = recorder.metrics();
     let (engine, handle) = Engine::new(
@@ -1243,7 +1196,6 @@ async fn build_session<S: Rig>(
             notice: publisher.notice_sink(),
             spotter,
             spotter_off,
-            extras,
         },
         config,
         recorder,
@@ -1260,7 +1212,6 @@ async fn build_session<S: Rig>(
     Ok(Session {
         engine,
         local,
-        extra_locals,
         handle,
         gate,
         device: config.microphone.clone(),
@@ -1781,14 +1732,10 @@ impl<S: Rig> Runner<S> {
             ))
             .await;
             let mut ignored = engine.take_ignored();
-            let note = [
-                engine.take_merge_note(),
-                engine.take_cleanup_note(),
-                engine.take_release_note(),
-            ]
-            .into_iter()
-            .flatten()
-            .reduce(|said, next| format!("{said} {next}"));
+            let note = [engine.take_cleanup_note(), engine.take_release_note()]
+                .into_iter()
+                .flatten()
+                .reduce(|said, next| format!("{said} {next}"));
             match outcome {
                 None => {
                     // The wake word closed the gate and only a capture opens it again.
@@ -1826,22 +1773,7 @@ impl<S: Rig> Runner<S> {
                         },
                     )
                     .await;
-                    let delivered_route = finished
-                        .as_ref()
-                        .filter(|finished| {
-                            finished.text_delivery
-                                == Some(thalvi_desktop::host::Delivered::InWindow)
-                        })
-                        .and(route);
-                    let final_note = engine.settle_final_pass(
-                        delivered_route,
-                        requests.ended || matches!(outcome, CaptureOutcome::Cancelled { .. }),
-                    );
                     ignored.extend(refused.into_inner());
-                    let note = match (final_note, note) {
-                        (Some(a), Some(b)) => Some(format!("{a} {b}")),
-                        (a, b) => a.or(b),
-                    };
                     let behind = matches!(
                         &outcome,
                         CaptureOutcome::Failed {
@@ -2015,7 +1947,7 @@ fn told(mode: Mode, ignored: &[Refusal]) -> Mode {
     }
 }
 
-/// Adds what the merge told the user to the capture's final `mode`, which would otherwise hide it.
+/// Adds what the capture told the user to its final `mode`, which would otherwise hide it.
 fn noted(mode: Mode, note: Option<String>) -> Mode {
     match (mode, note) {
         (Mode::Done { route, notice }, Some(note)) => Mode::Done {
@@ -2384,50 +2316,6 @@ mod tests {
     use super::*;
     use crate::overlay::Visibility;
     use crate::tray::title;
-
-    #[test]
-    fn a_final_pass_only_builds_a_stream_for_a_streaming_recognizer() {
-        let extra = json!({
-            "kind": "realtime", "id": "extra", "name": "Extra",
-            "address": "ws://127.0.0.1:2", "model": "test", "extra": true
-        });
-        let cases = [
-            (Value::Null, vec!["extra"]),
-            (
-                json!({"kind": "on_device", "id": "final", "name": "Final"}),
-                vec!["final"],
-            ),
-            (
-                json!({"kind": "open_ai", "id": "final", "name": "Final",
-                       "address": "http://127.0.0.1:2/v1", "model": "test"}),
-                vec![],
-            ),
-            (
-                json!({"kind": "extra", "id": "final", "name": "Final",
-                       "address": "http://127.0.0.1:2/v1", "model": "test"}),
-                vec![],
-            ),
-        ];
-        for (mut final_pass, expected) in cases {
-            let mut entries = vec![
-                json!({"kind": "on_device", "id": "active", "name": "Active", "active": true}),
-                extra.clone(),
-            ];
-            if final_pass.is_object() {
-                final_pass["final_pass"] = json!(true);
-                entries.push(final_pass);
-            }
-            let config = DesktopConfig::from_json_str(
-                &json!({"stt": {"entries": entries, "merge": false}}).to_string(),
-            )
-            .unwrap();
-            let streaming: Vec<_> = streaming_entries(&config.stt.entries)
-                .iter()
-                .map(|entry| entry.id.as_str())
-                .collect();
-            assert_eq!(streaming, expected);
-        }
-    }
 
     #[test]
     fn stopped_is_not_reported_until_background_writes_finish() {
@@ -3078,7 +2966,6 @@ mod tests {
                 notice: publisher.notice_sink(),
                 spotter: None,
                 spotter_off: None,
-                extras: Vec::new(),
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
             let listening = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -3408,7 +3295,6 @@ mod tests {
                         notice: publisher.notice_sink(),
                         spotter: None,
                         spotter_off: None,
-                        extras: Vec::new(),
                     },
                     &DesktopConfig::from_json_str("{}").unwrap(),
                     Recorder::disabled(),
@@ -3932,7 +3818,7 @@ mod tests {
     }
 
     #[test]
-    fn what_the_merge_told_is_kept_beside_the_result_and_not_lost_to_it() {
+    fn what_the_capture_told_is_kept_beside_the_result_and_not_lost_to_it() {
         let done = Mode::Done {
             route: CaptureRoute::Paste,
             notice: "Delivered.".to_owned(),
@@ -3943,23 +3829,24 @@ mod tests {
             headline: "Failed".to_owned(),
             causes: Vec::new(),
         };
-        let note =
-            || Some("Merge skipped: the chat model took too long. Used the live text.".to_owned());
+        let note = || {
+            Some(
+                "Cleanup failed: the chat model took too long. Used the words as heard.".to_owned(),
+            )
+        };
         assert_eq!(
             noted(done.clone(), note()),
             Mode::Done {
                 route: CaptureRoute::Paste,
-                notice:
-                    "Merge skipped: the chat model took too long. Used the live text. Delivered."
-                        .to_owned(),
+                notice: "Cleanup failed: the chat model took too long. Used the words as heard. Delivered."
+                    .to_owned(),
             }
         );
         assert_eq!(
             noted(Mode::Failed(failure.clone()), note()),
             Mode::Failed(Failure {
-                notice:
-                    "Merge skipped: the chat model took too long. Used the live text. It failed."
-                        .to_owned(),
+                notice: "Cleanup failed: the chat model took too long. Used the words as heard. It failed."
+                    .to_owned(),
                 ..failure
             })
         );
@@ -4635,9 +4522,7 @@ mod tests {
                 chat: None,
                 spotter: None,
                 spotter_off: None,
-                extras: Vec::new(),
                 local: self.local.clone(),
-                extra_locals: Vec::new(),
             }))
         }
 
@@ -4960,9 +4845,7 @@ mod tests {
                 chat: None,
                 spotter: None,
                 spotter_off: None,
-                extras: Vec::new(),
                 local: None,
-                extra_locals: Vec::new(),
             }))
         }
 
@@ -5908,78 +5791,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn final_pass_metrics_follow_the_runners_delivery_and_last_cancel() {
-        LocalSet::new()
-            .run_until(async {
-                // A loopback listener that never replies makes the final pass fall back.
-                let endpoint = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                let config = || {
-                    DesktopConfig::from_json_str(
-                        &json!({
-                            "ending_pause": {"paste": 0},
-                            "history": {"enabled": false},
-                            "stt": {"entries": [
-                                {"kind":"on_device", "id":"live", "name":"Live", "active":true},
-                                {"kind":"extra", "id":"last", "name":"Final", "model":"test",
-                                 "address":format!("http://{}/v1", endpoint.local_addr().unwrap()),
-                                 "final_pass":true}
-                            ]}
-                        })
-                        .to_string(),
-                    )
-                    .unwrap()
-                };
-                let (dir, mut script) = recorded_run("final-paste", false, config(), false);
-                status_until(&mut script.status, "listening did not start", |status| {
-                    matches!(status, Status::Listening)
-                })
-                .await;
-                deliver(&mut script).await;
-                assert_eq!(script.pasted(), ["Hello"]);
-                script.stop().await;
-                let events = recorded_events(&dir, Event::FinalPass);
-                assert_eq!(events.len(), 1);
-                assert_eq!(events[0]["outcome"], "timeout");
-                assert!(
-                    events[0]["release_to_paste_ms"].is_number(),
-                    "the final pass must record the actual window paste"
-                );
-
-                let (dir, mut script) = recorded_run("final-cancel", false, config(), true);
-                script.server.ready();
-                yield_until("the microphone did not listen", || script.opens.get() == 1).await;
-                script.wake.fire(thalvi_desktop::wake::WakeEvent::Capture);
-                script
-                    .feed
-                    .borrow()
-                    .as_ref()
-                    .unwrap()
-                    .send([2_000; thalvi_desktop::frame::FRAME_SAMPLES]);
-                status_until(&mut script.status, "dictation did not start", |status| {
-                    matches!(status, Status::Capturing { .. })
-                })
-                .await;
-                script.fail_microphone(thalvi_desktop::audio::AudioError::DeviceLost);
-                status_until(
-                    &mut script.status,
-                    "dictation did not settle after the error",
-                    |status| !matches!(status, Status::Capturing { .. } | Status::Starting { .. }),
-                )
-                .await;
-                assert_eq!(script.pasted(), Vec::<String>::new());
-                script.stop().await;
-                let events = recorded_events(&dir, Event::FinalPass);
-                assert_eq!(events.len(), 1);
-                assert_eq!(
-                    events[0]["outcome"], "cancelled",
-                    "a queued cancel wins over the microphone error"
-                );
-                assert!(events[0]["release_to_paste_ms"].is_null());
-            })
-            .await;
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn startup_honors_a_queued_quit_before_opening_the_microphone() {
         LocalSet::new()
             .run_until(async {
@@ -6390,9 +6201,7 @@ mod tests {
                 chat: None,
                 spotter: None,
                 spotter_off: None,
-                extras: Vec::new(),
                 local: None,
-                extra_locals: Vec::new(),
             })
         }
 

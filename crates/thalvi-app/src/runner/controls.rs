@@ -88,9 +88,7 @@ impl Rig for FakeRig {
             chat: None,
             spotter: None,
             spotter_off: None,
-            extras: Vec::new(),
             local: None,
-            extra_locals: Vec::new(),
         })
     }
 

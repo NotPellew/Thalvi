@@ -1,4 +1,4 @@
-//! Owns the list of speech servers in Settings → Recognition: their kinds, validation, the one active live entry, the switched-on extra recognizers, and the migration from the single-recognizer settings.
+//! Owns the list of speech servers in Settings → Recognition: their kinds, validation, the one active live entry, and the migration from the single-recognizer settings.
 
 use std::{fmt, path::PathBuf};
 
@@ -7,9 +7,7 @@ use serde_json::Value;
 
 use crate::models::CatalogSpeech;
 use crate::recognizer::SpeechSource;
-use crate::secondary::{
-    Language, LiveRequest, OpenAiLive, SecondaryApi, SecondaryStt, SecondarySttError,
-};
+use crate::secondary::{Language, LiveRequest, OpenAiLive, SecondaryStt, SecondarySttError};
 use crate::transducer::SpeechChoice;
 use crate::whisper::WhisperBackend;
 
@@ -30,24 +28,12 @@ pub enum EntryError {
         "Exactly one live speech server must be active: a realtime recognizer or this computer."
     )]
     ActiveLive,
-    #[error(
-        "Speech server \"{0}\" is the one in use, so it cannot also be an extra recognizer. Switch it off as an extra first."
-    )]
-    ActiveExtra(String),
-    #[error("Speech server \"{0}\" is the one in use, so it cannot also be the final pass.")]
-    ActiveFinalPass(String),
-    #[error("Choose only one speech server for the final pass.")]
-    SeveralFinalPasses,
     #[error("Speech server \"{name}\": {reason}")]
     Fields { name: String, reason: String },
     #[error(
         "stt.entries replaces stt.engine, stt.model, stt.secondary and the top-level server; remove them."
     )]
     Mixed,
-    #[error(
-        "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."
-    )]
-    ExtrasNeedWriting,
     #[error("stt.model only applies when stt.engine is local.")]
     ModelWithoutLocal,
     #[error("server must be a ws or wss URL")]
@@ -143,8 +129,6 @@ pub struct LiveEntry {
     pub id: String,
     pub name: String,
     pub kind: LiveKind,
-    /// Whether the entry also hears each capture as an extra recognizer; never true for the active entry.
-    pub extra: bool,
 }
 
 impl LiveEntry {
@@ -173,53 +157,19 @@ impl LiveEntry {
     }
 }
 
-/// An entry whose transcription of the finished capture is merged with the live text; it runs when switched on.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExtraEntry {
-    pub id: String,
-    pub name: String,
-    pub settings: SecondaryStt,
-}
-
-impl ExtraEntry {
-    /// Whether the entry runs after each capture.
-    #[must_use]
-    pub fn ticked(&self) -> bool {
-        self.settings.enabled()
-    }
-}
-
-/// The recognizer chosen to transcribe a finished capture.
-#[derive(Clone, Copy)]
-pub enum FinalEntry<'a> {
-    Live(&'a LiveEntry),
-    Upload(&'a ExtraEntry),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FinalIndex {
-    Live(usize),
-    Upload(usize),
-}
-
-/// The speech servers: any number of live and extra entries, exactly one live entry active.
+/// The speech servers: any number of live entries, exactly one live entry active.
 #[derive(Clone, Debug)]
 pub struct Entries {
     live: Vec<LiveEntry>,
     /// Index into `live`; always in range.
     active: usize,
-    extras: Vec<ExtraEntry>,
-    final_pass: Option<FinalIndex>,
     dropped_legacy_server: bool,
     dropped_active_legacy_server: bool,
 }
 
 impl PartialEq for Entries {
     fn eq(&self, other: &Self) -> bool {
-        self.live == other.live
-            && self.active == other.active
-            && self.extras == other.extras
-            && self.final_pass == other.final_pass
+        self.live == other.live && self.active == other.active
     }
 }
 
@@ -233,11 +183,8 @@ impl Default for Entries {
                 id: ON_DEVICE_ID.to_owned(),
                 name: ON_DEVICE_NAME.to_owned(),
                 kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
-                extra: false,
             }],
             active: 0,
-            extras: Vec::new(),
-            final_pass: None,
             dropped_legacy_server: false,
             dropped_active_legacy_server: false,
         }
@@ -246,8 +193,6 @@ impl Default for Entries {
 
 const ON_DEVICE_ID: &str = "on-device";
 const ON_DEVICE_NAME: &str = "On this computer";
-const EXTRA_ID: &str = "extra";
-const EXTRA_NAME: &str = "Extra recognizer";
 
 impl Entries {
     /// The live entry that dictation uses now.
@@ -259,21 +204,6 @@ impl Entries {
     #[must_use]
     pub fn live(&self) -> &[LiveEntry] {
         &self.live
-    }
-
-    /// Every extra entry, switched on or not; their order means nothing.
-    #[must_use]
-    pub fn extras(&self) -> &[ExtraEntry] {
-        &self.extras
-    }
-
-    /// The one entry doing a final pass, when chosen.
-    #[must_use]
-    pub fn final_pass(&self) -> Option<FinalEntry<'_>> {
-        match self.final_pass? {
-            FinalIndex::Live(index) => Some(FinalEntry::Live(&self.live[index])),
-            FinalIndex::Upload(index) => Some(FinalEntry::Upload(&self.extras[index])),
-        }
     }
 
     /// Whether loading this config dropped a saved Thalvi server entry.
@@ -288,26 +218,6 @@ impl Entries {
         self.dropped_active_legacy_server
     }
 
-    /// The extra entries that are switched on.
-    pub fn ticked(&self) -> impl Iterator<Item = &ExtraEntry> {
-        self.extras.iter().filter(|entry| entry.ticked())
-    }
-
-    /// The live entries other than the active one that are switched on as extras.
-    pub fn streaming_extras(&self) -> impl Iterator<Item = &LiveEntry> {
-        self.live
-            .iter()
-            .enumerate()
-            .filter(|(index, entry)| entry.extra && *index != self.active)
-            .map(|(_, entry)| entry)
-    }
-
-    /// Whether any extra recognizer, of either kind, is switched on.
-    #[must_use]
-    pub fn any_extra(&self) -> bool {
-        self.ticked().next().is_some() || self.streaming_extras().next().is_some()
-    }
-
     /// The API key saved for the entry with `id`; empty when it has none or there is no such entry.
     #[must_use]
     pub fn key_of(&self, id: &str) -> &str {
@@ -319,12 +229,6 @@ impl Entries {
                 LiveKind::OpenAi(live) => Some(live.settings.api_key()),
                 LiveKind::OnDevice(_) => None,
             })
-            .or_else(|| {
-                self.extras
-                    .iter()
-                    .find(|entry| entry.id == id)
-                    .map(|entry| entry.settings.api_key())
-            })
             .unwrap_or_default()
     }
 
@@ -333,20 +237,20 @@ impl Entries {
     fn new(raw: Vec<RawEntry>) -> Result<Self, EntryError> {
         let mut live = Vec::new();
         let mut active = Vec::new();
-        let mut extras = Vec::new();
         let mut seen: Vec<(String, String)> = Vec::new();
         let mut dropped_legacy_server = false;
         let mut removed_active = false;
-        let mut final_pass = None;
         for entry in raw {
-            let marked = entry.final_pass();
             let built = entry.build(false)?;
             if let Built::RemovedLegacyServer { active } = &built {
                 dropped_legacy_server = true;
                 removed_active |= *active;
                 continue;
             }
-            let (id, name) = built.identity();
+            let Built::Live { entry, on } = built else {
+                continue;
+            };
+            let (id, name) = (&entry.id, &entry.name);
             if seen
                 .iter()
                 .any(|(_, other)| other.to_lowercase() == name.to_lowercase())
@@ -357,24 +261,8 @@ impl Entries {
                 return Err(EntryError::Id(name.to_owned()));
             }
             seen.push((id.to_owned(), name.to_owned()));
-            if marked {
-                let index = match &built {
-                    Built::Live { .. } => FinalIndex::Live(live.len()),
-                    Built::Extra(_) => FinalIndex::Upload(extras.len()),
-                    Built::RemovedLegacyServer { .. } => continue,
-                };
-                if final_pass.replace(index).is_some() {
-                    return Err(EntryError::SeveralFinalPasses);
-                }
-            }
-            match built {
-                Built::Live { entry, on } => {
-                    active.push(on);
-                    live.push(entry);
-                }
-                Built::Extra(entry) => extras.push(entry),
-                Built::RemovedLegacyServer { .. } => {}
-            }
+            active.push(on);
+            live.push(entry);
         }
         let active_indexes: Vec<_> = active
             .iter()
@@ -394,33 +282,25 @@ impl Entries {
                         id: ON_DEVICE_ID.to_owned(),
                         name: ON_DEVICE_NAME.to_owned(),
                         kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
-                        extra: false,
                     });
                     live.len() - 1
                 }
             }
             _ => return Err(EntryError::ActiveLive),
         };
-        if final_pass == Some(FinalIndex::Live(active)) {
-            return Err(EntryError::ActiveFinalPass(live[active].name.clone()));
-        }
         Ok(Self {
             live,
             active,
-            extras,
-            final_pass,
             dropped_legacy_server,
             dropped_active_legacy_server: removed_active,
         })
     }
 
-    /// The entries a config written before the list existed meant: its on-device model and
-    /// extra recognizer, switched on or not, with the key kept.
+    /// The entries a config written before the list existed meant: its on-device model, active.
     fn migrated(
         engine: Option<EngineName>,
         model: Option<String>,
         server: Option<String>,
-        secondary: Option<SecondaryStt>,
     ) -> Result<Self, EntryError> {
         if let Some(server) = server {
             let parsed =
@@ -436,7 +316,6 @@ impl Entries {
             id: ON_DEVICE_ID.to_owned(),
             name: ON_DEVICE_NAME.to_owned(),
             kind: LiveKind::OnDevice(choice),
-            extra: false,
         };
         let live = match (engine, model) {
             // Legacy server settings are discarded; without a usable local selection the default
@@ -460,15 +339,6 @@ impl Entries {
         Ok(Self {
             live,
             active: 0,
-            extras: secondary
-                .map(|settings| ExtraEntry {
-                    id: EXTRA_ID.to_owned(),
-                    name: EXTRA_NAME.to_owned(),
-                    settings,
-                })
-                .into_iter()
-                .collect(),
-            final_pass: None,
             dropped_legacy_server: false,
             dropped_active_legacy_server: false,
         })
@@ -504,7 +374,8 @@ pub(crate) enum EngineName {
     Local,
 }
 
-/// An entry as written in the file, before its fields are checked.
+/// An entry as written in the file, before its fields are checked. The `extra` and `final_pass`
+/// flags of older files are read and ignored.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RawEntry {
@@ -513,10 +384,10 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
-        #[serde(default)]
-        final_pass: bool,
-        #[serde(default)]
-        extra: bool,
+        #[serde(default, rename = "final_pass")]
+        _final_pass: bool,
+        #[serde(default, rename = "extra")]
+        _extra: bool,
         address: String,
         model: String,
         #[serde(default)]
@@ -527,10 +398,10 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
-        #[serde(default)]
-        final_pass: bool,
-        #[serde(default)]
-        extra: bool,
+        #[serde(default, rename = "final_pass")]
+        _final_pass: bool,
+        #[serde(default, rename = "extra")]
+        _extra: bool,
         address: String,
         model: String,
         #[serde(default)]
@@ -558,57 +429,42 @@ enum RawEntry {
         name: String,
         #[serde(default)]
         active: bool,
-        #[serde(default)]
-        final_pass: bool,
-        #[serde(default)]
-        extra: bool,
+        #[serde(default, rename = "final_pass")]
+        _final_pass: bool,
+        #[serde(default, rename = "extra")]
+        _extra: bool,
         #[serde(default)]
         model: Option<String>,
     },
+    /// An extra-only server from an older file: it loads as nothing, key and all.
     #[serde(alias = "second_pass")]
     Extra {
+        #[serde(default)]
         id: String,
+        #[serde(default)]
         name: String,
-        #[serde(default)]
-        active: bool,
-        #[serde(default)]
-        final_pass: bool,
-        address: String,
-        model: String,
-        #[serde(default)]
-        api_key: String,
-        #[serde(default)]
-        api: SecondaryApi,
+        #[serde(default, rename = "active")]
+        _active: bool,
+        #[serde(default, rename = "final_pass")]
+        _final_pass: bool,
+        #[serde(default, rename = "address")]
+        _address: String,
+        #[serde(default, rename = "model")]
+        _model: String,
+        #[serde(default, rename = "api_key")]
+        _api_key: String,
+        #[serde(default, rename = "api")]
+        _api: Value,
     },
 }
 
 enum Built {
     Live { entry: LiveEntry, on: bool },
-    Extra(ExtraEntry),
     RemovedLegacyServer { active: bool },
-}
-
-impl Built {
-    fn identity(&self) -> (&str, &str) {
-        match self {
-            Self::Live { entry, .. } => (&entry.id, &entry.name),
-            Self::Extra(entry) => (&entry.id, &entry.name),
-            Self::RemovedLegacyServer { .. } => ("", ""),
-        }
-    }
+    RemovedExtra,
 }
 
 impl RawEntry {
-    fn final_pass(&self) -> bool {
-        match self {
-            Self::Realtime { final_pass, .. }
-            | Self::OpenAi { final_pass, .. }
-            | Self::OnDevice { final_pass, .. }
-            | Self::Extra { final_pass, .. } => *final_pass,
-            Self::LegacyServer { .. } => false,
-        }
-    }
-
     fn validated_identity(&self) -> Result<(String, String), EntryError> {
         let (id, name) = match self {
             Self::Realtime { id, name, .. }
@@ -626,29 +482,25 @@ impl RawEntry {
         Ok((id, name))
     }
 
-    /// Checks the fields. An extra entry that is switched off is kept as written unless
-    /// `strict`, which is how an entry is checked where it is added or edited.
+    /// Checks the fields, or drops what an older file wrote and this one no longer runs.
     fn build(self, strict: bool) -> Result<Built, EntryError> {
         if let Self::LegacyServer { active, .. } = &self
             && !strict
         {
             return Ok(Built::RemovedLegacyServer { active: *active });
         }
+        if let Self::Extra { .. } = &self
+            && !strict
+        {
+            return Ok(Built::RemovedExtra);
+        }
         let (id, name) = self.validated_identity()?;
-        let final_pass = self.final_pass();
-        let live = |kind, on, extra| {
-            if on && final_pass {
-                return Err(EntryError::ActiveFinalPass(name.clone()));
-            }
-            if on && extra {
-                return Err(EntryError::ActiveExtra(name.clone()));
-            }
+        let live = |kind, on| {
             Ok(Built::Live {
                 entry: LiveEntry {
                     id: id.clone(),
                     name: name.clone(),
                     kind,
-                    extra,
                 },
                 on,
             })
@@ -656,7 +508,6 @@ impl RawEntry {
         Ok(match self {
             Self::Realtime {
                 active,
-                extra,
                 address,
                 model,
                 api_key,
@@ -666,11 +517,9 @@ impl RawEntry {
                     Realtime::new(&address, &model, api_key).map_err(|e| fields(&name, e))?,
                 ),
                 active,
-                extra,
             )?,
             Self::OpenAi {
                 active,
-                extra,
                 address,
                 model,
                 api_key,
@@ -679,58 +528,25 @@ impl RawEntry {
                 ..
             } => live(
                 LiveKind::OpenAi(OpenAiLive {
-                    settings: SecondaryStt::new(
-                        &address,
-                        &model,
-                        api_key,
-                        SecondaryApi::OpenAi,
-                        true,
-                    )
-                    .map_err(|e| fields(&name, extra_reason(&e)))?,
+                    settings: SecondaryStt::new(&address, &model, api_key)
+                        .map_err(|e| fields(&name, open_ai_reason(&e)))?,
                     request,
                     language: Language::parse(&language).map_err(|e| fields(&name, e))?,
                 }),
                 active,
-                extra,
             )?,
-            Self::LegacyServer { .. } => {
-                return Err(fields(&name, "this speech server kind was removed."));
-            }
-            Self::OnDevice {
-                active,
-                extra,
-                model,
-                ..
-            } => live(
+            Self::OnDevice { active, model, .. } => live(
                 LiveKind::OnDevice(speech_choice(model.as_deref()).map_err(|e| fields(&name, e))?),
                 active,
-                extra,
             )?,
-            Self::Extra {
-                active,
-                address,
-                model,
-                api_key,
-                api,
-                ..
-            } => Built::Extra(ExtraEntry {
-                settings: SecondaryStt::new(
-                    &address,
-                    &model,
-                    api_key,
-                    api,
-                    active || strict || final_pass,
-                )
-                .map(|settings| settings.with_enabled(active))
-                .map_err(|e| fields(&name, extra_reason(&e)))?,
-                id,
-                name,
-            }),
+            Self::LegacyServer { .. } | Self::Extra { .. } => {
+                return Err(fields(&name, "this speech server kind was removed."));
+            }
         })
     }
 }
 
-fn extra_reason(error: &SecondarySttError) -> &'static str {
+fn open_ai_reason(error: &SecondarySttError) -> &'static str {
     match error {
         SecondarySttError::Url => {
             "the address must be an http or https URL with a host, no credentials, query or fragment."
@@ -751,16 +567,17 @@ pub fn check(entry: &Value) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// What `stt` holds in a file: either the list, or the settings it replaced.
+/// What `stt` holds in a file: either the list, or the settings it replaced. `merge` and
+/// `secondary` are read and ignored.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawStt {
-    #[serde(default)]
-    pub(crate) merge: Option<bool>,
+    #[serde(default, rename = "merge")]
+    pub(crate) _merge: Option<Value>,
     #[serde(default)]
     entries: Option<Vec<RawEntry>>,
-    #[serde(default)]
-    secondary: Option<SecondaryStt>,
+    #[serde(default, rename = "secondary")]
+    secondary: Option<Value>,
     #[serde(default)]
     engine: Option<EngineName>,
     #[serde(default)]
@@ -786,7 +603,7 @@ impl RawStt {
                 return Err(EntryError::Mixed);
             }
             Some(entries) => Entries::new(entries)?,
-            None => Entries::migrated(self.engine, self.model, server, self.secondary)?,
+            None => Entries::migrated(self.engine, self.model, server)?,
         };
         Ok((entries, phrases))
     }
@@ -799,10 +616,6 @@ enum FileEntry<'a> {
         id: &'a str,
         name: &'a str,
         active: bool,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        final_pass: bool,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        extra: bool,
         address: &'a str,
         model: &'a str,
         api_key: &'a str,
@@ -811,10 +624,6 @@ enum FileEntry<'a> {
         id: &'a str,
         name: &'a str,
         active: bool,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        final_pass: bool,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        extra: bool,
         address: &'a str,
         model: &'a str,
         api_key: &'a str,
@@ -825,41 +634,18 @@ enum FileEntry<'a> {
         id: &'a str,
         name: &'a str,
         active: bool,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        final_pass: bool,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        extra: bool,
         model: String,
-    },
-    Extra {
-        id: &'a str,
-        name: &'a str,
-        active: bool,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        final_pass: bool,
-        address: &'a str,
-        model: &'a str,
-        api_key: &'a str,
-        api: SecondaryApi,
     },
 }
 impl Serialize for Entries {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let live = self.live.iter().enumerate().map(|(index, entry)| {
-            let (id, name, active, extra) = (
-                entry.id.as_str(),
-                entry.name.as_str(),
-                index == self.active,
-                entry.extra,
-            );
-            let final_pass = self.final_pass == Some(FinalIndex::Live(index));
+            let (id, name, active) = (entry.id.as_str(), entry.name.as_str(), index == self.active);
             match &entry.kind {
                 LiveKind::Realtime(realtime) => FileEntry::Realtime {
                     id,
                     name,
                     active,
-                    final_pass,
-                    extra,
                     address: &realtime.address,
                     model: &realtime.model,
                     api_key: &realtime.api_key,
@@ -868,8 +654,6 @@ impl Serialize for Entries {
                     id,
                     name,
                     active,
-                    final_pass,
-                    extra,
                     address: live.settings.address(),
                     model: live.settings.model(),
                     api_key: live.settings.api_key(),
@@ -880,27 +664,11 @@ impl Serialize for Entries {
                     id,
                     name,
                     active,
-                    final_pass,
-                    extra,
                     model: choice.label(),
                 },
             }
         });
-        let second = self
-            .extras
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| FileEntry::Extra {
-                id: &entry.id,
-                name: &entry.name,
-                active: entry.ticked(),
-                final_pass: self.final_pass == Some(FinalIndex::Upload(index)),
-                address: entry.settings.address(),
-                model: entry.settings.model(),
-                api_key: entry.settings.api_key(),
-                api: entry.settings.api(),
-            });
-        serializer.collect_seq(live.chain(second))
+        serializer.collect_seq(live)
     }
 }
 
@@ -913,45 +681,65 @@ mod tests {
     use crate::whisper::WhisperBackend;
 
     #[test]
-    fn final_pass_round_trips_a_disabled_upload_and_refuses_multiple_or_active_entries() {
-        let mut config = json!({"stt": {"entries": [
-            {"kind":"on_device", "id":"live", "name":"Live", "active":true},
-            {"kind":"extra", "id":"upload", "name":"Upload", "active":false,
-                "address":"https://speech.example/v1", "model":"asr", "api_key":"fixture", "final_pass":true},
-            {"kind":"on_device", "id":"local", "name":"Local", "active":false}
-        ]}});
-        let saved = DesktopConfig::from_json_str(&config.to_string()).unwrap();
-        assert!(
-            matches!(saved.stt.entries.final_pass(), Some(FinalEntry::Upload(entry)) if !entry.ticked() && entry.settings.api_key() == "fixture")
-        );
-        let json = serde_json::to_value(&saved).unwrap();
-        assert_eq!(json["stt"]["entries"][2]["final_pass"], true);
-        assert_eq!(
-            DesktopConfig::from_json_str(&json.to_string())
-                .unwrap()
-                .stt
-                .entries,
-            saved.stt.entries
-        );
-        config["stt"]["entries"][2]["final_pass"] = json!(true);
-        assert!(
-            DesktopConfig::from_json_str(&config.to_string())
-                .unwrap_err()
-                .to_string()
-                .contains("Choose only one")
-        );
-        config["stt"]["entries"][1]["final_pass"] = json!(false);
-        assert!(
-            matches!(DesktopConfig::from_json_str(&config.to_string()).unwrap().stt.entries.final_pass(),
-            Some(FinalEntry::Live(entry)) if entry.id == "local")
-        );
-        config["stt"]["entries"][0]["final_pass"] = json!(true);
-        assert!(
-            DesktopConfig::from_json_str(&config.to_string())
-                .unwrap_err()
-                .to_string()
-                .contains("cannot also be the final pass")
-        );
+    fn saved_extra_and_final_pass_settings_load_ignored_and_are_not_written_again() {
+        let writing = r#""writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}"#;
+        let cases = [
+            (
+                "an extra flag on a realtime entry",
+                format!(
+                    r#"{{{writing}, "stt": {{"entries": [
+                        {{"kind":"realtime","id":"rt","name":"RT","active":true,"address":"ws://h:1","model":"m","extra":true}},
+                        {{"kind":"on_device","id":"d","name":"D","active":false}}
+                    ]}}}}"#
+                ),
+                "rt",
+            ),
+            (
+                "a final pass on an OpenAI entry",
+                format!(
+                    r#"{{{writing}, "stt": {{"entries": [
+                        {{"kind":"on_device","id":"d","name":"D","active":true}},
+                        {{"kind":"open_ai","id":"o","name":"O","active":false,"address":"http://h/v1","model":"m","final_pass":true}}
+                    ]}}}}"#
+                ),
+                "d",
+            ),
+            (
+                "an extra-only entry",
+                format!(
+                    r#"{{{writing}, "stt": {{"entries": [
+                        {{"kind":"on_device","id":"d","name":"D","active":true}},
+                        {{"kind":"extra","id":"x","name":"X","active":true,"address":"http://h/v1","model":"m","api_key":"old-extra-key"}}
+                    ]}}}}"#
+                ),
+                "d",
+            ),
+        ];
+        for (case, json, active) in cases {
+            let config = DesktopConfig::from_json_str(&json)
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert_eq!(config.stt.entries.active_live().id, active, "{case}");
+            let written = serde_json::to_value(&config).unwrap();
+            let entries = written["stt"]["entries"].as_array().unwrap();
+            assert!(
+                entries.iter().all(|entry| entry.get("extra").is_none()),
+                "{case}: {written}"
+            );
+            assert!(
+                entries
+                    .iter()
+                    .all(|entry| entry.get("final_pass").is_none()),
+                "{case}: {written}"
+            );
+            assert!(
+                entries.iter().all(|entry| entry["kind"] != "extra"),
+                "{case}: {written}"
+            );
+            assert!(
+                !written.to_string().contains("old-extra-key"),
+                "{case}: {written}"
+            );
+        }
     }
 
     fn entries(json: &str) -> Result<Entries, String> {
@@ -964,30 +752,25 @@ mod tests {
         entries(&json.to_string()).unwrap()
     }
 
-    /// `(id, kind, address or model, active)` for every entry, live ones first.
+    /// `(id, kind, address or model, active)` for every entry, in file order.
     fn summary(entries: &Entries) -> Vec<(String, &'static str, String, bool)> {
-        let live = entries.live().iter().map(|entry| {
-            let (kind, place) = match &entry.kind {
-                LiveKind::Realtime(realtime) => ("realtime", realtime.address().to_owned()),
-                LiveKind::OpenAi(live) => ("open_ai", live.settings.address().to_owned()),
-                LiveKind::OnDevice(choice) => ("on_device", choice.label()),
-            };
-            (
-                entry.id.clone(),
-                kind,
-                place,
-                entry.id == entries.active_live().id,
-            )
-        });
-        let second = entries.extras().iter().map(|entry| {
-            (
-                entry.id.clone(),
-                "extra",
-                entry.settings.address().to_owned(),
-                entry.ticked(),
-            )
-        });
-        live.chain(second).collect()
+        entries
+            .live()
+            .iter()
+            .map(|entry| {
+                let (kind, place) = match &entry.kind {
+                    LiveKind::Realtime(realtime) => ("realtime", realtime.address().to_owned()),
+                    LiveKind::OpenAi(live) => ("open_ai", live.settings.address().to_owned()),
+                    LiveKind::OnDevice(choice) => ("on_device", choice.label()),
+                };
+                (
+                    entry.id.clone(),
+                    kind,
+                    place,
+                    entry.id == entries.active_live().id,
+                )
+            })
+            .collect()
     }
 
     fn row(
@@ -1035,35 +818,29 @@ mod tests {
                 format!(
                     r#"{{"writing": {{"url": "http://127.0.0.1:9/v1", "model": "c"}}, "stt": {{"secondary": {{"enabled": true, {SECOND}}}}}}}"#
                 ),
-                vec![
-                    row("on-device", "on_device", "nemotron_160ms", true),
-                    row("extra", "extra", "http://127.0.0.1:9/v1", true),
-                ],
+                vec![row("on-device", "on_device", "nemotron_160ms", true)],
             ),
             (
                 format!(
                     r#"{{"stt": {{"engine": "local", "secondary": {{"enabled": false, {SECOND}}}}}}}"#
                 ),
-                vec![
-                    row("on-device", "on_device", "nemotron_160ms", true),
-                    row("extra", "extra", "http://127.0.0.1:9/v1", false),
-                ],
+                vec![row("on-device", "on_device", "nemotron_160ms", true)],
             ),
         ];
         for (json, expected) in cases {
             let got = entries(&json).unwrap();
             assert_eq!(summary(&got), expected, "{json}");
         }
-        let kept = entries(&format!(
-            r#"{{"stt": {{"engine": "local", "secondary": {{"enabled": false, {SECOND}}}}}}}"#
-        ))
-        .unwrap();
-        assert_eq!(kept.key_of("extra"), "k", "an unticked entry keeps its key");
         let blank = entries(
             r#"{"stt": {"secondary": {"enabled": false, "url": "", "model": "", "api_key": "k"}}}"#,
         )
         .unwrap();
-        assert_eq!(blank.key_of("extra"), "k");
+        assert_eq!(
+            blank.live().len(),
+            1,
+            "an old extra recognizer loads as nothing, key and all"
+        );
+        assert_eq!(blank.key_of("extra"), "");
     }
 
     #[test]
@@ -1086,26 +863,14 @@ mod tests {
         let got = &config.stt.entries;
         assert_eq!(got.active_live().name, "OpenAI local");
         assert_eq!(
-            got.extras()
+            got.live()
                 .iter()
                 .map(|e| e.name.as_str())
                 .collect::<Vec<_>>(),
-            ["Zed", "Why"],
-            "order is kept"
+            ["Cybrex2", "OpenAI local", "Offline"],
+            "the removed legacy and extra kinds are dropped"
         );
-        assert_eq!(
-            got.ticked().map(|e| e.name.as_str()).collect::<Vec<_>>(),
-            ["Why"]
-        );
-        assert_eq!(
-            (
-                got.key_of("a"),
-                got.key_of("o"),
-                got.key_of("z"),
-                got.key_of("y")
-            ),
-            ("live-key", "open-key", "zk", "")
-        );
+        assert_eq!((got.key_of("a"), got.key_of("o")), ("live-key", "open-key"));
         let written = serde_json::to_string(&config).unwrap();
         assert_eq!(
             DesktopConfig::from_json_str(&written).unwrap(),
@@ -1216,10 +981,6 @@ mod tests {
             json!({"kind": "realtime", "id": "r", "name": "R", "active": true,
                    "address": address, "model": model})
         };
-        let second = |address: &str, model: &str| {
-            json!({"kind": "extra", "id": "p", "name": "P", "active": true,
-                   "address": address, "model": model})
-        };
         let cases = [
             (
                 with(vec![]),
@@ -1265,10 +1026,6 @@ mod tests {
                 "Speech server \"R\": the model must be nonempty text.",
             ),
             (
-                with(vec![live("a", "A", true), second("ftp://h", "m")]),
-                "Speech server \"P\": the address must be an http or https URL",
-            ),
-            (
                 json!({"stt": {"entries": [live("a", "A", true)], "engine": "local"}}).to_string(),
                 "stt.entries replaces stt.engine",
             ),
@@ -1289,27 +1046,8 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_is_checked_whole_where_it_is_added_but_kept_as_written_when_unticked() {
-        let blank_second = json!({"kind": "extra", "id": "p", "name": "P", "active": false,
-                                  "address": "", "model": "", "api_key": "k"});
-        // Saved from an old config this way, so it still loads …
-        let loaded = entries(
-            &json!({"stt": {"entries": [
-                {"kind": "on_device", "id": "d", "name": "Device", "active": true},
-                blank_second
-            ]}})
-            .to_string(),
-        )
-        .unwrap();
-        assert_eq!(loaded.key_of("p"), "k");
-        // … but where an entry is added or edited, every field is checked.
-        assert!(
-            check(&blank_second)
-                .unwrap_err()
-                .contains("the address must be an http or https URL")
-        );
-        let good = json!({"kind": "extra", "id": "p", "name": "P", "active": false,
-                          "address": "http://h/v1", "model": "m"});
+    fn an_entry_is_checked_whole_where_it_is_added() {
+        let good = json!({"kind": "on_device", "id": "d", "name": "D", "active": false});
         assert_eq!(check(&good), Ok(()));
         let bad_live = json!({"kind": "realtime", "id": "r", "name": "R", "active": false,
                               "address": "http://h", "model": "m"});
@@ -1330,6 +1068,13 @@ mod tests {
                 "{address}"
             );
         }
+        let removed = json!({"kind": "extra", "id": "p", "name": "P", "active": false,
+                             "address": "http://h/v1", "model": "m"});
+        assert!(
+            check(&removed)
+                .unwrap_err()
+                .contains("this speech server kind was removed")
+        );
     }
 
     #[test]
@@ -1382,58 +1127,9 @@ mod tests {
     }
 
     #[test]
-    fn a_live_entry_can_be_an_extra_unless_it_is_the_active_one() {
-        let list = |active_extra: bool, writing: bool| {
-            let mut config = json!({"stt": {"entries": [
-                {"kind": "on_device", "id": "a", "name": "A", "active": true, "extra": active_extra},
-                {"kind": "realtime", "id": "b", "name": "B", "address": "ws://h:1", "model": "m",
-                 "extra": true},
-                {"kind": "on_device", "id": "c", "name": "C", "model": "/m"}
-            ]}});
-            if writing {
-                config["writing"] = json!({"url": "http://c/v1", "model": "c"});
-            }
-            config
-        };
-        let got = entries_of(&list(false, true));
-        assert_eq!(
-            got.streaming_extras()
-                .map(|e| e.name.as_str())
-                .collect::<Vec<_>>(),
-            ["B"]
-        );
-        assert!(got.any_extra());
-        let saved = serde_json::to_value(&got).unwrap();
-        assert_eq!(saved[1]["extra"], true);
-        assert!(saved[0].get("extra").is_none(), "off is not written");
-        assert_eq!(
-            entries_of(
-                &json!({"stt": {"entries": saved}, "writing": {"url": "http://c/v1", "model": "c"}})
-            ),
-            got
-        );
-        assert!(
-            entries(&list(true, true).to_string())
-                .unwrap_err()
-                .contains("cannot also be an extra"),
-        );
-        assert!(
-            entries(&list(false, false).to_string())
-                .unwrap_err()
-                .contains(&EntryError::ExtrasNeedWriting.to_string()),
-        );
-    }
-
-    #[test]
-    fn lists_are_equal_only_when_entries_active_one_and_extras_all_match() {
+    fn lists_are_equal_only_when_entries_and_the_active_one_all_match() {
         let live = |id: &str, name: &str, active: bool| json!({"kind": "on_device", "id": id, "name": name, "active": active});
-        let second = json!({"kind": "extra", "id": "p", "name": "P", "active": true,
-                            "address": "http://h/v1", "model": "m"});
-        let list = |entries: Vec<Value>| {
-            entries_of(
-                &json!({"writing": {"url": "http://c/v1", "model": "c"}, "stt": {"entries": entries}}),
-            )
-        };
+        let list = |entries: Vec<Value>| entries_of(&json!({"stt": {"entries": entries}}));
         let base = list(vec![live("a", "A", true), live("b", "B", false)]);
         assert_eq!(
             base,
@@ -1447,10 +1143,6 @@ mod tests {
             (
                 "another active entry",
                 list(vec![live("a", "A", false), live("b", "B", true)]),
-            ),
-            (
-                "an extra",
-                list(vec![live("a", "A", true), live("b", "B", false), second]),
             ),
         ];
         for (case, other) in others {

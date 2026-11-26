@@ -1,8 +1,8 @@
 {
-  "sync_commit": "d4cf5bd264d0ab1d37c883a6a2fbaa8b15c6366c",
+  "sync_commit": "9257e42934b65e5ee6c5f7af5f52e15c98794484",
   "files": {
     "crates/thalvi-app/src/runner.rs": {
-      "sha256": "fe8246c07db8cd33fd5d2403b23cbe4c0af5c36e62e19e317be63cb57a15d165",
+      "sha256": "79b6bd1877087229514eeee832b5f07e7eb8258a62270c357fbc7a8ecb3cf5fd",
       "functions": [
         "Requests::take",
         "Requests::read_queued",
@@ -12,23 +12,19 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "4eed51b1f977f3cfa31dcb647362d43c5cd3980f1a3c9f997cbfeb9dfe1e2eed",
+      "sha256": "f1f4ab8399c30518152b004f1bf37670d71323954588ca2ff36db4c0c1af9c5e",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",
         "Engine::conclude",
         "Engine::end_cue",
         "Engine::end_with",
-        "Engine::merge",
         "Engine::write",
         "Engine::clean",
         "Engine::prepare_submit",
         "bounded",
         "Engine::start",
         "download_started",
-        "Engine::ask_merge",
-        "Engine::drop_streams",
-        "Engine::confirm_final_submit",
         "Engine::on_final",
         "Engine::hold_done",
         "Engine::cleans_before_confirm",
@@ -64,32 +60,11 @@
         "OpenAiSession::language"
       ]
     },
-    "crates/thalvi-desktop/src/engine/streaming.rs": {
-      "sha256": "366208813a6e2694f691e33ee747bc3980a79365d311693c383034cc5f184f94",
-      "functions": [
-        "Streams::start",
-        "Streams::finish",
-        "Streams::cancel",
-        "hear",
-        "park",
-        "run",
-        "send_frame",
-        "finished"
-      ]
-    },
     "crates/thalvi-desktop/src/local.rs": {
       "sha256": "ea7c709342275d81e0ef8fe930a655cb4c015aad638c2fa06d60efb95cc550a7",
       "functions": [
         "LocalRecognizer::connect",
         "LocalRecognizer::loading"
-      ]
-    },
-    "crates/thalvi-desktop/src/engine/final_pass.rs": {
-      "sha256": "f9191329eb06273da2952399b9051c0fe611b51b69dab4fd18fb518164093a44",
-      "functions": [
-        "Engine::start_final_pass",
-        "Engine::wait_final_pass",
-        "Request::cancel"
       ]
     },
     "crates/thalvi-desktop/src/engine/submit_preview.rs": {
