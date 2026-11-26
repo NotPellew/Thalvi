@@ -707,6 +707,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::list_speech_models,
             commands::speech_device,
             commands::download_speech_model,
+            commands::use_lighter_model,
             commands::open_speech_model_source,
             commands::check_speech_entry,
             commands::word_list_support,
@@ -1057,6 +1058,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
                 }
                 let failed = Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: "Thalvi stopped unexpectedly. Restart it.".to_owned(),
                     headline: "Thalvi stopped — restart it".to_owned(),
                     causes: Vec::new(),
@@ -1307,6 +1309,21 @@ pub fn on_menu(app: &AppHandle, id: &str) {
             if let Err(error) = state.use_built_in_look() {
                 note_failure(&state.last_error, "Use the built-in look", error);
             }
+        }
+        tray::LIGHTER_MODEL => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                let Some(offer) = state.link.status().offer() else {
+                    return;
+                };
+                if let Err(error) =
+                    commands::switch_to_lighter_model(&app, &state, offer.name).await
+                {
+                    state.link.send(Control::OfferFailed(error.clone()));
+                    note_failure(&state.last_error, "Use the lighter model", error);
+                }
+            });
         }
         tray::SETTINGS => show_settings(app),
         tray::UPDATE => match app.state::<AppState>().updates.snapshot().tray().1 {

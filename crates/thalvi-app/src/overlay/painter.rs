@@ -192,6 +192,7 @@ mod tests {
             loading: None,
             wake_words: true,
             rebuilding: false,
+            offer: None,
         }
         .status()
     }
@@ -293,6 +294,7 @@ mod tests {
         };
         let failed = Status::Failed {
             kind: FailureKind::Other,
+            offer: None,
             notice: String::new(),
             headline: "No words heard".to_owned(),
             causes: Vec::new(),
@@ -633,6 +635,7 @@ mod tests {
                 "failed",
                 Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: String::new(),
                     headline: "No words heard".to_owned(),
                     causes: Vec::new(),

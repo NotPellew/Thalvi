@@ -509,6 +509,7 @@ fn state(running: &impl Running) -> String {
             notice,
             headline,
             kind,
+            offer,
             ..
         } => {
             reply["failure"] = match kind {
@@ -517,6 +518,9 @@ fn state(running: &impl Running) -> String {
                     json!({"headline": headline, "reason": scrub(notice, &secrets)})
                 }
             };
+            if let Some(offer) = offer {
+                reply["failure"]["lighter"] = json!({"name": offer.name, "title": offer.title});
+            }
             if running.overlay_on() {
                 reply["overlay"]["headline"] = json!(headline);
             }
@@ -1146,6 +1150,7 @@ mod tests {
                     headline: "Microphone closed".to_owned(),
                     causes: Vec::new(),
                     kind: FailureKind::Other,
+                    offer: None,
                 }),
                 (false, Status::Capturing { .. }) => self.set_status(Status::Working {
                     target: None,
@@ -2251,6 +2256,7 @@ mod tests {
             headline: "Recognition failed".to_owned(),
             causes: Vec::new(),
             kind: FailureKind::Other,
+            offer: None,
         });
         let failed = rig.ask(&Request::State);
         assert_eq!(failed["state"], "failed");
@@ -2286,6 +2292,7 @@ mod tests {
                 headline: "Failed".to_owned(),
                 causes: Vec::new(),
                 kind,
+                offer: None,
             });
             let state = rig.ask(&Request::State);
             assert_eq!(state["state"], "failed", "{kind:?}");
@@ -3015,6 +3022,7 @@ mod tests {
                 headline: "Clipboard failed — text in Settings".to_owned(),
                 causes: Vec::new(),
                 kind: FailureKind::Delivery,
+                offer: None,
             },
         ];
         for status in statuses {

@@ -154,10 +154,12 @@ pub fn set_listening(on: bool, state: State<'_, AppState>) {
     state.link.send(Control::SetListening(on));
 }
 
-/// Hides the overlay's failure; the status stays failed until the next capture starts.
+/// Hides the overlay's failure and takes its lighter-model offer away; the status stays failed
+/// until the next capture starts.
 #[tauri::command]
 pub fn dismiss_error(state: State<'_, AppState>) {
     state.overlay.apply(overlay::Visibility::Hide);
+    state.link.send(Control::DismissError);
 }
 
 /// Puts an error report on the clipboard through the desktop; a web view's own clipboard is refused
@@ -577,6 +579,38 @@ pub async fn download_speech_model(
     state: State<'_, AppState>,
 ) -> Result<(), DownloadFailed> {
     download_speech(&app, &state, &name).await
+}
+
+/// Downloads the lighter model a failure offers and makes it the model in use.
+#[tauri::command]
+pub async fn use_lighter_model(
+    name: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    switch_to_lighter_model(&app, &state, &name).await
+}
+
+/// Downloads `name` first, then saves it as the active on-device model through the same form
+/// Settings saves a model pick with; a download that fails leaves the model in use.
+///
+/// # Errors
+/// Why the download failed, or why the settings refused the switch.
+pub(crate) async fn switch_to_lighter_model(
+    app: &AppHandle,
+    state: &AppState,
+    name: &str,
+) -> Result<(), String> {
+    download_speech(app, state, name)
+        .await
+        .map_err(|failed| failed.message)?;
+    save(state, |current| {
+        Ok((
+            (),
+            Some(crate::settings::switched_to_lighter_model(current, name)?),
+        ))
+    })?;
+    Ok(())
 }
 
 /// Downloads a catalog speech model, telling the UI how far it is.

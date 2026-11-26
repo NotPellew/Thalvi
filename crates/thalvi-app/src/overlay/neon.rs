@@ -1111,6 +1111,7 @@ mod tests {
         };
         let failed = Status::Failed {
             kind: crate::status::FailureKind::Other,
+            offer: None,
             notice: String::new(),
             headline: "No words heard".to_owned(),
             causes: Vec::new(),

@@ -28,7 +28,7 @@ use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{Desktop, HoldReport, Host, WindowApp};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
-use thalvi_desktop::recognizer::Recognizer;
+use thalvi_desktop::recognizer::{Recognizer, RecognizerError};
 use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::speech_device::SpeechDevices;
 use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
@@ -37,8 +37,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::status::{
-    Failure, FailureKind, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status, View,
-    WAKE_DOWNLOAD_NOTICE, load_notice,
+    Failure, FailureKind, LighterModel, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status,
+    View, WAKE_DOWNLOAD_NOTICE, load_notice,
 };
 use crate::update::Stop;
 
@@ -70,6 +70,10 @@ pub enum Control {
     ReloadSpeechModel(ListedSpeech),
     /// Stops the local chat child and removes its model between captures.
     RemoveChat(oneshot::Sender<Result<(), String>>),
+    /// Takes the lighter-model offer off a failure without hiding the failure itself.
+    DismissError,
+    /// A tray switch to the lighter model failed; says why and keeps the offer.
+    OfferFailed(String),
     /// Cancels any capture, closes the microphone and the recognizer, and stops.
     Quit,
 }
@@ -470,6 +474,7 @@ impl Publisher {
                     loading: None,
                     wake_words: true,
                     rebuilding: false,
+                    offer: None,
                 },
                 requested_apply: 0,
                 completed_apply: 0,
@@ -566,7 +571,32 @@ impl Publisher {
     }
 
     fn mode(&self, mode: Mode) {
-        self.update(|view| view.mode = mode);
+        self.update(|view| {
+            view.mode = mode;
+            view.offer = None;
+        });
+    }
+
+    /// Shows `mode`, offering `lighter` while it is the failure that suggests another model.
+    fn mode_with(&self, mode: Mode, lighter: Option<LighterModel>) {
+        self.update(|view| {
+            view.mode = mode;
+            view.offer = lighter;
+        });
+    }
+
+    /// Takes the offer off the failure, which stays until the next capture starts.
+    fn dismiss_offer(&self) {
+        self.update(|view| view.offer = None);
+    }
+
+    /// The lighter model a failure currently offers.
+    fn offer(&self) -> Option<LighterModel> {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .view
+            .offer
     }
 
     /// Takes the speech model load failure off the status, if it still shows it, so the next load shows its progress.
@@ -674,6 +704,7 @@ async fn load_showing(local: &(impl Preload + ?Sized), publisher: &Publisher) {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = Some(failure.clone());
             view.mode = Mode::Failed(failure);
+            view.offer = None;
         }
     });
 }
@@ -1475,6 +1506,19 @@ impl<S: Rig> Runner<S> {
             }
             Control::Overlay(failure) => self.overlay(failure),
             Control::ReloadSpeechModel(model) => self.reload_speech_model(model),
+            Control::DismissError => self.publisher.dismiss_offer(),
+            Control::OfferFailed(notice) => {
+                let offer = self.publisher.offer();
+                self.publisher.mode_with(
+                    Mode::Failed(Failure {
+                        kind: FailureKind::Other,
+                        notice,
+                        headline: "Could not switch model".to_owned(),
+                        causes: Vec::new(),
+                    }),
+                    offer,
+                );
+            }
             Control::RemoveChat(reply) => {
                 let result = match self.session.as_mut() {
                     Some(session) => session
@@ -1683,7 +1727,7 @@ impl<S: Rig> Runner<S> {
         self.publisher
             .woke(bound.window(), self.delivery.copies_only());
         let mut requests = Requests::default();
-        let (finished, route, ignored, note, undelivered) = {
+        let (mut finished, route, ignored, note, undelivered, behind) = {
             let Self {
                 session,
                 control,
@@ -1726,7 +1770,7 @@ impl<S: Rig> Runner<S> {
                     // The control that ended it never reached the cancel callback.
                     gate.set_enabled(true);
                     feeder.cancel();
-                    (None, None, ignored, None, FailureKind::Delivery)
+                    (None, None, ignored, None, FailureKind::Delivery, false)
                 }
                 Some(outcome) => {
                     let route = match &outcome {
@@ -1773,7 +1817,21 @@ impl<S: Rig> Runner<S> {
                         (Some(a), Some(b)) => Some(format!("{a} {b}")),
                         (a, b) => a.or(b),
                     };
-                    (finished, route, ignored, note, undelivered(&outcome))
+                    let behind = matches!(
+                        &outcome,
+                        CaptureOutcome::Failed {
+                            error: CaptureError::Recognizer(RecognizerError::Behind { .. }),
+                            ..
+                        }
+                    );
+                    (
+                        finished,
+                        route,
+                        ignored,
+                        note,
+                        undelivered(&outcome),
+                        behind,
+                    )
                 }
             }
         };
@@ -1788,10 +1846,27 @@ impl<S: Rig> Runner<S> {
         if let Some(model) = requests.reload {
             self.reload_speech_model(model);
         }
-        self.publisher.mode(told(
+        let lighter = if behind {
+            lighter_model(&self.config)
+        } else {
+            None
+        };
+        if behind && lighter.is_none() {
+            if let Some(finished) = finished.as_mut() {
+                finished.notice.push(' ');
+                finished.notice.push_str(SERVER_RECOGNIZER_HINT);
+            }
+        }
+        let mode = told(
             noted(delivered(finished, route, undelivered), note),
             &ignored,
-        ));
+        );
+        let offer = if matches!(mode, Mode::Failed(_)) {
+            lighter
+        } else {
+            None
+        };
+        self.publisher.mode_with(mode, offer);
         if requests.listening_off {
             self.pause();
         }
@@ -1927,6 +2002,20 @@ fn noted(mode: Mode, note: Option<String>) -> Mode {
         }),
         (mode, _) => mode,
     }
+}
+
+/// What the notice says when the model in use cannot keep up and no lighter one is offered.
+const SERVER_RECOGNIZER_HINT: &str = "Pick a server recognizer in Settings → Recognition.";
+
+/// The lighter catalog model the active on-device entry could switch to.
+fn lighter_model(config: &DesktopConfig) -> Option<LighterModel> {
+    let LiveKind::OnDevice(choice) = &config.stt.entries.active_live().kind else {
+        return None;
+    };
+    choice.lighter().map(|model| LighterModel {
+        name: model.name(),
+        title: model.title(),
+    })
 }
 
 /// What failed when `outcome` was not delivered: the recognizer, or the capture's delivery.
@@ -2155,6 +2244,8 @@ impl Requests {
                 self.reload = Some(model);
                 false
             }
+            Some(Control::DismissError) => false,
+            Some(Control::OfferFailed(_)) => false,
             Some(Control::Feed(feed)) => {
                 feed.refuse("Thalvi was busy. Try again in a moment.");
                 false
@@ -5195,6 +5286,64 @@ mod tests {
                     failed["notice"],
                     json!("This computer can't keep up with Parakeet TDT v3. Nothing was delivered. Pick a server recognizer in Settings → Recognition."),
                     "the notice says where to go next"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dismissing_the_notice_takes_the_offer_away_and_keeps_the_failure() {
+        LocalSet::new()
+            .run_until(async {
+                let mut script = FedRun::start(false, false);
+                yield_until("listening did not start", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                cant_keep_up(&mut script, "Nemotron Streaming").await;
+                let before = status_json(&script);
+                assert!(
+                    !before["offer"].is_null(),
+                    "the offer is there first: {before}"
+                );
+                script.link.send(Control::DismissError);
+                status_until(
+                    &mut script.status,
+                    "the offer stayed after dismiss",
+                    |shown| matches!(shown, Status::Failed { offer: None, .. }),
+                )
+                .await;
+                let after = status_json(&script);
+                script.stop().await;
+                assert_eq!(after["notice"], before["notice"], "the failure stays");
+                assert!(after["offer"].is_null(), "the offer is gone: {after}");
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_switch_from_the_tray_says_why_and_keeps_the_offer() {
+        LocalSet::new()
+            .run_until(async {
+                let mut script = FedRun::start(false, false);
+                yield_until("listening did not start", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                cant_keep_up(&mut script, "Nemotron Streaming").await;
+                let notice = "Could not download the speech model. Check the internet connection and try again.";
+                script.link.send(Control::OfferFailed(notice.to_owned()));
+                status_until(&mut script.status, "the switch failure did not show", |shown| {
+                    matches!(shown, Status::Failed { notice: shown_notice, .. } if shown_notice == notice)
+                })
+                .await;
+                let failed = status_json(&script);
+                script.stop().await;
+                assert_eq!(failed["notice"], json!(notice));
+                assert_eq!(
+                    failed["offer"]["name"],
+                    json!("parakeet_tdt_v3"),
+                    "the offer stays so the switch can be tried again: {failed}"
                 );
             })
             .await;

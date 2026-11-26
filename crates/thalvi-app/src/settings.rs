@@ -7,6 +7,7 @@ use thalvi_desktop::config::{ConfigError, DesktopConfig, Look};
 use thalvi_desktop::entries::{self, LiveKind};
 use thalvi_desktop::hold::{HoldKey, HoldKind};
 use thalvi_desktop::host::{Desktop, HostError};
+use thalvi_desktop::models::CatalogSpeech;
 use thalvi_desktop::theme::{self, LookOverrides};
 use thalvi_desktop::transducer::{SpeechChoice, check_folder};
 use thalvi_desktop::wake::validate_wake_model;
@@ -410,6 +411,39 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
     Ok(settings)
 }
 
+/// The settings form that makes `name` the model of the active on-device entry, as a pick of the
+/// Model drop-down is saved.
+///
+/// # Errors
+/// When the live recognizer is not on this computer, `name` is not a catalog model, or it is not
+/// lighter than the model in use.
+pub fn switched_to_lighter_model(current: &DesktopConfig, name: &str) -> Result<Value, String> {
+    let LiveKind::OnDevice(choice) = &current.stt.entries.active_live().kind else {
+        return Err(
+            "The live recognizer is not on this computer, so there is no model to switch."
+                .to_owned(),
+        );
+    };
+    let Some(lighter) = CatalogSpeech::named(name) else {
+        return Err(format!("{name} is not a speech model Thalvi can download."));
+    };
+    if choice.lighter() != Some(lighter) {
+        return Err(format!(
+            "{} is not a lighter model for {}.",
+            lighter.title(),
+            choice.title()
+        ));
+    }
+    let id = current.stt.entries.active_live().id.clone();
+    let mut settings = settings_json(current)?;
+    for entry in entries_of(&mut settings) {
+        if entry.get("id").and_then(Value::as_str) == Some(id.as_str()) {
+            entry.insert("model".to_owned(), Value::String(lighter.name().to_owned()));
+        }
+    }
+    Ok(settings)
+}
+
 /// The entry objects of the speech server list in `settings`.
 fn entries_of(settings: &mut Value) -> impl Iterator<Item = &mut serde_json::Map<String, Value>> {
     settings
@@ -462,6 +496,33 @@ mod tests {
     use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;
+
+    #[test]
+    fn switching_to_the_lighter_model_changes_only_the_active_on_device_entry() {
+        let current = DesktopConfig::from_json_str(
+            r#"{"stt":{"entries":[{"kind":"on_device","id":"dev","name":"On this computer","active":true,"model":"nemotron_160ms"},{"kind":"open_ai","id":"server","name":"Server","active":false,"address":"http://127.0.0.1:1/v1","model":"m","api_key":"saved"}]}}"#,
+        )
+        .unwrap();
+        let form = switched_to_lighter_model(&current, "parakeet_tdt_v3").unwrap();
+        let saved = Store::check(form, &current).unwrap();
+        let LiveKind::OnDevice(choice) = &saved.stt.entries.active_live().kind else {
+            panic!("the on-device entry is still live");
+        };
+        assert_eq!(choice, &SpeechChoice::Catalog(CatalogSpeech::ParakeetTdtV3));
+        assert_eq!(
+            saved.stt.entries.live().len(),
+            current.stt.entries.live().len()
+        );
+        assert_eq!(
+            saved.stt.entries.key_of("server"),
+            "saved",
+            "a server's key survives the switch"
+        );
+        assert!(
+            switched_to_lighter_model(&saved, "nemotron_160ms").is_err(),
+            "only a lighter model may be offered"
+        );
+    }
 
     fn store(name: &str) -> (Store, PathBuf) {
         let dir = std::env::temp_dir().join(format!("thalvi-app-{name}-{}", std::process::id()));
