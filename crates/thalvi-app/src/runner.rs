@@ -599,8 +599,21 @@ impl Publisher {
             .offer
     }
 
+    /// Shows the opened microphone listening, or the speech model load failure while the model is still not loaded.
+    fn microphone_opened(&self, model_unloaded: bool) {
+        let load_failure = model_unloaded
+            .then(|| {
+                self.load_failure
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+            })
+            .flatten();
+        self.mode(load_failure.map_or(Mode::Idle, Mode::Failed));
+    }
+
     /// Takes the speech model load failure off the status, if it still shows it, so the next load shows its progress.
-    fn load_retried(&self) {
+    fn load_started(&self) {
         let Some(failure) = self
             .load_failure
             .lock()
@@ -688,21 +701,22 @@ async fn load_showing(local: &(impl Preload + ?Sized), publisher: &Publisher) {
     if let Err(error) = &loaded {
         println!("{error}");
     }
+    let failure = loaded.err().map(|error| Failure {
+        kind: FailureKind::Recognizer,
+        notice: format!("{error} Dictation will try again when you start it."),
+        headline: error.headline(),
+        causes: causes(&error),
+    });
+    publisher
+        .load_failure
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone_from(&failure);
     publisher.update(|view| {
         view.loading = None;
-        if let Err(error) = loaded
+        if let Some(failure) = failure
             && !matches!(view.mode, Mode::Paused | Mode::Delivering(_))
         {
-            let failure = Failure {
-                kind: FailureKind::Recognizer,
-                notice: format!("{error} Dictation will try again when you start it."),
-                headline: error.headline(),
-                causes: causes(&error),
-            };
-            *publisher
-                .load_failure
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(failure.clone());
             view.mode = Mode::Failed(failure);
             view.offer = None;
         }
@@ -1135,6 +1149,7 @@ impl<S: Rig> Runner<S> {
         if let Some(loading) = self.loading.take() {
             loading.abort();
         }
+        self.publisher.load_started();
         let local = self
             .session
             .as_ref()
@@ -1182,7 +1197,6 @@ impl<S: Rig> Runner<S> {
             .as_ref()
             .and_then(|session| session.local.as_deref());
         if reload_wanted(uses_downloaded, local) {
-            self.publisher.load_retried();
             self.load_speech_model();
         }
     }
@@ -1322,7 +1336,11 @@ impl<S: Rig> Runner<S> {
             Ok(()) => {
                 self.reopen_failures = None;
                 self.open_failure = None;
-                self.publisher.mode(Mode::Idle);
+                let model_unloaded = session
+                    .local
+                    .as_ref()
+                    .is_some_and(|local| local.device().is_none());
+                self.publisher.microphone_opened(model_unloaded);
             }
             Err(failure) => self.microphone_failed(failure),
         }
@@ -2630,21 +2648,24 @@ mod tests {
 
     #[tokio::test]
     async fn a_model_load_shows_each_step_it_takes_and_then_nothing_or_its_failure() {
-        for (case, fails, mode, shown) in [
-            ("loads", false, Mode::Idle, Mode::Idle),
+        let failed = Mode::Failed(Failure {
+            kind: FailureKind::Recognizer,
+            notice:
+                "Could not download the speech model. Dictation will try again when you start it."
+                    .to_owned(),
+            headline: "Speech recognition failed — Settings".to_owned(),
+            causes: Vec::new(),
+        });
+        for (case, fails, mode, shown, opened) in [
+            ("loads", false, Mode::Idle, Mode::Idle, Mode::Idle),
+            ("fails", true, Mode::Idle, failed.clone(), failed.clone()),
             (
-                "fails",
+                "fails while paused",
                 true,
-                Mode::Idle,
-                Mode::Failed(Failure {
-                    kind: FailureKind::Recognizer,
-                    notice: "Could not download the speech model. Dictation will try again when you start it."
-                        .to_owned(),
-                    headline: "Speech recognition failed — Settings".to_owned(),
-                    causes: Vec::new(),
-                }),
+                Mode::Paused,
+                Mode::Paused,
+                failed.clone(),
             ),
-            ("fails while paused", true, Mode::Paused, Mode::Paused),
         ] {
             let (release, gate) = tokio::sync::oneshot::channel();
             let local = LocalRecognizer::new(
@@ -2675,10 +2696,14 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("{case}: the GPU download is never shown"));
             if mode == Mode::Idle {
-                let notice = "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.";
+                let notice =
+                    "Loading the speech model. Downloading the model for the GPU, about 1.3 GB.";
                 assert_eq!(
                     *status.borrow(),
-                    Status::Loading { notice: notice.to_owned(), downloading: true },
+                    Status::Loading {
+                        notice: notice.to_owned(),
+                        downloading: true
+                    },
                     "{case}: the step is shown"
                 );
             }
@@ -2686,6 +2711,12 @@ mod tests {
             load.await;
             assert_eq!(publisher.view().loading, None, "{case}: loading ends");
             assert_eq!(publisher.view().mode, shown, "{case}");
+            publisher.microphone_opened(local.device().is_none());
+            assert_eq!(
+                publisher.view().mode,
+                opened,
+                "{case}: the microphone opens"
+            );
         }
     }
 
@@ -2738,7 +2769,7 @@ mod tests {
         );
         assert!(reload_wanted(true, Some(&local)), "the model is not loaded");
 
-        publisher.load_retried();
+        publisher.load_started();
         publisher.loading(Some(Step::Reading));
         assert!(
             matches!(*status.borrow(), Status::Loading { .. }),
@@ -2766,7 +2797,7 @@ mod tests {
             publisher.mode(Mode::Idle);
             load_showing(&local, &publisher).await;
             publisher.mode(then);
-            publisher.load_retried();
+            publisher.load_started();
             assert_eq!(publisher.view().mode, shown, "{case}");
         }
     }
@@ -4540,6 +4571,8 @@ mod tests {
         recorder: RefCell<Option<Recorder>>,
         pause_on_rebuild: Option<mpsc::UnboundedSender<Control>>,
         cancel_on_audio_error: Option<mpsc::UnboundedSender<Control>>,
+        /// Holds the first open of the microphone until the test sends.
+        first_open: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
     }
 
     struct LabMic {
@@ -4551,6 +4584,7 @@ mod tests {
         /// Holds the fake stream open; no room audio goes through it.
         feed: Rc<RefCell<Option<thalvi_desktop::engine::fakes::FrameFeed>>>,
         cancel_on_audio_error: Option<mpsc::UnboundedSender<Control>>,
+        first_open: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
     }
 
     impl Rig for MicLab {
@@ -4616,6 +4650,7 @@ mod tests {
                 active: None,
                 feed: Rc::clone(&self.feed),
                 cancel_on_audio_error: self.cancel_on_audio_error.clone(),
+                first_open: Rc::clone(&self.first_open),
             }
         }
     }
@@ -4636,10 +4671,12 @@ mod tests {
             *self.feed.borrow_mut() = None;
         }
 
-        fn open(
-            self,
-        ) -> impl Future<Output = Result<(Self, Result<Self::Frames, Failure>), Failure>> {
-            std::future::ready(Ok(self.open_stream()))
+        async fn open(self) -> Result<(Self, Result<Self::Frames, Failure>), Failure> {
+            let held = self.first_open.borrow_mut().take();
+            if let Some(held) = held {
+                held.await.unwrap();
+            }
+            Ok(self.open_stream())
         }
 
         fn replace(
@@ -4732,6 +4769,7 @@ mod tests {
         local: Option<Arc<dyn Preload>>,
         pause_on_rebuild: bool,
         cancel_on_audio_error: bool,
+        first_open: Option<oneshot::Receiver<()>>,
     }
 
     impl Default for FedOptions {
@@ -4743,6 +4781,7 @@ mod tests {
                 local: None,
                 pause_on_rebuild: false,
                 cancel_on_audio_error: false,
+                first_open: None,
             }
         }
     }
@@ -4783,6 +4822,7 @@ mod tests {
                 recorder: RefCell::new(Some(options.recorder)),
                 pause_on_rebuild: options.pause_on_rebuild.then(|| link.control.clone()),
                 cancel_on_audio_error: options.cancel_on_audio_error.then(|| link.control.clone()),
+                first_open: Rc::new(RefCell::new(options.first_open)),
             };
             let texts = Arc::new(Mutex::new(Vec::new()));
             let host = TestHost(Arc::new(Mutex::new(Vec::new())), Arc::clone(&texts));
@@ -4935,6 +4975,7 @@ mod tests {
                 active: None,
                 feed: Rc::new(RefCell::new(None)),
                 cancel_on_audio_error: None,
+                first_open: Rc::new(RefCell::new(None)),
             }
         }
     }
@@ -6046,6 +6087,74 @@ mod tests {
                 script.stop().await;
             })
             .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_model_load_shows_whenever_the_microphone_opens_until_the_model_loads() {
+        for (case, dictation_loads, resumed) in [
+            ("still failed", false, true),
+            ("loaded by a dictation", true, false),
+        ] {
+            LocalSet::new()
+                .run_until(async {
+                    let (open, first_open) = oneshot::channel();
+                    let local = Arc::new(LocalRecognizer::new(
+                        FailsOnce(std::sync::atomic::AtomicBool::new(true)),
+                        "test",
+                        "test",
+                        Recorder::disabled().metrics(),
+                    ));
+                    let mut script = FedRun::configured(
+                        false,
+                        false,
+                        FedOptions {
+                            local: Some(Arc::clone(&local) as Arc<dyn Preload>),
+                            first_open: Some(first_open),
+                            ..FedOptions::default()
+                        },
+                    );
+                    let load_failed = |status: &Status| {
+                        matches!(status, Status::Failed { notice, .. }
+                            if notice.starts_with("Could not download the speech model."))
+                    };
+                    status_until(
+                        &mut script.status,
+                        "the model load did not fail",
+                        |status| matches!(status, Status::Failed { .. }),
+                    )
+                    .await;
+                    open.send(()).unwrap();
+                    script.checkpoint().await;
+                    assert_eq!(script.opens.get(), 1, "{case}: the microphone opened");
+                    assert!(
+                        load_failed(&script.status.borrow()),
+                        "{case}: opened: {:?}",
+                        *script.status.borrow()
+                    );
+                    if dictation_loads {
+                        local.load().await.unwrap();
+                    }
+                    script.link.send(Control::SetListening(false));
+                    status_until(&mut script.status, "listening did not pause", |status| {
+                        matches!(status, Status::Paused)
+                    })
+                    .await;
+                    script.link.send(Control::SetListening(true));
+                    status_until(&mut script.status, "listening did not resume", |status| {
+                        !matches!(status, Status::Paused | Status::Starting { .. })
+                    })
+                    .await;
+                    script.checkpoint().await;
+                    assert_eq!(
+                        load_failed(&script.status.borrow()),
+                        resumed,
+                        "{case}: resumed: {:?}",
+                        *script.status.borrow()
+                    );
+                    script.stop().await;
+                })
+                .await;
+        }
     }
 
     #[tokio::test(start_paused = true)]

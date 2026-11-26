@@ -686,7 +686,8 @@ async fn cancel(running: &impl Running, wait: Duration) -> String {
 
 async fn hold_start(running: &impl Running, kind: HoldKind, wait: Duration) -> String {
     let mut status = running.status();
-    let refusal = match &*status.borrow() {
+    // Marks the status seen: only a change after the press answers it, never one already shown.
+    let refusal = match &*status.borrow_and_update() {
         Status::Paused => Some("Thalvi is paused. Resume it first."),
         current if capturing(current) => Some("A capture is already running."),
         Status::Working { .. } => Some("The last text is still being delivered."),
@@ -983,6 +984,8 @@ mod tests {
     /// control at once, unless told to ignore them.
     struct Fake {
         status: watch::Sender<Status>,
+        /// Like the app's link: a receiver that never reads, whose clones each request gets.
+        updates: watch::Receiver<Status>,
         audio: watch::Sender<AudioStatus>,
         rebuilding: watch::Sender<bool>,
         saves: SyncedConfig,
@@ -1021,8 +1024,10 @@ mod tests {
             std::fs::create_dir_all(&folder).unwrap();
             let config = DesktopConfig::from_json_str(config).unwrap();
             let (keys, state) = HoldInput::new();
+            let (status, updates) = watch::channel(Status::Listening);
             Arc::new(Self {
-                status: watch::channel(Status::Listening).0,
+                status,
+                updates,
                 audio: watch::channel(AudioStatus {
                     selected: None,
                     active: None,
@@ -1088,7 +1093,7 @@ mod tests {
 
     impl Running for Arc<Fake> {
         fn status(&self) -> watch::Receiver<Status> {
-            self.status.subscribe()
+            self.updates.clone()
         }
 
         fn audio(&self) -> watch::Receiver<AudioStatus> {
@@ -2000,6 +2005,34 @@ mod tests {
         assert_eq!(
             reply,
             json!({"ok": true, "took_effect": true, "state": "listening"})
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hold_after_a_failure_reports_the_capture_it_starts() {
+        let fake = Fake::new("hold-after-failure", "{}");
+        fake.set_status(Status::Failed {
+            notice: "The Whisper helper took too long.".to_owned(),
+            headline: "Recognition failed".to_owned(),
+            causes: Vec::new(),
+            kind: FailureKind::Recognizer,
+            offer: None,
+        });
+        fake.ignoring.store(true, Ordering::SeqCst);
+        let reply = tokio::spawn({
+            let fake = Arc::clone(&fake);
+            async move { answer(&fake, Duration::from_secs(5), &Request::HoldStart.line()).await }
+        });
+
+        while !fake.sent().contains(&"hold true".to_owned()) {
+            tokio::task::yield_now().await;
+        }
+        fake.set_status(capturing_status());
+
+        let reply: Value = serde_json::from_str(&reply.await.unwrap()).unwrap();
+        assert_eq!(
+            reply,
+            json!({"ok": true, "took_effect": true, "state": "capturing"})
         );
     }
 

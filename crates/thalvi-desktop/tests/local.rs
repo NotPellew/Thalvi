@@ -31,12 +31,49 @@ const FRAME: Frame = [0; FRAME_SAMPLES];
 
 type Reply = Result<Vec<RecognizerEvent>, RecognizerError>;
 
-/// Answers frame `n` with `script(n)`; the first frame waits for `gate` when one is given.
+/// Holds the model on its first frame: it reports `started`, then waits for `release`.
+struct Gate {
+    started: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+}
+
+/// The test's side of a [`Gate`].
+struct Hold {
+    started: mpsc::Receiver<()>,
+    release: mpsc::Sender<()>,
+}
+
+fn gate() -> (Hold, Gate) {
+    let (started_tx, started) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    (
+        Hold { started, release },
+        Gate {
+            started: started_tx,
+            release: release_rx,
+        },
+    )
+}
+
+impl Hold {
+    /// Blocks the test until the model is on its first frame, without letting a paused clock advance.
+    fn model_started(&self) {
+        self.started
+            .recv_timeout(WAIT)
+            .expect("the model starts on the first frame");
+    }
+
+    fn release(&self) {
+        let _ = self.release.send(());
+    }
+}
+
+/// Answers frame `n` with `script(n)`; the first frame waits at `gate` when one is given.
 struct Fake {
     device: Device,
     placement: Option<Placement>,
     script: fn(usize) -> Reply,
-    gate: Mutex<Option<mpsc::Receiver<()>>>,
+    gate: Mutex<Option<Gate>>,
     seen: Arc<AtomicUsize>,
     done: mpsc::Sender<()>,
     release_limit: Duration,
@@ -95,7 +132,7 @@ impl ModelSource for Source {
 
 struct FakeStream {
     script: fn(usize) -> Reply,
-    gate: Option<mpsc::Receiver<()>>,
+    gate: Option<Gate>,
     seen: Arc<AtomicUsize>,
     done: mpsc::Sender<()>,
     held_back: Option<&'static str>,
@@ -137,7 +174,8 @@ impl SpeechStream for FakeStream {
         if n == 0
             && let Some(gate) = self.gate.take()
         {
-            let _ = gate.recv_timeout(WAIT);
+            let _ = gate.started.send(());
+            let _ = gate.release.recv_timeout(WAIT);
         }
         (self.script)(n)
     }
@@ -169,12 +207,7 @@ struct Rig {
     done_tx: mpsc::Sender<()>,
 }
 
-fn rig(
-    name: &str,
-    script: fn(usize) -> Reply,
-    gate: Option<mpsc::Receiver<()>>,
-    failures: usize,
-) -> Rig {
+fn rig(name: &str, script: fn(usize) -> Reply, gate: Option<Gate>, failures: usize) -> Rig {
     rig_on(
         name,
         Device::Cpu(Fallback::CpuModel),
@@ -190,7 +223,7 @@ fn rig_on(
     device: Device,
     placement: Option<Placement>,
     script: fn(usize) -> Reply,
-    gate: Option<mpsc::Receiver<()>>,
+    gate: Option<Gate>,
     failures: usize,
 ) -> Rig {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("local-{name}"));
@@ -494,14 +527,14 @@ fn fails_on_the_third_frame(n: usize) -> Reply {
 
 #[tokio::test]
 async fn a_model_error_reaches_the_caller_after_the_text_before_it_and_stops_the_work() {
-    let (release, gate) = mpsc::channel();
+    let (hold, gate) = gate();
     let rig = rig("error", fails_on_the_third_frame, Some(gate), 0);
     let mut session = rig.recognizer.connect().await.expect("connects");
     // Queue every frame before the model can fail, so no send meets a stopped worker.
     for _ in 0..6 {
         session.send_frame(&FRAME).await.expect("sends");
     }
-    let _ = release.send(());
+    hold.release();
     assert_eq!(session.next_event().await, Ok(partial("hel")));
     let error = session.next_event().await.expect_err("fails");
     assert_eq!(error.to_string(), "The speech model stopped working.");
@@ -512,22 +545,16 @@ async fn a_model_error_reaches_the_caller_after_the_text_before_it_and_stops_the
 
 #[tokio::test]
 async fn cancelling_drops_the_frames_still_waiting_for_the_model() {
-    let (release, gate) = mpsc::channel();
+    let (hold, gate) = gate();
     let rig = rig("cancel", |_| Ok(vec![]), Some(gate), 0);
     let mut session = rig.recognizer.connect().await.expect("connects");
     for _ in 0..5 {
         session.send_frame(&FRAME).await.expect("sends");
     }
     // Cancel while the model is busy with the first frame.
-    tokio::time::timeout(WAIT, async {
-        while rig.seen.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the model starts on the first frame");
+    hold.model_started();
     session.cancel().await;
-    let _ = release.send(());
+    hold.release();
 
     let metric = rig.metric().await;
     assert_eq!(metric["outcome"], "cancelled");
@@ -537,17 +564,12 @@ async fn cancelling_drops_the_frames_still_waiting_for_the_model() {
 /// The model is still on the first frame while the microphone has moved on, as one slower than real time is.
 #[tokio::test(start_paused = true)]
 async fn a_model_three_seconds_behind_stops_the_recognition_and_names_itself() {
-    let (release, gate) = mpsc::channel();
+    let (hold, gate) = gate();
     let rig = rig("behind", |_| Ok(vec![]), Some(gate), 0);
     let seen = Arc::clone(&rig.seen);
     let mut session = rig.recognizer.connect().await.expect("connects");
     session.send_frame(&FRAME).await.expect("sends");
-    for _ in 0..1_000 {
-        if seen.load(Ordering::SeqCst) > 0 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    hold.model_started();
     assert_eq!(
         seen.load(Ordering::SeqCst),
         1,
@@ -569,7 +591,7 @@ async fn a_model_three_seconds_behind_stops_the_recognition_and_names_itself() {
         "This computer can't keep up with fake-model. Nothing was delivered."
     );
     session.cancel().await;
-    let _ = release.send(());
+    hold.release();
 
     let metric = rig.metric().await;
     assert_eq!(metric["outcome"], "cant_keep_up");

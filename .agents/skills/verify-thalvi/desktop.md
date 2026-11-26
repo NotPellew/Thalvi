@@ -57,6 +57,15 @@ base). `up` removes runs older than 24 h whose compositor and app have stopped, 
 bin folders no run names that nothing read or changed for 24 h, so copy evidence
 you must keep elsewhere; never commit any of it.
 
+The Whisper Turbo models run a separate helper, `whisper-server`, which a debug
+build does not contain. Reuse a package build's `crates/thalvi-app/helpers/whisper`
+or `$T/release/whisper`, or build it (git, cmake, a C++ compiler; Vulkan also
+needs the toolchain in AGENTS.md, Gates):
+
+```sh
+.github/scripts/whisper-helper /var/tmp/thalvi-rig/whisper cpu   # or: cpu vulkan; writes cpu/ and vulkan/ there
+```
+
 ## Launch
 
 ```sh
@@ -91,6 +100,14 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   by its pinned size, without rehashing it. A missing ending spotter downloads
   from modelscope.cn, which can be slow enough to fail; the app then says so and
   keeps working.
+- A Whisper Turbo entry (`"model":"whisper_turbo_cpu"` or `whisper_turbo_vulkan`) needs
+  `up --models ggml-large-v3-turbo-q5_0.bin,ggml-silero-v6.2.0.bin` (plus the wake and
+  ending files) and `app-start ... --whisper DIR`, where DIR holds the helper script's `cpu/`
+  and `vulkan/`. The option copies DIR into the run and sets `APPDIR`, so the app finds
+  `$APPDIR/usr/lib/Thalvi/whisper/<variant>/whisper-server`, with or without `--hosted`;
+  without it, choosing Whisper says the build has no helper. Vulkan Whisper runs on the
+  rig's non-NVIDIA render node: a weak integrated GPU can take longer than the 5 s a
+  preview is given, so its previews drop.
 - App output is `$R/out/app-<tag>.log`, every line stamped with its arrival time.
   The app's own state: `$H ctl $R status`.
 
