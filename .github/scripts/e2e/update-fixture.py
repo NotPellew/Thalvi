@@ -247,7 +247,7 @@ class Desktop:
     def reply(self, *args, change):
         try:
             reply = subprocess.run([self.exe, *args], input=None if change is None else json.dumps(change),
-                                   capture_output=True, text=True, timeout=15, env=self.env)
+                                   capture_output=True, encoding="utf-8", timeout=15, env=self.env)
         except (PermissionError, subprocess.TimeoutExpired):
             return None
         for line in reversed(reply.stdout.splitlines()):
