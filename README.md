@@ -109,3 +109,4 @@ Thalvi began during the [Meta Global AI Developer Hackathon](https://cerebralval
 
 Licensed under [Apache License 2.0](LICENSE). Speech, wake, and chat models downloaded by the app keep their own licenses, shown beside each model in Settings.
 
+
