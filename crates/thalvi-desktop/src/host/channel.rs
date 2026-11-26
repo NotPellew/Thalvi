@@ -315,6 +315,7 @@ fn ask_in(
 #[cfg(test)]
 mod tests {
     use std::fs::Permissions;
+    use std::os::fd::AsRawFd;
 
     use super::*;
 
@@ -361,7 +362,10 @@ mod tests {
     {
         let dir = Dir::new("serve", 0o700);
         assert_eq!(ask(&dir, "state"), Ok(None), "no socket");
-        drop(UnixListener::bind(dir.socket()).unwrap());
+        let stale = UnixListener::bind(dir.socket()).unwrap();
+        // A child another test forks meanwhile holds a copy of the listener until it execs.
+        nix::sys::socket::shutdown(stale.as_raw_fd(), nix::sys::socket::Shutdown::Both).unwrap();
+        drop(stale);
         assert!(dir.socket().exists());
         assert_eq!(ask(&dir, "state"), Ok(None), "a socket nothing listens on");
         let server = serve_in(&dir.0, me(), SHORT, echo).unwrap();
