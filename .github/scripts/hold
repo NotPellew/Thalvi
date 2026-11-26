@@ -87,7 +87,6 @@ class PullRequest:
     body: str | None
     author: str
     state: str
-    updated: str
     head_sha: str
     base_sha: str
     base_ref: str
@@ -97,7 +96,7 @@ class PullRequest:
     def read(cls, number):
         pr = api(f"pulls/{number}")
         return cls(
-            pr["body"], pr["user"]["login"], pr["state"], pr["updated_at"],
+            pr["body"], pr["user"]["login"], pr["state"],
             pr["head"]["sha"], pr["base"]["sha"], pr["base"]["ref"], pr["changed_files"],
         )
 

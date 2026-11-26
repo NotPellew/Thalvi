@@ -48,7 +48,7 @@ if reply in ("API error", "partial API error"):
     sys.exit("fixture API error")
 if args[1] == "--method":
     with Path(os.environ["HOLD_POSTS"]).open("a") as posts:
-        print(endpoint, *(arg for arg in args[3:-1] if arg != "-f"), file=posts)
+        print(args[2], endpoint, *(arg for arg in args[3:-1] if arg != "-f"), file=posts)
 elif "?per_page=100" in endpoint or "&per_page=100" in endpoint:
     if "--paginate" not in args:
         print(json.dumps(reply[0]))
@@ -148,7 +148,7 @@ class HoldTest(unittest.TestCase):
     def approved(self, *messages):
         self.check(0, "hold: approved", *messages)
         (write,) = self.writes()
-        self.assertTrue(write.startswith(f"{APPROVE} event=APPROVE commit_id={HEAD} body="), write)
+        self.assertTrue(write.startswith(f"POST {APPROVE} event=APPROVE commit_id={HEAD} body="), write)
 
     def held(self, *messages):
         self.check(0, "hold: left for the owner's review", "by approving it", *messages)
@@ -213,14 +213,17 @@ class HoldTest(unittest.TestCase):
         current = review(4)
         dismissals = [f"{APPROVE}/{id_}/dismissals" for id_ in (3, 4)]
         self.data.update({endpoint: [None] for endpoint in dismissals})
-        self.data[REVIEWS] = [[[owners, dismissed], [stale]]]
+        self.data[REVIEWS] = [[[owners, dismissed, dict(review(5), user=None)], [stale]]]
         self.approved()
         self.data[REVIEWS] = [[[owners, stale], [current]]]
         self.check(0, "hold: approved")
         self.assertEqual(self.writes(), [])
         self.pr["body"] = None
         self.check(0, "hold: left for the owner's review")
-        self.assertEqual([write.split()[0] for write in self.writes()], dismissals)
+        self.assertEqual(self.writes(), [
+            f"PUT {endpoint} message=This PR no longer qualifies to merge without the owner's review."
+            for endpoint in dismissals
+        ])
 
     def test_api_failures_fail_the_check_even_after_one_file_page(self):
         for endpoint in (PR, "issues/17", FILES, REVIEWS, APPROVE):
@@ -254,6 +257,10 @@ class HoldTest(unittest.TestCase):
         self.data[PR] = [dict(self.pr, base={"sha": BASE, "ref": "other"})]
         self.failed("PR changed")
 
+    def test_an_update_that_changes_no_policy_input_does_not_fail_the_check(self):
+        self.data[PR] = [self.pr, dict(self.pr, updated_at="2026-11-25T10:00:05Z", labels=[label("windows")])]
+        self.approved()
+
     def set_open_prs(self):
         def record(number, body, source_repo):
             return {
@@ -272,8 +279,9 @@ class HoldTest(unittest.TestCase):
             {"workflow_runs": [run(794, 123), run(790, 23),
                                run(799, 23, event="issues")]},
         ]]
-        expected = ["actions/runs/791/rerun", "actions/runs/794/rerun"]
-        self.data.update({endpoint: [None] for endpoint in expected})
+        reruns = ["actions/runs/791/rerun", "actions/runs/794/rerun"]
+        expected = [f"POST {endpoint}" for endpoint in reruns]
+        self.data.update({endpoint: [None] for endpoint in reruns})
         result = self.invoke("rerun", "17")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertCountEqual(self.posts.read_text().splitlines(), expected)
@@ -289,7 +297,7 @@ class HoldTest(unittest.TestCase):
         self.data["actions/runs/792/rerun"] = [None]
         result = self.invoke("rerun", "17")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.posts.read_text().splitlines(), ["actions/runs/792/rerun"])
+        self.assertEqual(self.posts.read_text().splitlines(), ["POST actions/runs/792/rerun"])
 
     def test_issue_refresh_tracks_a_revision_change_while_waiting(self):
         self.set_open_prs()
@@ -304,7 +312,7 @@ class HoldTest(unittest.TestCase):
             self.data[f"actions/runs/{id_}/rerun"] = [None]
         result = self.invoke("rerun", "17")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.posts.read_text().splitlines(), ["actions/runs/792/rerun"])
+        self.assertEqual(self.posts.read_text().splitlines(), ["POST actions/runs/792/rerun"])
 
     def test_issue_event_api_errors_fail_without_claiming_rerun_success(self):
         self.set_open_prs()
