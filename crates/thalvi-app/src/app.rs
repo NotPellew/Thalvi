@@ -56,8 +56,8 @@ const UPDATE_EVENT: &str = "thalvi://update";
 const HISTORY_PAGE: &str = "history";
 const OPEN_PAGE_EVENT: &str = "thalvi://open-page";
 
-/// Sent when an agent changes what the open settings window shows; the window's own saves never send it.
-const CHANGED_ELSEWHERE_EVENT: &str = "thalvi://settings-elsewhere";
+/// Sent when a save outside the window changes what it shows; the window's own saves never send it.
+pub(crate) const CHANGED_ELSEWHERE_EVENT: &str = "thalvi://settings-elsewhere";
 
 /// The running config and the file it is saved to. One lock orders every save
 /// from reading the config through writing the file and applying the result.

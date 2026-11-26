@@ -610,6 +610,7 @@ pub(crate) async fn switch_to_lighter_model(
             Some(crate::settings::switched_to_lighter_model(current, name)?),
         ))
     })?;
+    let _ = app.emit(crate::app::CHANGED_ELSEWHERE_EVENT, ());
     Ok(())
 }
 
