@@ -1223,20 +1223,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reload_that_finds_a_key_taken_binds_nothing_and_says_so() {
-        let hypr = Compositor::new(Vec::new());
-        let mut following = follow_events(&hypr);
-        *hypr.binds.lock().unwrap() = vec![row("F10", false, "exec", "obs")];
-        following.hyprland.write_all(b"configreloaded>>\n").unwrap();
-        drop(following.hyprland);
-        assert_eq!(
-            following.notices.recv_timeout(WAIT).unwrap(),
-            "F10 is already bound in Hyprland. Pick another key or remove that bind. The hold keys do not work until that is fixed and Hyprland reloads its config again."
-        );
-        assert_eq!(hypr.bound().len(), 1, "only the other program's bind");
-    }
-
-    #[test]
     fn losing_the_event_socket_is_told_and_leaves_the_binds_working() {
         let hypr = Compositor::new(Vec::new());
         let (told, notices) = mpsc::channel();

@@ -357,19 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn a_client_is_answered_for_its_request_until_the_app_stops_serving() {
+    fn one_app_answers_until_it_stops_serving_after_replacing_a_stale_socket_and_refusing_a_second()
+    {
         let dir = Dir::new("serve", 0o700);
-        let server = serve_in(&dir.0, me(), SHORT, echo).unwrap();
-        assert_eq!(ask(&dir, "state").unwrap(), Some("heard state".to_owned()));
-        assert_eq!(ask(&dir, "pause").unwrap(), Some("heard pause".to_owned()));
-        drop(server);
-        assert_eq!(ask(&dir, "state"), Ok(None));
-        assert!(!dir.socket().exists(), "the socket is removed");
-    }
-
-    #[test]
-    fn nothing_answers_when_no_app_runs_or_it_died_leaving_its_socket() {
-        let dir = Dir::new("stale", 0o700);
         assert_eq!(ask(&dir, "state"), Ok(None), "no socket");
         drop(UnixListener::bind(dir.socket()).unwrap());
         assert!(dir.socket().exists());
@@ -380,19 +370,20 @@ mod tests {
             Some("heard state".to_owned()),
             "a new app replaces the stale file"
         );
-        drop(server);
-    }
-
-    #[test]
-    fn a_second_app_leaves_a_live_socket_alone() {
-        let dir = Dir::new("live", 0o700);
-        let _first = serve_in(&dir.0, me(), SHORT, |_| "first".to_owned()).unwrap();
+        assert_eq!(ask(&dir, "pause").unwrap(), Some("heard pause".to_owned()));
         let second = serve_in(&dir.0, me(), SHORT, |_| "second".to_owned());
         assert_eq!(
             second.err(),
             Some(unsupported("Another Thalvi is already running."))
         );
-        assert_eq!(ask(&dir, "state").unwrap(), Some("first".to_owned()));
+        assert_eq!(
+            ask(&dir, "state").unwrap(),
+            Some("heard state".to_owned()),
+            "a second app leaves the live socket alone"
+        );
+        drop(server);
+        assert_eq!(ask(&dir, "state"), Ok(None));
+        assert!(!dir.socket().exists(), "the socket is removed");
     }
 
     #[test]
