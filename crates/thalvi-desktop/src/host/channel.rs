@@ -196,10 +196,11 @@ fn accept(
                 let _ = connection.set_read_timeout(Some(read_timeout));
                 let read = read_line(&connection, MAX_REQUEST);
                 let answer = match &read {
-                    Ok(request) => handler(request),
+                    Ok(Some(request)) => handler(request),
+                    // A connection that ended before any byte, or failed to read, sent nothing.
+                    Ok(None) | Err(LineError::Io(_)) => return,
                     Err(LineError::TooLong) => refusal("That request is too long."),
                     Err(LineError::NotText) => refusal("That request is not text."),
-                    Err(LineError::Io(_)) => return,
                 };
                 let _ = reply(&connection, &answer);
                 if read == Err(LineError::TooLong) {
@@ -292,16 +293,23 @@ fn ask_in(
     stream.set_read_timeout(Some(timeout)).map_err(failed)?;
     stream.set_write_timeout(Some(timeout)).map_err(failed)?;
     writeln!(&stream, "{request}").map_err(failed)?;
-    match read_line(&stream, MAX_REPLY) {
-        Ok(reply) if reply.is_empty() => Err(unsupported(
+    let reply = match read_line(&stream, MAX_REPLY) {
+        Ok(Some(reply)) => reply,
+        // A connection that ended without an answer at all.
+        Ok(None) => String::new(),
+        Err(LineError::Io(kind)) => return Err(failed(kind.into())),
+        Err(_) => {
+            return Err(unsupported(
+                "Thalvi answered with something that is not a reply.",
+            ));
+        }
+    };
+    if reply.is_empty() {
+        return Err(unsupported(
             "Thalvi closed the connection without answering.",
-        )),
-        Ok(reply) => Ok(Some(reply)),
-        Err(LineError::Io(kind)) => Err(failed(kind.into())),
-        Err(_) => Err(unsupported(
-            "Thalvi answered with something that is not a reply.",
-        )),
+        ));
     }
+    Ok(Some(reply))
 }
 
 #[cfg(test)]
@@ -503,10 +511,9 @@ mod tests {
     #[test]
     fn a_request_is_sent_only_to_a_private_folder_and_to_a_server_of_the_same_user() {
         let dir = Dir::new("client", 0o700);
-        let called = Arc::new(AtomicBool::new(false));
-        let seen = Arc::clone(&called);
-        let server = serve_in(&dir.0, me(), SHORT, move |_| {
-            seen.store(true, Ordering::SeqCst);
+        let (requests, received) = std::sync::mpsc::channel();
+        let server = serve_in(&dir.0, me(), SHORT, move |request| {
+            let _ = requests.send(request.to_owned());
             "answered".to_owned()
         })
         .unwrap();
@@ -518,7 +525,7 @@ mod tests {
                 "The socket is not served by this user, so the request was not sent."
             ))
         );
-        assert!(!called.load(Ordering::SeqCst), "nothing was sent to it");
+        assert!(received.try_recv().is_err(), "nothing was sent to it");
 
         std::fs::set_permissions(&dir.0, Permissions::from_mode(0o777)).unwrap();
         assert_eq!(
@@ -527,13 +534,48 @@ mod tests {
                 "The runtime folder is open to other users, so Thalvi cannot be controlled from outside."
             ))
         );
-        assert!(
-            !called.load(Ordering::SeqCst),
-            "nothing was sent through it"
-        );
+        assert!(received.try_recv().is_err(), "nothing was sent through it");
 
         std::fs::set_permissions(&dir.0, Permissions::from_mode(0o700)).unwrap();
         assert_eq!(ask(&dir, "state").unwrap(), Some("answered".to_owned()));
+        assert_eq!(
+            received.try_iter().collect::<Vec<_>>(),
+            vec!["state".to_owned()],
+            "only the authorized request arrived"
+        );
+        drop(server);
+    }
+
+    #[test]
+    fn a_closed_connection_runs_no_handler_but_an_empty_line_does() {
+        let dir = Dir::new("empty", 0o700);
+        let (requests, received) = std::sync::mpsc::channel();
+        let server = serve_in(&dir.0, me(), SHORT, move |request| {
+            let _ = requests.send(request.to_owned());
+            "answered".to_owned()
+        })
+        .unwrap();
+
+        // A client that connects and stops writing sent no request: it gets no reply and runs no handler.
+        let mut empty = UnixStream::connect(dir.socket()).unwrap();
+        empty.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut reply = Vec::new();
+        std::io::Read::read_to_end(&mut empty, &mut reply).unwrap();
+        assert_eq!(reply, b"", "the closed connection got no reply");
+        assert_eq!(ask(&dir, "state").unwrap(), Some("answered".to_owned()));
+        assert_eq!(
+            received.try_iter().collect::<Vec<_>>(),
+            vec!["state".to_owned()],
+            "the closed connection ran no handler"
+        );
+
+        // A request that is empty but ended its line is still a request.
+        assert_eq!(ask(&dir, "").unwrap(), Some("answered".to_owned()));
+        assert_eq!(
+            received.try_iter().collect::<Vec<_>>(),
+            vec![String::new()],
+            "the empty line reached the handler"
+        );
         drop(server);
     }
 

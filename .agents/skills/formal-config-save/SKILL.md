@@ -378,3 +378,9 @@ full and crashes beyond the empty-file state; the Settings form's own stale
 state beyond the patch it sends (`settings.ts`); a list such as `stt.entries` is replaced whole by a patch that changes it; the OS login entry that
 `startup::set` changes before `remember`; Windows file-sharing errors on
 `rename`.
+
+The empty-connection fix (#700) changes `read_line` to return `None` for a stream that ends before any
+byte, and the request threads in `channel.rs` and `pipe.rs` then run no handler and send no reply.
+A connection that sends nothing never reached `settings_set` before either, since its empty request was
+refused as "not JSON" (`agent.rs`, `answer`); no writer, lock or temporary file changes, so the model and its three
+invariants are unchanged and only the hashes moved.
