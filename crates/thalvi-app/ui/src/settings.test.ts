@@ -2523,7 +2523,7 @@ describe("the speech model catalog", () => {
     expect(download().hidden).toBe(true);
 
     // Closing the editor without saving and reopening it still shows the downloaded model as Downloaded.
-    button("Cancel").click();
+    within(editorEl(), "Cancel").click();
     await settle();
     await editLocal();
     await settle();

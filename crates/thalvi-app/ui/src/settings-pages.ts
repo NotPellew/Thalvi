@@ -1249,25 +1249,50 @@ function speech(context: PageContext): SpeechRows {
   });
   const retry = button("Retry", retryDownload);
   const lighterProblem = note();
+  const lighterMeter = el("progress", { max: "100", value: "0", "aria-label": "Download of the lighter model", hidden: true });
+  const lighterStatus = el("span", { class: "unit", role: "status" });
+  /** The model the offer is switching to, while its download runs. */
+  let switching: string | null = null;
+  let cancelledByUser = false;
+  const cancelLighter = button("Cancel", () => {
+    if (switching === null) return;
+    cancelledByUser = true;
+    cancelLighter.disabled = true;
+    backend.cancelSpeechDownload(switching).catch((error: unknown) => {
+      say(lighterProblem, errorText(error));
+    });
+  }, "quiet");
+  cancelLighter.hidden = true;
   const lighter = button("Use the lighter model", () => {
     const offer = currentStatus.state === "failed" ? (currentStatus.offer ?? null) : null;
     const entry = activeLive();
     if (offer === null || entry?.kind !== "on_device") return;
     say(lighterProblem, "");
     lighter.disabled = true;
+    cancelledByUser = false;
+    switching = offer.name;
+    lighterMeter.value = 0;
+    lighterMeter.hidden = false;
+    lighterStatus.textContent = "Checking files…";
+    cancelLighter.hidden = false;
     backend.useLighterModel(offer.name).then(
       () => {
         liveApplied.textContent = controls.confirmation();
         updateSummary();
       },
       (error: unknown) => {
-        say(lighterProblem, errorText(error));
+        say(lighterProblem, cancelledByUser ? `Download cancelled. ${modelTitleFor(entry)} is still the model.` : errorText(error));
       },
     ).finally(() => {
+      switching = null;
       lighter.disabled = false;
+      cancelLighter.disabled = false;
+      lighterMeter.hidden = true;
+      lighterStatus.textContent = "";
+      cancelLighter.hidden = true;
     });
   });
-  const summaryActions = el("div", { class: "trow", hidden: true }, useServer, lighter, retry, retryProblem, lighterProblem);
+  const summaryActions = el("div", { class: "trow recovery", hidden: true }, useServer, lighter, cancelLighter, lighterMeter, lighterStatus, retry, retryProblem, lighterProblem);
   let currentStatus: Status = { state: "listening" };
   let rebuilding = false;
   const modelTitles = new Map<string, string>();
@@ -1277,6 +1302,16 @@ function speech(context: PageContext): SpeechRows {
     if (event.status === "done") {
       const info = speechModelList.find((item) => item.name === event.name);
       if (info) info.cached = true;
+    }
+    if (switching !== null && event.name === switching) {
+      const running = event.status === "verifying" || event.status === "downloading";
+      lighterMeter.hidden = !running;
+      lighterMeter.value = event.percent;
+      lighterStatus.textContent = !running
+        ? ""
+        : event.status === "verifying"
+          ? "Checking files…"
+          : `Downloading… ${String(event.percent)}%`;
     }
     editorSpeechProgress(event);
   };

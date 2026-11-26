@@ -29,7 +29,7 @@ use thalvi_desktop::theme::Style;
 use thalvi_desktop::transducer::check_folder;
 use thalvi_desktop::wake::validate_wake_model;
 
-use crate::app::AppState;
+use crate::app::{AppState, Stopped};
 use crate::menu_entry;
 use crate::overlay::{self, Sample, View};
 use crate::runner::{AudioStatus, Control};
@@ -266,8 +266,14 @@ pub async fn download_wake(state: &AppState, name: &str) -> Result<(), String> {
     let recorder =
         Recorder::per_user(state.config().recordings).map_err(|error| error.to_string())?;
     let started = Instant::now();
-    let Some(result) = state.downloads.run(store.fetch(&head.asset())).await else {
-        return Err("Thalvi is quitting.".to_owned());
+    let result = match state
+        .downloads
+        .run(head.name(), store.fetch(&head.asset()))
+        .await
+    {
+        Ok(result) => result,
+        Err(Stopped::Quitting) => return Err("Thalvi is quitting.".to_owned()),
+        Err(Stopped::Cancelled) => return Err("The download was cancelled.".to_owned()),
     };
     recorder.metric(
         Event::WakeLoad,
@@ -357,9 +363,9 @@ pub async fn download_chat(
             SpeechModelProgress::of("chat", progress),
         );
     };
-    let Some(result) = state
+    let result = match state
         .downloads
-        .run(async {
+        .run("chat", async {
             chat::install(&store, &build.files(), |progress| {
                 if progress != SpeechProgress::Done {
                     emit(progress);
@@ -383,8 +389,16 @@ pub async fn download_chat(
             Ok::<(), ModelError>(())
         })
         .await
-    else {
-        return Err(DownloadFailed::from("Thalvi is quitting.".to_owned()));
+    {
+        Ok(result) => result,
+        Err(Stopped::Quitting) => {
+            return Err(DownloadFailed::from("Thalvi is quitting.".to_owned()));
+        }
+        Err(Stopped::Cancelled) => {
+            return Err(DownloadFailed::from(
+                "The download was cancelled.".to_owned(),
+            ));
+        }
     };
     recorder.metric(
         Event::ChatDownload,
@@ -581,6 +595,12 @@ pub async fn download_speech_model(
     download_speech(&app, &state, &name).await
 }
 
+/// Stops the running download of a speech model; the files it already fetched stay.
+#[tauri::command]
+pub fn cancel_speech_download(name: String, state: State<'_, AppState>) {
+    state.downloads.cancel(&name);
+}
+
 /// Downloads the lighter model a failure offers and makes it the model in use.
 #[tauri::command]
 pub async fn use_lighter_model(
@@ -631,9 +651,9 @@ pub async fn download_speech(
     let emit = |progress| {
         let _ = app.emit("thalvi://speech-model-progress", progress);
     };
-    let Some(result) = state
+    let result = match state
         .downloads
-        .run(async {
+        .run(name, async {
             match model {
                 ListedSpeech::Catalog(catalog) => {
                     let assets = catalog.assets_on(&state.speech_devices.plans().await(catalog));
@@ -661,8 +681,16 @@ pub async fn download_speech(
             }
         })
         .await
-    else {
-        return Err(DownloadFailed::from("Thalvi is quitting.".to_owned()));
+    {
+        Ok(result) => result,
+        Err(Stopped::Quitting) => {
+            return Err(DownloadFailed::from("Thalvi is quitting.".to_owned()));
+        }
+        Err(Stopped::Cancelled) => {
+            return Err(DownloadFailed::from(
+                "The download was cancelled.".to_owned(),
+            ));
+        }
     };
     result?;
     state.link.send(Control::ReloadSpeechModel(model));
