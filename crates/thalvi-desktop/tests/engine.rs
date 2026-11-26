@@ -6005,6 +6005,96 @@ async fn a_hold_without_a_replaying_final_pastes_at_the_short_release_wait() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hold_released_while_the_recognizer_is_behind_waits_for_its_final_and_pastes_it_all() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.behind(true);
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Partial("please bring three")).await;
+            rig.release(1200).await;
+            rig.at(1500).await;
+            assert!(
+                rig.started(Cue::Accepted).is_empty(),
+                "a recognizer still behind at the release is not cut off at the 250 ms wait"
+            );
+            rig.at(3000).await;
+            assert!(
+                rig.started(Cue::Accepted).is_empty(),
+                "the hold keeps waiting while the recognizer is behind"
+            );
+            assert!(!task.is_finished(), "the capture is still open");
+            rig.finals("please bring three bags of coffee").await;
+            assert_eq!(
+                rig.started(Cue::Accepted),
+                [3000],
+                "the recognizer's final pastes at once, with every word"
+            );
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "please bring three bags of coffee")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_still_behind_fifteen_seconds_after_release_pastes_what_it_has() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.behind(true);
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Partial("please bring three")).await;
+            rig.release(1200).await;
+            rig.at(16_199).await;
+            assert!(
+                rig.started(Cue::Accepted).is_empty(),
+                "the bound is 15 s after the release"
+            );
+            rig.at(16_200).await;
+            assert_eq!(
+                rig.started(Cue::Accepted),
+                [16_200],
+                "still behind at the bound, the hold pastes what it has"
+            );
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "please bring three")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_while_the_recognizer_is_still_behind_delivers_nothing() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.behind(true);
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Final("hello")).await;
+            rig.release(1200).await;
+            rig.at(1500).await;
+            rig.handle.cancel();
+            settle().await;
+            assert_eq!(
+                finished(task).await,
+                CaptureOutcome::Cancelled {
+                    dictated: Some("hello".to_owned())
+                },
+                "a cancel during the finishing wait delivers nothing"
+            );
+            assert_eq!(rig.started(Cue::Accepted).len(), 0);
+            assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancelling_during_the_post_release_wait_cancels_at_once_and_delivers_nothing() {
     LocalSet::new()
         .run_until(async {
