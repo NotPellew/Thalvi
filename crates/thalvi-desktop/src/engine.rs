@@ -841,9 +841,7 @@ impl<S: RecognizerSession> Live<S> {
     /// What the overlay shows while a released hold waits for the recognizer to finish the words
     /// said before the release.
     fn waiting(&self) -> Option<EngineState> {
-        let route = self
-            .hold_route
-            .filter(|_| self.text.pending().is_none())?;
+        let route = self.hold_route.filter(|_| self.text.pending().is_none())?;
         Some(match self.release {
             Release::Behind(_) => EngineState::Finishing { route },
             Release::Tail(_) if self.session.buffers_audio() => {
