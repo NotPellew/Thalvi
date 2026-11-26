@@ -1258,6 +1258,54 @@ describe("the Recognition page", () => {
     return stub;
   }
 
+  const CANT_KEEP_UP: Status = {
+    state: "failed",
+    notice: "This computer can't keep up with Nemotron Streaming. Nothing was delivered.",
+    headline: "Nemotron Streaming is too slow",
+    causes: [],
+    kind: "recognizer",
+    offer: { name: "parakeet_tdt_v3", title: "Parakeet TDT v3" },
+  };
+  const LIGHTER = "Use Parakeet TDT v3 (lighter on this computer)";
+
+  it("offers the lighter on-device model after a cant-keep-up failure and switches through the desktop", async () => {
+    const stub = await open(local("nemotron_160ms"));
+    goTo("recognition");
+    stub.emit(CANT_KEEP_UP);
+    await settle();
+    button(LIGHTER).click();
+    await settle();
+    expect(stub.backend.useLighterModel).toHaveBeenCalledExactlyOnceWith("parakeet_tdt_v3");
+  });
+
+  it("keeps the model in use and says why when the lighter model cannot be downloaded", async () => {
+    const stub = await open(local("nemotron_160ms"));
+    goTo("recognition");
+    const message = "Could not download the speech model. Check the internet connection and try again.";
+    stub.backend.useLighterModel.mockRejectedValueOnce(new DownloadFailure(message, ["connection refused"]));
+    stub.emit(CANT_KEEP_UP);
+    await settle();
+    button(LIGHTER).click();
+    await settle();
+    expect(recognition().textContent).toContain(message);
+    expect(deviceOf(stub.settings()).model).toBe("nemotron_160ms");
+    expect(stub.applied().length).toBe(0);
+  });
+
+  it("takes the offer away when the failure stops carrying one", async () => {
+    const stub = await open(local("nemotron_160ms"));
+    goTo("recognition");
+    stub.emit(CANT_KEEP_UP);
+    await settle();
+    expect(root.textContent).toContain(LIGHTER);
+    (root.querySelector("footer .bar button[aria-label='Dismiss error']") as HTMLButtonElement).click();
+    await settle();
+    expect(stub.backend.dismissError).toHaveBeenCalled();
+    stub.emit({ ...CANT_KEEP_UP, offer: null });
+    await settle();
+    expect(root.textContent).not.toContain(LIGHTER);
+  });
+
   it("shows the Live recognizer with the next dictation and the extras, then the four groups by kind, then the word list", async () => {
     await openSeveral();
     const boxes = Array.from(recognition().querySelectorAll<HTMLElement>(".grp")).map((box) => {

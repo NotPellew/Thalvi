@@ -5100,6 +5100,106 @@ mod tests {
         script.stop().await;
     }
 
+    /// Starts a file's capture and fails it with a recognizer that cannot keep up.
+    async fn cant_keep_up(script: &mut FedRun, model: &str) {
+        use thalvi_desktop::recognizer::RecognizerError;
+        use thalvi_desktop::wake::WakeEvent;
+
+        script.server.ready();
+        script.wake.fire(WakeEvent::Capture);
+        let (feed, mut ended) = Feed::new(spoken_clip());
+        script.link.send(Control::Feed(feed));
+        feed_started(&mut ended, &script.feeding)
+            .await
+            .unwrap_or_else(|end| panic!("the file was refused: {end:?}"));
+        capture_started(script).await;
+        script.server.emit(Err(RecognizerError::Behind {
+            model: model.to_owned(),
+            lag: Duration::from_secs(4),
+        }));
+        pump_until("the cant-keep-up failure did not show", || {
+            matches!(&*script.status.borrow(), Status::Failed { .. })
+        })
+        .await;
+        pump_until("the failed file did not finish", || {
+            !*script.feeding.borrow()
+        })
+        .await;
+    }
+
+    /// The status as the UI and `ctl state` read it.
+    fn status_json(script: &FedRun) -> Value {
+        serde_json::to_value(&*script.status.borrow()).expect("the status serializes")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_nemotron_that_cannot_keep_up_offers_parakeet_as_the_lighter_model_until_the_next_capture()
+     {
+        LocalSet::new()
+            .run_until(async {
+                let mut script = FedRun::start(false, false);
+                yield_until("listening did not start", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                cant_keep_up(&mut script, "Nemotron Streaming").await;
+                let failed = status_json(&script);
+                assert_eq!(
+                    failed["offer"],
+                    json!({"name": "parakeet_tdt_v3", "title": "Parakeet TDT v3"}),
+                    "the offer names the lighter model: {failed}"
+                );
+                assert_eq!(
+                    failed["notice"],
+                    json!("This computer can't keep up with Nemotron Streaming. Nothing was delivered."),
+                    "a model with a lighter one is offered without the server hint"
+                );
+
+                script.server.connect_again();
+                deliver(&mut script).await;
+                let delivered = status_json(&script);
+                assert!(
+                    delivered["offer"].is_null(),
+                    "a later capture that succeeds takes the offer away: {delivered}"
+                );
+                script.stop().await;
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_parakeet_that_cannot_keep_up_offers_nothing_and_points_to_a_server_recognizer() {
+        LocalSet::new()
+            .run_until(async {
+                let config = DesktopConfig::from_json_str(
+                    r#"{"stt":{"entries":[{"kind":"on_device","id":"dev","name":"On this computer","active":true,"model":"parakeet_tdt_v3"}]},"history":{"enabled":false},"ending_pause":{"paste":0}}"#,
+                )
+                .unwrap();
+                let mut script = FedRun::configured(
+                    false,
+                    false,
+                    FedOptions {
+                        config,
+                        ..FedOptions::default()
+                    },
+                );
+                yield_until("listening did not start", || {
+                    matches!(&*script.status.borrow(), Status::Listening)
+                })
+                .await;
+                cant_keep_up(&mut script, "Parakeet TDT v3").await;
+                let failed = status_json(&script);
+                script.stop().await;
+                assert!(failed["offer"].is_null(), "no lighter model is offered: {failed}");
+                assert_eq!(
+                    failed["notice"],
+                    json!("This computer can't keep up with Parakeet TDT v3. Nothing was delivered. Pick a server recognizer in Settings → Recognition."),
+                    "the notice says where to go next"
+                );
+            })
+            .await;
+    }
+
     #[derive(Clone, Copy)]
     enum FeedStop {
         Deliver,
