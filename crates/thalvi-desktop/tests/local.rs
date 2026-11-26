@@ -18,7 +18,10 @@ use thalvi_desktop::local::{LocalRecognizer, ModelSource, SpeechModel, SpeechStr
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::models::{CatalogSpeech, ModelStore};
 use thalvi_desktop::phrases::WordList;
-use thalvi_desktop::recognizer::{Recognizer, RecognizerError, RecognizerEvent, RecognizerSession};
+use thalvi_desktop::recognizer::{
+    RELEASE_LIMIT, REPLAYED_RELEASE_LIMIT, Recognizer, RecognizerError, RecognizerEvent,
+    RecognizerSession,
+};
 use thalvi_desktop::report::UserError;
 use thalvi_desktop::transducer::{SpeechChoice, TransducerSource};
 use tokio::sync::Notify;
@@ -36,6 +39,7 @@ struct Fake {
     gate: Mutex<Option<mpsc::Receiver<()>>>,
     seen: Arc<AtomicUsize>,
     done: mpsc::Sender<()>,
+    release_limit: Duration,
 }
 
 /// Fails to load this many times, then provides the [`Fake`]s it was given, one for each load.
@@ -103,6 +107,10 @@ impl SpeechModel for Fake {
 
     fn placement(&self) -> Option<Placement> {
         self.placement
+    }
+
+    fn release_limit(&self) -> Duration {
+        self.release_limit
     }
 
     fn stream(&self) -> FakeStream {
@@ -187,6 +195,7 @@ fn rig_on(
         gate: Mutex::new(gate),
         seen: Arc::clone(&seen),
         done: done_tx.clone(),
+        release_limit: RELEASE_LIMIT,
     };
     Rig {
         recognizer: LocalRecognizer::new(
@@ -222,7 +231,20 @@ impl Rig {
                 gate: Mutex::new(None),
                 seen: Arc::new(AtomicUsize::new(0)),
                 done: self.done_tx.clone(),
+                release_limit: RELEASE_LIMIT,
             });
+    }
+
+    /// Sets how long the model the next load provides takes for its final after the release.
+    fn then_release_limit(&self, limit: Duration) {
+        self.recognizer
+            .source()
+            .fakes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .front_mut()
+            .expect("a model to load")
+            .release_limit = limit;
     }
 
     /// Waits for the worker to finish and returns every metrics line written.
@@ -263,6 +285,21 @@ fn dictation(n: usize) -> Reply {
             partial("and"),
         ]),
         _ => Ok(vec![]),
+    }
+}
+
+#[tokio::test]
+async fn the_session_reports_how_long_its_model_takes_for_its_final_after_the_release() {
+    for (name, limit) in [
+        ("short", RELEASE_LIMIT),
+        ("replaying", REPLAYED_RELEASE_LIMIT),
+    ] {
+        let rig = rig(name, |_| Ok(vec![]), None, 0);
+        rig.then_release_limit(limit);
+        let session = rig.recognizer.connect().await.expect("connects");
+        assert_eq!(session.release_limit(), limit, "{name}");
+        session.close().await;
+        let _ = rig.metrics().await;
     }
 }
 

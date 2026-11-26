@@ -76,11 +76,6 @@ pub const MIN_HOLD: Duration = Duration::from_millis(300);
 /// reach its endpoint, so a final comes without waiting for real audio.
 const RELEASE_SILENCE_FRAMES: usize = 10;
 
-/// How long after the release the engine waits for that final before pasting what has arrived.
-/// A final re-hears the last words of a long stretch, measured at 75-180 ms warm; 400 ms keeps the
-/// wait under the half-second goal while a loaded machine finishes a short stretch's whole decode.
-const RELEASE_LIMIT: Duration = Duration::from_millis(400);
-
 /// How long Submit waits for the overlay to confirm that the full review text is on screen.
 const PREVIEW_WAIT: Duration = Duration::from_secs(1);
 
@@ -802,7 +797,7 @@ impl<S: RecognizerSession> Live<S> {
                 at + if self.session.buffers_audio() {
                     self.session.final_wait()
                 } else {
-                    RELEASE_LIMIT
+                    self.session.release_limit()
                 },
             ),
             _ => None,
@@ -2285,7 +2280,7 @@ where
 
     /// The key came up: a slip of the finger ends the capture; otherwise pre-release audio is
     /// drained, silence frames are sent at once to trigger the final, and the engine waits for
-    /// that final bounded by [`RELEASE_LIMIT`].
+    /// that final bounded by [`RecognizerSession::release_limit`].
     async fn on_release(
         &mut self,
         live: &mut Live<R::Session>,

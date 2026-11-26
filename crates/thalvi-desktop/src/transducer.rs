@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
@@ -17,7 +18,7 @@ use crate::frame::Frame;
 use crate::local::{ModelSource, SpeechModel, SpeechStream};
 use crate::models::{CatalogSpeech, ModelStore, SpeechProgress};
 use crate::phrases::WordList;
-use crate::recognizer::{RecognizerError, RecognizerEvent};
+use crate::recognizer::{RELEASE_LIMIT, REPLAYED_RELEASE_LIMIT, RecognizerError, RecognizerEvent};
 use crate::runtime;
 use crate::segments::{FrameDecoder, Revising, Segments, SnapshotDecoder};
 use crate::tdt::{DURATIONS, tdt_greedy};
@@ -170,6 +171,17 @@ enum Layout {
     /// With the language prompt, which is always the model's own detection.
     Buffered(Arc<BufferedShape>, i64),
     Tdt,
+}
+
+impl Layout {
+    /// How long a final may take after the release: only the TDT decoder replays the end of the
+    /// stretch, which measured 235-397 ms on a loaded machine.
+    fn release_limit(&self) -> Duration {
+        match self {
+            Self::Tdt => REPLAYED_RELEASE_LIMIT,
+            Self::CacheAware(_) | Self::Buffered(..) => RELEASE_LIMIT,
+        }
+    }
 }
 
 /// How an encoder takes its input; told apart by what it declares.
@@ -505,6 +517,10 @@ impl SpeechModel for Transducer {
 
     fn placement(&self) -> Option<Placement> {
         self.placement
+    }
+
+    fn release_limit(&self) -> Duration {
+        self.layout.release_limit()
     }
 
     fn stream(&self) -> Recognition {
@@ -1832,6 +1848,37 @@ mod tests {
     }
 
     const STEP: usize = 2_560;
+
+    #[test]
+    fn only_the_tdt_decoder_gets_the_longer_release_wait() {
+        let cache = Layout::CacheAware(Arc::new(CacheShape {
+            window: 0,
+            shift: 0,
+            channel: [0; 3],
+            time: [0; 3],
+        }));
+        let buffered = Layout::Buffered(
+            Arc::new(BufferedShape {
+                mel: WindowMel::new(),
+                window: 0,
+                step: 0,
+                capacity: 0,
+                frames: 0,
+                begin: 0,
+                decoded: 0,
+                flush_steps: 0,
+                silence: Vec::new(),
+            }),
+            0,
+        );
+        for (layout, wait) in [
+            (cache, RELEASE_LIMIT),
+            (buffered, RELEASE_LIMIT),
+            (Layout::Tdt, REPLAYED_RELEASE_LIMIT),
+        ] {
+            assert_eq!(layout.release_limit(), wait);
+        }
+    }
 
     #[test]
     fn a_window_not_yet_full_is_heard_on_its_own_and_sits_at_the_end_of_the_silence_before_it() {

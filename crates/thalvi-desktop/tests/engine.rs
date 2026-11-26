@@ -5948,6 +5948,7 @@ async fn a_hold_with_no_final_within_the_limit_pastes_what_is_there_at_the_limit
     LocalSet::new()
         .run_until(async {
             let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.release_limit(ms(400));
             let task = hold_task(engine, frames);
             rig.hold().await;
             rig.say(1000, Say::Partial("partial text")).await;
