@@ -28,8 +28,11 @@ use crate::whisper::WhisperBackend;
 const ENDPOINT_MS: usize = 600;
 /// One feature frame is 10 ms.
 const FRAME_MS: usize = 10;
-/// Silence that the look-ahead appends for a buffered model: its end-of-audio step brings out the rest.
-const BUFFERED_LOOKAHEAD: usize = 4_400;
+/// Silence that the look-ahead appends for a buffered model: 400 ms (5 encoder frames), matching
+/// its right context so a single end-of-input pass aligns with the last decoded frame.
+const BUFFERED_LOOKAHEAD: usize = 6_400;
+/// Maximum 160 ms steps coalesced into one buffered encoder pass while catching up on a backlog.
+const MAX_COALESCED_STEPS: usize = 8;
 /// Silence after a cache-aware window that lets its last frame's tail through.
 const WINDOW_TAIL: usize = 400;
 
@@ -258,8 +261,8 @@ fn open_on_cpu(path: &Path, threads: usize) -> Result<Session, TransducerError> 
 }
 
 /// Only what `device::open` reports about the GPU session is the GPU's failure; the CPU takes over from it.
-fn open_on_gpu(path: &Path, threads: usize) -> Result<(Session, Nodes), Attempt<TransducerError>> {
-    let builder = builder(path, threads)?;
+fn open_on_gpu(path: &Path) -> Result<(Session, Nodes), Attempt<TransducerError>> {
+    let builder = builder(path, 1)?;
     device::open(builder, path).map_err(Attempt::Fallback)
 }
 
@@ -312,8 +315,7 @@ impl Transducer {
         phrases: &WordList,
         gpu: Gpu,
     ) -> Result<Self, Attempt<TransducerError>> {
-        let threads = threads();
-        let (encoder, encoder_nodes) = open_on_gpu(&files.encoder, threads)?;
+        let (encoder, encoder_nodes) = open_on_gpu(&files.encoder)?;
         let decoder = open_on_cpu(&files.decoder, 1).map_err(Attempt::Failed)?;
         let joiner = open_on_cpu(&files.joiner, 1).map_err(Attempt::Failed)?;
         let placement = Placement {
@@ -592,6 +594,20 @@ impl SpeechStream for Recognition {
         }
     }
 
+    fn accept_batch(&mut self, frames: &[Frame]) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        match self {
+            Self::Frames(stream) => stream.accept_batch(frames),
+            Self::Revising(stream) => stream.accept_batch(frames),
+        }
+    }
+
+    fn batches_frames(&self) -> bool {
+        match self {
+            Self::Frames(stream) => stream.batches_frames(),
+            Self::Revising(stream) => stream.batches_frames(),
+        }
+    }
+
     fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
         match self {
             Self::Frames(stream) => stream.end_input(),
@@ -640,6 +656,13 @@ impl FrameDecoder for ModelStream {
         match self {
             Self::CacheAware(stream) => stream.holds_text_for_end(),
             Self::Buffered(stream) => stream.holds_text_for_end(),
+        }
+    }
+
+    fn batches_frames(&self) -> bool {
+        match self {
+            Self::CacheAware(stream) => stream.batches_frames(),
+            Self::Buffered(stream) => stream.batches_frames(),
         }
     }
 }
@@ -1387,7 +1410,7 @@ impl<B: Backend> Buffered<B> {
             owned = full;
             &owned
         };
-        let emitted = self.backend.decode(
+        self.backend.decode(
             encoded,
             shape.frames,
             from..to,
@@ -1396,13 +1419,7 @@ impl<B: Backend> Buffered<B> {
                 phrases: &mut self.tree,
                 skip: &mut 0,
             },
-        )?;
-        self.silent_steps = if chunk.iter().any(|sample| *sample != 0.0) {
-            0
-        } else {
-            self.silent_steps + 1
-        };
-        Ok(emitted)
+        )
     }
 }
 
@@ -1410,10 +1427,23 @@ impl<B: Backend> FrameDecoder for Buffered<B> {
     fn push(&mut self, samples: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
         self.waiting.extend_from_slice(samples);
         let shape = Arc::clone(&self.shape);
+        let max_steps = (shape.begin / shape.decoded).clamp(1, MAX_COALESCED_STEPS);
         let mut emitted = Vec::new();
         while self.waiting.len() >= shape.step {
-            let chunk: Vec<f32> = self.waiting.drain(..shape.step).collect();
-            emitted.extend(self.step(&chunk, shape.begin, shape.begin + shape.decoded)?);
+            let steps = (self.waiting.len() / shape.step).min(max_steps);
+            let chunk: Vec<f32> = self.waiting.drain(..steps * shape.step).collect();
+            let to = shape.begin + shape.decoded;
+            let from = to.saturating_sub(steps * shape.decoded);
+            emitted.extend(self.step(&chunk, from, to)?);
+            let trailing_silent = chunk
+                .rchunks_exact(shape.step)
+                .take_while(|step| step.iter().all(|sample| *sample == 0.0))
+                .count();
+            self.silent_steps = if trailing_silent == steps {
+                self.silent_steps + steps
+            } else {
+                trailing_silent
+            };
             // Long digital silence has pushed everything said before out of the window, and a
             // predictor that still remembers it loses the first words of the next stretch.
             if self.stretch_ended && self.silent_steps >= shape.flush_steps {
@@ -1426,7 +1456,7 @@ impl<B: Backend> FrameDecoder for Buffered<B> {
     }
 
     fn lookahead(&self, silence: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
-        if self.audio.is_empty() && self.waiting.is_empty() && silence.is_empty() {
+        if self.audio.is_empty() && self.waiting.is_empty() {
             return Ok(Vec::new());
         }
         let mut ahead = self.clone();
@@ -1444,6 +1474,10 @@ impl<B: Backend> FrameDecoder for Buffered<B> {
     }
 
     fn holds_text_for_end(&self) -> bool {
+        true
+    }
+
+    fn batches_frames(&self) -> bool {
         true
     }
 }
@@ -2024,10 +2058,34 @@ mod tests {
             stream.lookahead(&[]).unwrap(),
             (71..77).map(|f| vec![f]).collect::<Vec<_>>()
         );
+        let (empty, seen) = buffered();
         assert_eq!(
-            buffered().0.lookahead(&[]).unwrap(),
+            empty.lookahead(&vec![0.0; BUFFERED_LOOKAHEAD]).unwrap(),
             Vec::<Vec<usize>>::new()
         );
+        assert!(
+            seen.lock().unwrap().encodes.is_empty(),
+            "an empty stream skips encoding even when look-ahead silence is given"
+        );
+    }
+
+    #[test]
+    fn queued_steps_coalesce_into_one_encoder_pass() {
+        let (mut stream, seen) = buffered();
+        let first = stream.push(&sound(4 * STEP, 0)).unwrap();
+        assert_eq!(first, (63..71).map(|f| vec![f]).collect::<Vec<_>>());
+        let second = stream.push(&sound(3 * STEP, 4 * STEP)).unwrap();
+        assert_eq!(second, (65..71).map(|f| vec![f]).collect::<Vec<_>>());
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.encodes.len(),
+            2,
+            "each queued batch encodes the window once instead of once per step"
+        );
+        assert_eq!(seen.encodes[0].0, 64);
+        assert_eq!(seen.encodes[1].0, 112);
+        assert_eq!(seen.decodes[0].range, 63..71);
+        assert_eq!(seen.decodes[1].range, 65..71);
     }
 
     #[test]
