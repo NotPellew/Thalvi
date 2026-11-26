@@ -191,9 +191,14 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
         if (applied.textContent === APPLIED_LATER_TEXT) applied.textContent = APPLIED_TEXT;
       }
     }
+    // Dismissing takes the offer off the failure, and the app publishes it again; that keeps the dismissal.
+    const offerTakenAway =
+      status.state === "failed" && next.state === "failed" && status.notice === next.notice && status.offer !== null && next.offer === null;
     status = next;
-    runtimeFailure = next.state === "failed" ? next.notice : "";
-    runtimeCauses = next.state === "failed" ? next.causes : [];
+    if (!offerTakenAway) {
+      runtimeFailure = next.state === "failed" ? next.notice : "";
+      runtimeCauses = next.state === "failed" ? next.causes : [];
+    }
     live.status(next);
     feedback();
   }

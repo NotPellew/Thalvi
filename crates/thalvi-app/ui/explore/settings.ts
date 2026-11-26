@@ -197,8 +197,8 @@ interface Session {
   base: string;
 }
 
-async function openContext(session: Session): Promise<{ context: BrowserContext; page: Page; errors: string[] }> {
-  const context = await session.browser.newContext({ viewport: { width: 1000, height: 760 }, locale: LOCALE, timezoneId: TIME_ZONE });
+async function openContext(session: Session, viewport: { width: number; height: number } = { width: 1000, height: 760 }): Promise<{ context: BrowserContext; page: Page; errors: string[] }> {
+  const context = await session.browser.newContext({ viewport, locale: LOCALE, timezoneId: TIME_ZONE });
   await context.addInitScript(() => {
     Reflect.set(window, "__raf", window.requestAnimationFrame.bind(window));
     document.addEventListener("pointerdown", (event) => { Reflect.set(window, "__pressed", event.target); }, true);
@@ -455,6 +455,37 @@ function reportFailure(seed: number, path: string | null, message: string, log: 
   return lines.join("\n");
 }
 
+/** The lighter-model offer's controls at the reported narrow Settings window: no label spills out of its button and no reason out of the window. */
+async function offerLayout(session: Session, size: { width: number; height: number }): Promise<void> {
+  const { context, page, errors } = await openContext(session, size);
+  try {
+    await page.goto(`${session.base}/settings.html?fake&offer`, { waitUntil: "commit" });
+    await page.locator("nav[aria-label='Settings pages'] button").first().waitFor({ state: "visible" });
+    await page.getByRole("navigation", { name: "Settings pages" }).getByRole("button", { name: "Recognition", exact: true }).click();
+    await page.getByRole("button", { name: "Use Parakeet TDT v3 (lighter on this computer)", exact: true }).waitFor({ state: "visible" });
+    await page.clock.runFor(500);
+    await settle(page);
+    const spill = await page.evaluate(() => {
+      const bad: string[] = [];
+      const row = document.querySelector(".next-dictation + div");
+      if (!(row instanceof HTMLElement) || row.hidden) return ["the recovery row is missing or hidden"];
+      for (const node of row.querySelectorAll<HTMLElement>("button, .note")) {
+        if (!node.checkVisibility() || node.getClientRects().length === 0) continue;
+        const label = `${node.tagName.toLowerCase()} "${node.textContent.trim()}"`;
+        if (node.scrollHeight > node.clientHeight + 1) bad.push(`${label}: its text runs below its box`);
+        if (node.scrollWidth > node.clientWidth + 1) bad.push(`${label}: its text runs past its box`);
+        const rect = node.getBoundingClientRect();
+        if (rect.left < -0.5 || rect.right > window.innerWidth + 0.5) bad.push(`${label}: outside the window`);
+      }
+      return bad;
+    });
+    if (errors.length > 0) throw new Violation(`errors: ${errors.join("; ")}`);
+    if (spill.length > 0) throw new Violation(`#705 the offer's recovery row overflows at ${String(size.width)}×${String(size.height)}: ${spill.join("; ")}`);
+  } finally {
+    await context.close();
+  }
+}
+
 async function regressions(session: Session): Promise<void> {
   for (const regression of REGRESSIONS) {
     const log: string[] = [];
@@ -516,6 +547,7 @@ async function main(): Promise<void> {
     browser = await chromium.launch({ headless: true });
     const session: Session = { browser, base };
     await regressions(session);
+    await offerLayout(session, { width: 613, height: 858 });
     const result = await explore(session, inputs);
     console.log(`seed ${String(inputs.seed)}: ${String(result.runs)} runs in ${result.seconds.toFixed(1)} s`);
   } finally {

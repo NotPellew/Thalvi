@@ -97,8 +97,9 @@ function script(): Status[] {
     { state: "pending", target: slack, route: "paste", text: "Remind me to call", waitingForQuiet: false, pauseMs: 700, copies: false },
     { state: "done", target: slack, route: "paste", notice: "Pasted" },
     { state: "starting", target: null },
-    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Check that it is running, or fix its address under Settings → Recognition.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
+    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Check that it is running, or fix its address under Settings → Recognition.", headline: "Can't reach speech server — Settings", causes: [], kind: "other", offer: null },
     { state: "loading", notice: "Loading the speech model." },
+    { state: "failed", notice: "This computer can't keep up with Nemotron Streaming. Nothing was delivered.", headline: "Nemotron Streaming is too slow", causes: [], kind: "recognizer", offer: { name: "parakeet_tdt_v3", title: "Parakeet TDT v3" } },
     { state: "starting", target: "Firefox" },
     { state: "capturing", target: "Firefox", committed: "", partial: null, notice: null },
     { state: "pending", target: "Firefox", route: "task", text: "open the calendar", waitingForQuiet: false, pauseMs: 2500, copies: false },
@@ -177,7 +178,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
     for (const listener of statusListeners) listener(next);
   };
 
-  if (pinned !== null) {
+  if (params.has("offer")) {
+    status = statuses.find((candidate) => candidate.state === "failed" && candidate.offer !== null) ?? status;
+  } else if (pinned !== null) {
     status = statuses[Number(pinned)] ?? status;
   } else {
     setInterval(() => {
@@ -379,6 +382,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
           resolve();
         }, 400);
       }),
+    useLighterModel: (name) => {
+      const entry = SETTINGS.stt.entries.find((candidate) => candidate.kind === "on_device" && candidate.active);
+      if (entry) entry.model = name;
+      return Promise.resolve();
+    },
+    cancelSpeechDownload: () => Promise.resolve(),
     onSpeechModelProgress: (listener) => speechListeners.push(listener),
     speechDevice: (name) =>
       Promise.resolve(name === "unified_160ms" ? "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)" : "Will run on the CPU: this model runs on the CPU"),

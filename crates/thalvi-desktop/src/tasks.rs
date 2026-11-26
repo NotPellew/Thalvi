@@ -28,8 +28,8 @@ pub enum Task {
 pub struct NotConfigured;
 
 impl UserError for NotConfigured {
-    fn headline(&self) -> &'static str {
-        "That task isn't configured yet"
+    fn headline(&self) -> String {
+        "That task isn't configured yet".to_owned()
     }
 }
 

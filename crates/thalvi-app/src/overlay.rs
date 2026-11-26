@@ -390,7 +390,7 @@ fn publish(failures: &LastError, sink: Option<&FailureSink>, reason: &str) {
     }
     let failure = Failure {
         notice,
-        headline,
+        headline: headline.to_owned(),
         causes: vec![reason.to_owned()],
         kind: FailureKind::Other,
     };
@@ -915,8 +915,9 @@ mod tests {
             (
                 Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: String::new(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: Vec::new(),
                 },
                 Visibility::ShowFor(Duration::from_secs(5)),

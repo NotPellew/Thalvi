@@ -418,7 +418,7 @@ mod tests {
             text_delivery: None,
             maybe_partial: false,
             notice: String::new(),
-            headline: "",
+            headline: String::new(),
             causes: Vec::new(),
             task_target: None,
         }

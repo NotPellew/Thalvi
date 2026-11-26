@@ -82,12 +82,13 @@ pub enum HostError {
 }
 
 impl UserError for HostError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::Unsupported(_) => "Desktop can't do that — Settings",
             Self::NothingTyped(_) => "Nothing was pasted — Settings",
             Self::MaybePartial(_) => "Some text may have been pasted",
         }
+        .to_owned()
     }
 }
 

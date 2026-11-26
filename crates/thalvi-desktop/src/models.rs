@@ -464,7 +464,16 @@ impl CatalogSpeech {
         match self {
             Self::Nemotron160ms => "Nemotron Streaming",
             Self::Unified160ms => "Nemotron Unified",
-            Self::ParakeetTdtV3 => "Parakeet TDT",
+            Self::ParakeetTdtV3 => "Parakeet TDT v3",
+        }
+    }
+
+    /// The catalog model that runs lighter on this computer, when this one may not keep up.
+    #[must_use]
+    pub fn lighter(self) -> Option<Self> {
+        match self {
+            Self::Nemotron160ms | Self::Unified160ms => Some(Self::ParakeetTdtV3),
+            Self::ParakeetTdtV3 => None,
         }
     }
 
@@ -816,7 +825,7 @@ impl ModelError {
 }
 
 impl UserError for ModelError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::NoDataDir => "No folder to keep models in",
             Self::Download { failure, .. } => match failure {
@@ -832,6 +841,7 @@ impl UserError for ModelError {
             Self::Unpack { .. } => "Can't unpack the chat runtime",
             Self::Io { .. } => "Can't save the model file",
         }
+        .to_owned()
     }
 }
 

@@ -192,6 +192,7 @@ mod tests {
             loading: None,
             wake_words: true,
             rebuilding: false,
+            offer: None,
         }
         .status()
     }
@@ -293,8 +294,9 @@ mod tests {
         };
         let failed = Status::Failed {
             kind: FailureKind::Other,
+            offer: None,
             notice: String::new(),
-            headline: "No words heard",
+            headline: "No words heard".to_owned(),
             causes: Vec::new(),
         };
         // The module looks light the middle of their bottom line, neon the top of its pill.
@@ -633,8 +635,9 @@ mod tests {
                 "failed",
                 Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: String::new(),
-                    headline: "No words heard",
+                    headline: "No words heard".to_owned(),
                     causes: Vec::new(),
                 },
             ),

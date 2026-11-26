@@ -336,16 +336,16 @@ pub enum CaptureError {
 }
 
 impl UserError for CaptureError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
-            Self::Recognizer(error) => error.headline(),
+            Self::Recognizer(error) => return error.headline(),
             Self::NotReady { speech, .. } if speech.is_on_device() => {
                 "Speech model not ready — Settings"
             }
             Self::NotReady { .. } => "Speech server not ready — Settings",
             Self::ModelDownloading { .. } => "Speech model still downloading",
-            Self::Audio(error) => error.headline(),
-            Self::Writing(error) => error.headline(),
+            Self::Audio(error) => return error.headline(),
+            Self::Writing(error) => return error.headline(),
             Self::MicStopped => "Microphone stopped mid-capture",
             Self::HoldTooShort => "Key released too soon",
             Self::NothingHeard | Self::NoWords(_) => "No words heard",
@@ -355,6 +355,7 @@ impl UserError for CaptureError {
             Self::SubmitPreview(_) => "Submit needs review",
             Self::Full(_) => "Capture full — finish or cancel",
         }
+        .to_owned()
     }
 }
 
@@ -385,6 +386,7 @@ impl CaptureError {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Recognizer(RecognizerError::Behind { .. }) => "cant_keep_up",
             Self::Recognizer(_) => "recognizer",
             Self::NotReady { .. } => "not_ready",
             Self::ModelDownloading { .. } => "model_downloading",
@@ -438,7 +440,7 @@ pub enum ListenError {
 }
 
 impl UserError for ListenError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::Audio(error) => error.headline(),
             Self::Wake(error) => error.headline(),

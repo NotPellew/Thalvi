@@ -99,15 +99,16 @@ pub enum SpotterError {
 }
 
 impl UserError for SpotterError {
-    fn headline(&self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
             Self::Phrases(_) => "Ending phrases can't be heard",
-            Self::Model(error) => error.headline(),
+            Self::Model(error) => return error.headline(),
             Self::Runtime(_) => "Phrase detector won't start",
             Self::Load { .. } => "Phrase model can't be loaded",
             Self::Unsupported { .. } => "Phrase model can't be used",
             Self::Inference(_) => "Phrase detection failed",
         }
+        .to_owned()
     }
 }
 

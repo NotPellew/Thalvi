@@ -13,6 +13,16 @@ pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not rea
 pub const WAKE_DOWNLOAD_NOTICE: &str = "Downloading the wake word model.";
 pub const SPOTTER_DOWNLOAD_NOTICE: &str = "Downloading the ending phrase model.";
 
+/// A lighter on-device model the user can switch to after their model could not keep up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LighterModel {
+    /// The catalog name the settings store.
+    pub name: &'static str,
+    /// What Settings calls it.
+    pub title: &'static str,
+}
+
 /// The status event's payload; its JSON form is the contract with the TypeScript UI.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(
@@ -110,10 +120,12 @@ pub enum Status {
     Failed {
         notice: String,
         /// `notice` as one short line that fits the overlay.
-        headline: &'static str,
+        headline: String,
         /// The technical causes behind `notice`, outermost first, for the error report.
         causes: Vec<String>,
         kind: FailureKind,
+        /// A lighter on-device model to offer after this computer could not keep up.
+        offer: Option<LighterModel>,
     },
     /// A model is being fetched or loaded. For the speech model the wake word already works.
     Loading {
@@ -128,6 +140,15 @@ impl Status {
     /// Whether the overlay must show these exact words before they are sent.
     pub(crate) const fn requires_final_preview(&self) -> bool {
         self.final_preview().is_some()
+    }
+
+    /// The lighter model this failure offers, if any.
+    #[must_use]
+    pub fn offer(&self) -> Option<LighterModel> {
+        match self {
+            Self::Failed { offer, .. } => *offer,
+            _ => None,
+        }
     }
 
     pub(crate) const fn final_preview(&self) -> Option<&SubmitPreview> {
@@ -156,7 +177,7 @@ pub enum FailureKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failure {
     pub notice: String,
-    pub headline: &'static str,
+    pub headline: String,
     pub causes: Vec<String>,
     pub kind: FailureKind,
 }
@@ -187,11 +208,12 @@ impl LastError {
             headline,
             causes,
             kind,
+            ..
         } = status
         {
             *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(Failure {
                 notice: notice.clone(),
-                headline,
+                headline: headline.clone(),
                 causes: causes.clone(),
                 kind: *kind,
             });
@@ -301,6 +323,8 @@ pub struct View {
     pub wake_words: bool,
     /// A settings change that rebuilds the engine is queued or running; holds status at Loading until listening resumes.
     pub rebuilding: bool,
+    /// A lighter model offered after the failure in `mode`.
+    pub offer: Option<LighterModel>,
 }
 
 impl View {
@@ -361,9 +385,10 @@ impl View {
             },
             (Mode::Failed(failure), EngineState::Listening) => Status::Failed {
                 notice: failure.notice.clone(),
-                headline: failure.headline,
+                headline: failure.headline.clone(),
                 causes: failure.causes.clone(),
                 kind: failure.kind,
+                offer: self.offer,
             },
             (Mode::Idle | Mode::Done { .. } | Mode::Failed(_), engine) => {
                 self.engine_status(target, engine)
@@ -485,6 +510,7 @@ mod tests {
             loading: None,
             wake_words: true,
             rebuilding: false,
+            offer: None,
         }
     }
 
@@ -689,7 +715,7 @@ mod tests {
         let failed = Mode::Failed(Failure {
             kind: FailureKind::Other,
             notice: "The microphone is off.".to_owned(),
-            headline: "Failed",
+            headline: "Failed".to_owned(),
             causes: Vec::new(),
         });
         let cases = [
@@ -758,8 +784,9 @@ mod tests {
                 EngineState::Listening,
                 Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: "The microphone is off.".to_owned(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: Vec::new(),
                 },
             ),
@@ -874,15 +901,16 @@ mod tests {
                 Mode::Failed(Failure {
                     kind: FailureKind::Other,
                     notice: "The microphone is off.".to_owned(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: vec!["open failed".to_owned()],
                 }),
                 EngineState::Listening
             ),
             Status::Failed {
                 kind: FailureKind::Other,
+                offer: None,
                 notice: "The microphone is off.".to_owned(),
-                headline: "Failed",
+                headline: "Failed".to_owned(),
                 causes: vec!["open failed".to_owned()],
             }
         );
@@ -919,7 +947,7 @@ mod tests {
                 Mode::Failed(Failure {
                     kind: FailureKind::Other,
                     notice: "Old failure.".to_owned(),
-                    headline: "Failed",
+                    headline: "Failed".to_owned(),
                     causes: Vec::new(),
                 }),
                 EngineState::Listening,
@@ -1032,11 +1060,12 @@ mod tests {
             (
                 Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: "No.".to_owned(),
-                    headline: "No",
+                    headline: "No".to_owned(),
                     causes: vec!["connection refused (os error 111)".to_owned()],
                 },
-                json!({"state": "failed", "notice": "No.", "headline": "No", "causes": ["connection refused (os error 111)"], "kind": "other"}),
+                json!({"state": "failed", "notice": "No.", "headline": "No", "causes": ["connection refused (os error 111)"], "kind": "other", "offer": null}),
             ),
             (
                 Status::Loading {
@@ -1055,8 +1084,9 @@ mod tests {
     fn the_last_error_outlives_the_failure_until_a_newer_one_replaces_it() {
         let failed = |notice: &str| Status::Failed {
             kind: FailureKind::Other,
+            offer: None,
             notice: notice.to_owned(),
-            headline: "Failed",
+            headline: "Failed".to_owned(),
             causes: vec![format!("cause of {notice}")],
         };
         let last = LastError::default();
@@ -1093,7 +1123,7 @@ mod tests {
             Failure {
                 kind: FailureKind::Other,
                 notice: error.to_string(),
-                headline: "Can't reach speech server — Settings",
+                headline: "Can't reach speech server — Settings".to_owned(),
                 causes: vec!["connection refused (os error 111)".to_owned()],
             }
         );
