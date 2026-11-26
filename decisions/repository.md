@@ -10,7 +10,7 @@ Branches, CI, checks and releases.
   publishes a release. An approved push to `main` publishes an `X.Y.Z-dev.N` prerelease, never Latest, for the Development
   update choice. Why: GitHub closes issues natively, and testers get fixes as they land. Rejected: a second
   integration branch (a workflow faked issue closing for it), a version commit per dev build.
-- **One approval, from the owner or the hold.** The `main` ruleset requires one approving review. The `hold` workflow
+- **One approving review.** The `main` ruleset requires one approving review. The `hold` workflow
   approves, as GitHub Actions, a PR the owner wrote or one that closes only fixes and changes no protected path; any other
   waits for a review, which on an agent's PR only the owner can give. Why: a check that failed until a label was added read
   as broken CI. Rejected: the `owner-ok` label, a pending status (agent runs wait on it), code owners (the owner's own PRs would need a bypass).

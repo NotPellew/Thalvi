@@ -147,8 +147,10 @@ class HoldTest(unittest.TestCase):
 
     def approved(self, *messages):
         self.check(0, "hold: approved", *messages)
-        (write,) = self.writes()
-        self.assertTrue(write.startswith(f"POST {APPROVE} event=APPROVE commit_id={HEAD} body="), write)
+        self.assertEqual(self.writes(), [
+            f"POST {APPROVE} event=APPROVE commit_id={HEAD} "
+            "body=The hold policy lets this PR merge without the owner's review."
+        ])
 
     def held(self, *messages):
         self.check(0, "hold: left for the owner's review", "by approving it", *messages)
