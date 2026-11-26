@@ -27,7 +27,7 @@ export const SETTINGS: Settings = {
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { merge: true, entries: [{ kind: "realtime", id: "direct", name: "Realtime speech server", active: true, address: "ws://127.0.0.1:8012", model: "nemotron" }] },
+  stt: { entries: [{ kind: "realtime", id: "direct", name: "Realtime speech server", active: true, address: "ws://127.0.0.1:8012", model: "nemotron" }] },
   apps: { slack: { classes: ["Slack"], executables: [], input_keys: ["ctrl", "k"] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com", label: "docs" }],
   overlay: { show: true, draft: true },

@@ -20,7 +20,6 @@ pub mod history;
 pub mod hold;
 pub mod host;
 pub mod local;
-pub mod merge;
 pub mod metrics;
 pub mod models;
 pub mod numbers;

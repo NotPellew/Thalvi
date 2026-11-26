@@ -99,10 +99,7 @@ input[type="checkbox"]:checked::after { transform: translateX(var(--check-travel
 .trow.server .tail { display: flex; align-items: center; gap: var(--inline-gap); margin-left: auto; }
 .trow.server > .applied { flex-basis: 100%; text-align: right; }
 .trow.server > .device { flex-basis: 100%; overflow-wrap: anywhere; }
-.extra { display: inline-flex; align-items: center; gap: var(--stack-gap); font-size: var(--fs-12); }
 .none { margin: var(--empty-inset) 0; font: var(--fs-12) var(--mono); color: var(--mut); }
-.needs-chat { margin: var(--chat-notice-inset) 0; font-size: var(--fs-12); color: var(--mut); }
-.needs-chat[hidden] { display: none; }
 .row[data-label="live recognizer"] { flex-wrap: wrap; }
 .row[data-label="live recognizer"] > .what { flex: 1 1 var(--recognizer-label-basis); }
 .row[data-label="live recognizer"] > .ctl { flex: 0 0 auto; max-width: 100%; }
@@ -110,7 +107,6 @@ input[type="checkbox"]:checked::after { transform: translateX(var(--check-travel
 .row:has(+ .table[data-kind]) > .what { max-width: none; }
 .next-dictation { margin: var(--fold-margin) 0; font-size: var(--fs-13); }
 .next-dictation:empty { display: none; }
-.merge-state:empty { display: none; }
 details.entry-details, details.model-details, details.fold { font-size: var(--fs-12); color: var(--mut); }
 .trow.server details.entry-details { flex-basis: 100%; }
 details.entry-details summary, details.model-details summary, details.fold summary { cursor: pointer; }

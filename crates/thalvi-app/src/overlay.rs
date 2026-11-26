@@ -114,8 +114,6 @@ impl Visibility {
             | Status::Working { .. }
             | Status::Transcribing { .. }
             | Status::Finishing { .. }
-            | Status::FinalPass { .. }
-            | Status::Merging { .. }
             | Status::CleaningUp { .. }
             | Status::Loading {
                 downloading: true, ..

@@ -506,13 +506,7 @@ mod tests {
 
     #[test]
     fn the_cancel_button_shows_only_on_a_capture_the_desktop_lets_be_clicked() {
-        for status in [
-            capturing(),
-            Status::FinalPass {
-                target: None,
-                route: CaptureRoute::Paste,
-            },
-        ] {
+        for status in [capturing(), Status::CleaningUp { target: None }] {
             for (look, dark) in LOOKS {
                 let mut painter = painter(1.0, look, dark);
                 let with = painter.draw(&view(&status, true), 0.0).bgra.clone();

@@ -14,11 +14,9 @@ use thalvi_desktop::metrics::Recorder;
 use thalvi_desktop::openai_live::OpenAiRecognizer;
 use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::realtime::RealtimeRecognizer;
-use thalvi_desktop::recognizer::{Recognizer, RecognizerSession};
+use thalvi_desktop::recognizer::{Recognizer, RecognizerEvent, RecognizerSession};
 use thalvi_desktop::report::{CertificateProblem, UserError};
-use thalvi_desktop::secondary::{
-    LiveRequest, OpenAiLive, SecondaryApi, SecondaryError, SecondaryStt, transcribe,
-};
+use thalvi_desktop::secondary::{LiveRequest, OpenAiLive, SecondaryStt};
 use thalvi_desktop::writing::{Writing, WritingError};
 
 #[derive(Deserialize)]
@@ -84,19 +82,31 @@ async fn check(fixture: &Fixture) {
             &format!("https://{host}:{port}/v1"),
             "fixture",
             String::new(),
-            SecondaryApi::OpenAi,
-            true,
         )
         .unwrap();
-        let response = transcribe(
-            &client,
-            &settings,
-            &[],
-            &thalvi_desktop::phrases::WordList::default(),
-        )
-        .await;
+        let recognizer = OpenAiRecognizer::new(
+            "TLS fixture",
+            OpenAiLive {
+                settings,
+                request: LiveRequest::Transcriptions,
+                language: None,
+            },
+            client.clone(),
+            Recorder::disabled().metrics(),
+            &WordList::default(),
+        );
+        let mut session = recognizer.connect().await.unwrap();
+        session.send_frame(&[0; FRAME_SAMPLES]).await.unwrap();
+        session.finish_audio().await.unwrap();
+        let heard = tokio::time::timeout(Duration::from_secs(10), session.next_event())
+            .await
+            .unwrap();
+        session.close().await;
         if let Some(problem) = problem {
-            assert_eq!(response.unwrap_err(), SecondaryError::Certificate(problem));
+            let error = heard.unwrap_err();
+            assert_eq!(error.headline(), "Server certificate problem");
+            assert!(error.to_string().contains(&problem.to_string()));
+            assert!(error.to_string().contains("Nothing was delivered"));
             let writer = Writing::new(
                 &format!("https://{host}:{port}/v1"),
                 "fixture",
@@ -110,30 +120,10 @@ async fn check(fixture: &Fixture) {
             assert_eq!(error, WritingError::Certificate(problem));
             assert_eq!(error.headline(), "Server certificate problem");
             assert!(error.to_string().contains(&problem.to_string()));
-            let recognizer = OpenAiRecognizer::new(
-                "TLS fixture",
-                OpenAiLive {
-                    settings,
-                    request: LiveRequest::Transcriptions,
-                    language: None,
-                },
-                client.clone(),
-                Recorder::disabled().metrics(),
-                &thalvi_desktop::phrases::WordList::default(),
-            );
-            let mut session = recognizer.connect().await.unwrap();
-            session.send_frame(&[0; FRAME_SAMPLES]).await.unwrap();
-            session.finish_audio().await.unwrap();
-            let error = tokio::time::timeout(Duration::from_secs(10), session.next_event())
-                .await
-                .unwrap()
-                .unwrap_err();
-            assert_eq!(error.headline(), "Server certificate problem");
-            assert!(error.to_string().contains(&problem.to_string()));
-            assert!(error.to_string().contains("Nothing was delivered"));
-            session.close().await;
         } else {
-            assert_eq!(response.unwrap().text, "Trusted transcription.");
+            assert!(
+                matches!(heard, Ok(RecognizerEvent::Final(text)) if text == "Trusted transcription.")
+            );
         }
         let websocket = tokio::time::timeout(
             Duration::from_secs(10),

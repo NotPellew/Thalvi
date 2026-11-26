@@ -18,7 +18,6 @@ import type {
   LookStyles,
   OnDeviceEntry,
   OpenAiRequest,
-  SecondaryApi,
   Settings,
   SpeechModelInfo,
   SpeechModelProgress,
@@ -45,7 +44,7 @@ export const APPLIED_TEXT = "Applied.";
 export const APPLIED_LATER_TEXT = "Applied. From the next dictation.";
 
 /** While one of these runs, a change is held until the capture is over. */
-export const DURING_CAPTURE: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "transcribing", "finishing", "finalPass", "merging", "cleaningUp"];
+export const DURING_CAPTURE: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "transcribing", "finishing", "cleaningUp"];
 
 /** The settings as the desktop holds them: pages read them and change them only through `apply`. */
 type DeepReadonly<T> = T extends (infer U)[] ? readonly DeepReadonly<U>[] : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
@@ -122,10 +121,6 @@ const SCRIPT_ACTIONS: readonly (readonly [ScriptActionKind, string])[] = [
   ["open_url", "Open web address"],
   ["focus_app", "Focus app"],
   ["discord_message", "Send Discord message"],
-];
-const APIS: readonly (readonly [SecondaryApi, string])[] = [
-  ["openai", "OpenAI-style"],
-  ["meta", "Meta"],
 ];
 const OPEN_AI_REQUESTS: readonly (readonly [OpenAiRequest, string])[] = [
   ["transcriptions", "Transcriptions"],
@@ -804,7 +799,7 @@ function commands(context: PageContext): HTMLElement[] {
     pause("task", "Quiet before running a task"),
   ];
   const pauses = settings.ending_pause;
-  const active = settings.stt.entries.filter(isLive).find((entry) => entry.active);
+  const active = settings.stt.entries.find((entry) => entry.active);
   const parakeet = active?.kind === "on_device" && active.model === "parakeet_tdt_v3";
   return [
     group("Endings"),
@@ -998,23 +993,11 @@ const KINDS: Record<SpeechEntry["kind"], Kind> = {
     about: "Runs a downloaded speech model on this computer, so your audio stays here.",
     name: "On this computer",
   },
-  extra: {
-    title: "Extra-only servers",
-    hint: "Upload for a final pass or as an extra.",
-    terms: "extra-only servers · extra recognizers · speech servers",
-    add: "Add an extra-only server",
-    about: "Transcribes each capture again for the chat model to merge with the live text; it never shows your words itself.",
-    name: "Extra recognizer",
-  },
 };
-const KIND_ORDER: readonly SpeechEntry["kind"][] = ["realtime", "open_ai", "on_device", "extra"];
+const KIND_ORDER: readonly SpeechEntry["kind"][] = ["realtime", "open_ai", "on_device"];
 /** A live entry's group, as the Live recognizer drop-down names it. */
 const LIVE_GROUP: Record<LiveEntry["kind"], string> = { realtime: "streaming", open_ai: "after you stop", on_device: "on this computer" };
 const ARRIVES: Record<Exclude<LiveEntry["kind"], "on_device">, string> = { realtime: "text arrives as you speak", open_ai: "text arrives after you stop" };
-
-function isLive(entry: SpeechEntry): entry is LiveEntry {
-  return entry.kind !== "extra";
-}
 
 /** An entry's label in the Live recognizer drop-down: its name, then its group unless the name already says it. */
 function liveChoice(entry: LiveEntry): string {
@@ -1022,17 +1005,12 @@ function liveChoice(entry: LiveEntry): string {
   return entry.name.trim().toLowerCase() === group ? entry.name : `${entry.name} (${group})`;
 }
 
-/** Whether the entry also transcribes as an extra recognizer: an upload extra when active, a live one when flagged. */
-function isExtraOn(entry: SpeechEntry): boolean {
-  return isLive(entry) ? entry.extra === true : entry.active;
-}
-
 function hasKey(entry: SpeechEntry): boolean {
-  if (entry.kind !== "realtime" && entry.kind !== "open_ai" && entry.kind !== "extra") return false;
+  if (entry.kind !== "realtime" && entry.kind !== "open_ai") return false;
   return entry.api_key === undefined ? entry.has_key === true : entry.api_key !== "";
 }
 
-function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
+function blankEntry(kind: SpeechEntry["kind"], name: string): LiveEntry {
   const base = { id: `e-${Math.random().toString(36).slice(2, 10)}`, name, active: false };
   switch (kind) {
     case "realtime":
@@ -1041,8 +1019,6 @@ function blankEntry(kind: SpeechEntry["kind"], name: string): SpeechEntry {
       return { ...base, kind, address: "", model: "", request: "transcriptions", language: "" };
     case "on_device":
       return { ...base, kind };
-    case "extra":
-      return { ...base, kind, address: "", model: "", api: "openai" };
   }
 }
 
@@ -1221,7 +1197,7 @@ function onDeviceRows(working: OnDeviceEntry, { controls, backend }: PageContext
   };
 }
 
-/** The rows of the Recognition and Chat model pages, built together because the extras need the writing endpoint. */
+/** The rows of the Recognition and Chat model pages, built together because the chat model rows follow the recognition ones. */
 interface SpeechRows {
   recognition: HTMLElement[];
   chat: HTMLElement[];
@@ -1230,7 +1206,7 @@ interface SpeechRows {
 function speech(context: PageContext): SpeechRows {
   const { settings, controls, backend, apply } = context;
   const entries = (): readonly SpeechEntry[] => settings.stt.entries;
-  const activeLive = (): LiveEntry | undefined => entries().filter(isLive).find((entry) => entry.active);
+  const activeLive = (): LiveEntry | undefined => entries().find((entry) => entry.active);
 
   const editor = el("div", { class: "editor", hidden: true });
   const problem = note();
@@ -1240,8 +1216,8 @@ function speech(context: PageContext): SpeechRows {
   let focusOnClose: () => HTMLElement | null = () => null;
   /** Keeps the open form in step with the entries, such as Remove on the entry that just became Live. */
   let syncEditor: () => void = () => undefined;
-  /** The "Applied." of the last change to one entry, on its row after a saved form or beside the switch flipped, until the next change. */
-  let rowNote: { id: string; text: string; by: "form" | "extra" | "final" } | null = null;
+  /** The "Applied." of the last saved form, on its row until the next change. */
+  let rowNote: { id: string; text: string } | null = null;
   const nextDictation = el("p", { class: "next-dictation", role: "status" }, "");
   const retryProblem = note();
   const useServer = button("Use a speech server instead", () => {
@@ -1371,10 +1347,6 @@ function speech(context: PageContext): SpeechRows {
         return "Transcribing…";
       case "finishing":
         return "Finishing…";
-      case "finalPass":
-        return "Final pass…";
-      case "merging":
-        return "Merging…";
       case "cleaningUp":
         return "Cleaning up…";
       case "loading":
@@ -1479,29 +1451,11 @@ function speech(context: PageContext): SpeechRows {
   function useLive(id: string): void {
     void change((list) => {
       for (const entry of list) {
-        if (!isLive(entry)) continue;
         entry.active = entry.id === id;
-        if (entry.active) {
-          delete entry.extra;
-          delete entry.final_pass;
-        }
       }
     }, liveApplied, () => {
       render();
       checkWordList();
-    });
-  }
-
-  function tick(id: string, on: boolean): Promise<void> {
-    return apply((next) => {
-      const entry = next.stt.entries.find((known) => known.id === id);
-      if (!entry) return;
-      if (!isLive(entry)) entry.active = on;
-      else if (on) entry.extra = true;
-      else delete entry.extra;
-    }).then(() => {
-      syncExtras();
-      updateSummary();
     });
   }
 
@@ -1522,7 +1476,7 @@ function speech(context: PageContext): SpeechRows {
   });
 
   function syncLiveChoice(): void {
-    liveSelect.replaceChildren(...entries().filter(isLive).map((entry) => el("option", { value: entry.id }, liveChoice(entry))));
+    liveSelect.replaceChildren(...entries().map((entry) => el("option", { value: entry.id }, liveChoice(entry))));
     liveSelect.value = activeLive()?.id ?? "";
   }
 
@@ -1546,7 +1500,6 @@ function speech(context: PageContext): SpeechRows {
     realtime: kindGroup("realtime"),
     open_ai: kindGroup("open_ai"),
     on_device: kindGroup("on_device"),
-    extra: kindGroup("extra"),
   };
   const groups = KIND_ORDER.map((kind) => byKind[kind]);
 
@@ -1557,49 +1510,13 @@ function speech(context: PageContext): SpeechRows {
     for (const { node } of groups) for (const note of node.querySelectorAll(".applied")) note.textContent = "";
   }
 
-  /** A switch on an entry's row whose "Applied." outlives a rebuild of the rows. */
-  function rowSwitch(entry: SpeechEntry, by: "extra" | "final", value: boolean, commit: (on: boolean) => Promise<void>): Field {
-    const switched = controls.toggle(value, (on) => {
-      forgetNotes();
-      return commit(on).then(() => {
-        rowNote = { id: entry.id, text: controls.confirmation(), by };
-      });
-    });
-    if (rowNote?.id === entry.id && rowNote.by === by) switched.node.querySelector(".applied")?.replaceChildren(rowNote.text);
-    return switched;
-  }
-
-  function extraSwitch(entry: SpeechEntry): HTMLElement {
-    const ticked = rowSwitch(entry, "extra", isExtraOn(entry), (on) => tick(entry.id, on));
-    const input = ticked.field as HTMLInputElement;
-    input.setAttribute("aria-label", `Extra: ${entry.name}`);
-    return el("span", { class: "extra" }, el("label", { for: input.id }, "Extra"), ticked.node);
-  }
-
-  function finalPassSwitch(entry: SpeechEntry): HTMLElement {
-    const switched = rowSwitch(entry, "final", entry.final_pass === true, (on) => apply((next) => {
-      for (const candidate of next.stt.entries) {
-        if (on && candidate.id === entry.id) candidate.final_pass = true;
-        else delete candidate.final_pass;
-      }
-    }).then(() => {
-      syncExtras();
-      checkWordList();
-    }));
-    const input = switched.field as HTMLInputElement;
-    input.setAttribute("aria-label", `Final pass: ${entry.name}`);
-    return el("span", { class: "extra final-pass" }, el("label", { for: input.id }, "Final pass"), switched.node);
-  }
-
   function entryRow(entry: SpeechEntry): HTMLElement {
     const edit = button("Edit", () => {
       openEditor(edit, entry);
     }, "quiet");
     edit.setAttribute("aria-label", `Edit ${entry.name}`);
     edit.setAttribute("aria-expanded", "false");
-    const role = isLive(entry) && entry.active
-      ? [el("span", { class: "badge", "data-on": "true" }, "Live")]
-      : [extraSwitch(entry), finalPassSwitch(entry)];
+    const role = entry.active ? [el("span", { class: "badge", "data-on": "true" }, "Live")] : [];
     return el(
       "div",
       { class: "trow server", "data-id": entry.id },
@@ -1607,79 +1524,8 @@ function speech(context: PageContext): SpeechRows {
       whereLine(entry),
       el("span", { class: "tail" }, ...role, edit),
       ...deviceLine(entry),
-      ...(rowNote?.id === entry.id && rowNote.by === "form" ? [el("small", { class: "applied", role: "status" }, rowNote.text)] : []),
+      ...(rowNote?.id === entry.id ? [el("small", { class: "applied", role: "status" }, rowNote.text)] : []),
     );
-  }
-
-  const finalPassState = el("p", { class: "next-dictation", role: "status", hidden: true }, "");
-  const extraState = el("p", { class: "next-dictation extras", role: "status" }, "");
-  const needsEndpoint = el(
-    "p",
-    { class: "needs-chat", id: uid("n") },
-    "Extra switches need a chat model. ",
-    button("Go to the endpoint setting", () => {
-      context.open("chat");
-      writingDetails.open = true;
-      disclosed.add(writingDetails.dataset["fold"] ?? "");
-      (writingUrl.field as HTMLInputElement).focus();
-    }, "quiet"),
-  );
-
-  /** The merge switch: on, the chat model merges the extras' texts; off, the live text is delivered at once and they are only recorded. */
-  const mergeTick = controls.toggle(settings.stt.merge, (on) => {
-    if (on && !hasEndpoint()) {
-      needsEndpoint.hidden = false;
-      return Promise.reject(new Error("Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."));
-    }
-    return apply((next) => {
-      next.stt.merge = on;
-    }).then(syncExtras);
-  });
-  const mergeInput = mergeTick.field as HTMLInputElement;
-  mergeInput.setAttribute("aria-label", "Merge with the chat model");
-  const mergeState = el("small", { class: "merge-state", role: "status" });
-  const mergeRow = el(
-    "div",
-    { class: "row" },
-    el("div", { class: "what" }, el("label", { for: mergeInput.id }, "Merge with the chat model"), mergeState),
-    el("div", { class: "ctl" }, mergeTick.node),
-  );
-  mergeRow.dataset["label"] = "merge with the chat model";
-
-  /** A switch that is off is locked while turning it on needs something it has not; one already on can always be switched off. */
-  function lockTick(input: HTMLInputElement, needed: boolean): void {
-    const locked = needed && !input.checked;
-    input.disabled = locked;
-    if (locked) input.setAttribute("aria-describedby", needsEndpoint.id);
-    else input.removeAttribute("aria-describedby");
-  }
-
-  /** What the page says follows the settings: the endpoint, which extras are on, and whether they are merged. */
-  function syncExtras(): void {
-    const finalPass = entries().find((entry) => entry.final_pass === true);
-    const merge = settings.stt.merge;
-    for (const { list } of groups) {
-      for (const input of list.querySelectorAll<HTMLInputElement>(".extra:not(.final-pass) input[type=checkbox]")) lockTick(input, merge && !hasEndpoint());
-      for (const row of list.querySelectorAll<HTMLElement>(".trow.server")) {
-        const input = row.querySelector<HTMLInputElement>(".final-pass input[type=checkbox]");
-        if (input) input.checked = finalPass?.id === row.dataset["id"];
-      }
-    }
-    mergeInput.checked = merge && finalPass === undefined;
-    mergeInput.disabled = finalPass !== undefined;
-    mergeState.textContent = finalPass === undefined ? "" : "A final pass is set";
-    const on = entries().filter(isExtraOn);
-    const merged = `The chat model merges ${on.length === 1 ? "its text" : "their texts"} with the live text.`;
-    const loads = on.some((entry) => entry.kind === "on_device") ? " Each on-device extra loads its own model, which adds memory and processing." : "";
-    finalPassState.hidden = finalPass === undefined;
-    finalPassState.textContent = finalPass === undefined ? "" : `Final pass: ${finalPass.name}. Its text is used after you stop.`;
-    extraState.textContent = finalPass !== undefined
-      ? "Paused while a final pass is set"
-      : merge
-        ? on.length === 0 ? "Extra: none" : `Extra: ${on.map((entry) => entry.name).join(", ")}. ${merged}${loads}`
-        : "Merge off: dictation pastes the live text at once; extras are only recorded.";
-    needsEndpoint.hidden = hasEndpoint() || !merge;
-    syncCleanup();
   }
 
   function editButtonFor(id: string): HTMLButtonElement | null {
@@ -1737,8 +1583,8 @@ function speech(context: PageContext): SpeechRows {
     }
     if (!open) byKind.realtime.list.append(editor);
     syncLiveChoice();
-    syncExtras();
     updateSummary();
+    syncCleanup();
     syncEditor();
   }
   // The model loads behind this long-lived window, so what runs where is asked again when the app's state changes.
@@ -1790,7 +1636,7 @@ function speech(context: PageContext): SpeechRows {
       }, { placeholder })), "half");
     const modelRow = (size: "half" | "third", hint = "The model named in each request."): HTMLElement =>
       sized(row("Model", hint, controls.draftText("model" in working ? (working.model ?? "") : "", (value) => {
-        if (working.kind === "realtime" || working.kind === "open_ai" || working.kind === "extra") working.model = value;
+        if (working.kind === "realtime" || working.kind === "open_ai") working.model = value;
       })), size);
     const key: { input?: HTMLInputElement } = {};
     let clearKey = false;
@@ -1843,22 +1689,12 @@ function speech(context: PageContext): SpeechRows {
         editorSpeechProgress = built.progress;
         break;
       }
-      case "extra":
-        rows.push(
-          address("Where the extra transcription is sent.", "http://127.0.0.1:9000/v1"),
-          keyRow(),
-          modelRow("half"),
-          sized(row("API", "Which transcription API the endpoint speaks.", controls.draftSelect(APIS, working.api, (value) => {
-            working.api = value;
-          })), "half"),
-        );
-        break;
     }
     const save = button("Save", () => {
       say(message, "");
       const typed = key.input?.value ?? "";
       const entry = structuredClone(working);
-      if (entry.kind === "realtime" || entry.kind === "open_ai" || entry.kind === "extra") {
+      if (entry.kind === "realtime" || entry.kind === "open_ai") {
         if (typed !== "") entry.api_key = typed;
         else if (clearKey) entry.api_key = "";
       }
@@ -1881,7 +1717,7 @@ function speech(context: PageContext): SpeechRows {
         )
         .then(() => {
           forgetNotes();
-          rowNote = { id: entry.id, text: controls.confirmation(), by: "form" };
+          rowNote = { id: entry.id, text: controls.confirmation() };
           closeEditor();
           checkWordList();
         })
@@ -1934,7 +1770,7 @@ function speech(context: PageContext): SpeechRows {
     node.setAttribute("aria-label", label);
     const reason = el("small", { class: "unit", id: uid("r") }, "Choose another Live recognizer first.");
     syncEditor = () => {
-      const locked = entries().some((known) => known.id === entry.id && isLive(known) && known.active);
+      const locked = entries().some((known) => known.id === entry.id && known.active);
       ask.disabled = locked;
       reason.hidden = !locked;
       if (locked) ask.setAttribute("aria-describedby", reason.id);
@@ -1950,7 +1786,7 @@ function speech(context: PageContext): SpeechRows {
       if (value === "local") next.writing = { ...next.writing, local: true };
       else if (next.writing?.url && next.writing.model) next.writing.local = false;
       else next.writing = next.writing?.numbers_as_digits === false ? { numbers_as_digits: false } : null;
-    }).then(() => { syncChatSource(); syncExtras(); });
+    }).then(syncChatSource);
   });
   let chosenBuild: ChatBuild = writing?.chat_build ?? "vulkan";
   const chatBuild = controls.select([["vulkan", "Vulkan GPU, with CPU fallback"], ["cpu", "CPU"]], chosenBuild, (value) => {
@@ -2065,7 +1901,7 @@ function speech(context: PageContext): SpeechRows {
       }
       return apply((next) => {
         next.writing = next.writing?.numbers_as_digits === false ? { numbers_as_digits: false } : null;
-      }).then(syncExtras);
+      }).then(syncCleanup);
     }
     if (!local && (url.trim() === "" || model.trim() === "")) {
       return Promise.reject(new Error("The address and the model of the writing endpoint go together: fill in both."));
@@ -2075,7 +1911,7 @@ function speech(context: PageContext): SpeechRows {
       if (custom) endpoint.prompt = promptArea.value;
       else delete endpoint.prompt;
       next.writing = endpoint;
-    }).then(() => { syncExtras(); syncCleanup(); });
+    }).then(syncCleanup);
   }
 
   const openingsList = el("div", { class: "stack wide" });
@@ -2253,14 +2089,7 @@ function speech(context: PageContext): SpeechRows {
   function checkWordList(): void {
     const request = (wordListRequest += 1);
     const active = activeLive();
-    const finalPass = entries().find((entry) => entry.final_pass === true);
-    const uploadUsesWords = finalPass?.kind === "open_ai" || finalPass?.kind === "extra";
     say(wordProblem, "");
-    if (uploadUsesWords) {
-      if (wordHint) wordHint.textContent = "The final pass uses this word list.";
-      words.enable(true);
-      return;
-    }
     if (active?.kind === "open_ai") {
       const named = `${active.name} uses this word list.`;
       if (wordHint) wordHint.textContent = named.length <= HINT_BUDGET ? named : "This recognizer uses this word list.";
@@ -2304,13 +2133,13 @@ function speech(context: PageContext): SpeechRows {
   syncChatSource();
   return {
     recognition: [
-      el("div", { class: "grp" }, liveRow, nextDictation, summaryActions, finalPassState, mergeRow, extraState, needsEndpoint),
+      el("div", { class: "grp" }, liveRow, nextDictation, summaryActions),
       ...groups.map(({ node }) => node),
       el("div", { class: "grp" }, wordRow),
     ],
     chat: [
       group("Writing"),
-      row("Chat model source", "Writing and extras use this.", source),
+      row("Chat model source", "Writing uses this.", source),
       ...localRows,
       ...manualRows,
       row(

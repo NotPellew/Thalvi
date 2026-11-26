@@ -141,11 +141,6 @@ impl Report {
                 .clone()
                 .unwrap_or_else(|| "system default".to_owned()),
         ));
-        let second = config.stt.entries.any_extra();
-        settings.push((
-            "Extra recognizers",
-            if second { "on" } else { "off" }.to_owned(),
-        ));
         Self {
             message: message.to_owned(),
             causes: causes.to_vec(),
@@ -244,7 +239,7 @@ mod tests {
                  Error: Thalvi could not reach the speech server.\n\n\
                  Technical cause:\n- connection refused (os error 111)\n\n\
                  Time: 2026-11-03 12:34:56 UTC\nThalvi: 1.2.3\nSystem: linux, Hyprland\n\n\
-                 Settings:\n- Speech recognition: the speech server \"Office\" at ws://127.0.0.1:9\n- Microphone: USB Mic\n- Extra recognizers: off\n",
+                 Settings:\n- Speech recognition: the speech server \"Office\" at ws://127.0.0.1:9\n- Microphone: USB Mic\n",
             ),
             (
                 "",
@@ -253,7 +248,7 @@ mod tests {
                 "\
                  Error: Thalvi could not reach the speech server.\n\n\
                  Time: 2026-11-03 12:34:56 UTC\nThalvi: 1.2.3\nSystem: linux\n\n\
-                 Settings:\n- Speech recognition: the speech model \"On this computer\" (nemotron_160ms)\n- Microphone: system default\n- Extra recognizers: off\n",
+                 Settings:\n- Speech recognition: the speech model \"On this computer\" (nemotron_160ms)\n- Microphone: system default\n",
             ),
         ];
         for (desktop, causes, json, expected) in cases {
@@ -278,7 +273,6 @@ mod tests {
         for secret in ["sk-secret-key", "url-secret", "example.com"] {
             assert!(!report.contains(secret), "{secret} in {report}");
         }
-        assert!(report.contains("- Extra recognizers: on"), "{report}");
     }
 
     #[test]

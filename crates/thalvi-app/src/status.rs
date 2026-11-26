@@ -58,7 +58,7 @@ pub enum Status {
         pause_ms: u64,
         /// The action is a copy to the clipboard, whatever the route.
         copies: bool,
-        /// The exact text behind a final-pass Submit must be visible during review.
+        /// The exact text behind a Submit must be visible during review.
         #[serde(skip)]
         final_confirmation: Option<SubmitPreview>,
     },
@@ -71,7 +71,7 @@ pub enum Status {
     Thinking {
         target: Option<String>,
     },
-    /// The chat model on this computer is starting before it writes or merges; `again` after it stopped.
+    /// The chat model on this computer is starting before it writes; `again` after it stopped.
     StartingChat {
         target: Option<String>,
         again: bool,
@@ -99,15 +99,6 @@ pub enum Status {
     /// A dictation is being cleaned before it is pasted; it can still be cancelled.
     CleaningUp {
         target: Option<String>,
-    },
-    /// The extra recognizers' texts are being merged with the live text; it can still be cancelled.
-    Merging {
-        target: Option<String>,
-        route: CaptureRoute,
-    },
-    FinalPass {
-        target: Option<String>,
-        route: CaptureRoute,
     },
     Done {
         target: Option<String>,
@@ -439,14 +430,6 @@ impl View {
                 Some(*pause),
                 Some(preview),
             ),
-            EngineState::FinalPass { route } => Status::FinalPass {
-                target,
-                route: *route,
-            },
-            EngineState::Merging { route } => Status::Merging {
-                target,
-                route: *route,
-            },
             EngineState::TranscribingLive { route } => Status::Transcribing {
                 target,
                 route: *route,
@@ -627,15 +610,6 @@ mod tests {
                 Status::StartingChat {
                     target: Some(kitty()),
                     again: true,
-                },
-            ),
-            (
-                EngineState::Merging {
-                    route: CaptureRoute::Task,
-                },
-                Status::Merging {
-                    target: Some(kitty()),
-                    route: CaptureRoute::Task,
                 },
             ),
         ];

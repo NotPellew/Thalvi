@@ -283,21 +283,17 @@ const OVERTAKEN_PRESS: Duration = Duration::from_secs(1);
 /// Where in the [`Order`] of queued frames one press of the key was first released. The first
 /// release stays however many presses follow, and every clone sees it.
 #[derive(Clone, Debug, Default)]
-pub struct Cutoff(Arc<OnceLock<(Order, Instant)>>);
+pub struct Cutoff(Arc<OnceLock<Order>>);
 
 impl Cutoff {
     fn release(&self) {
-        self.0.get_or_init(|| (Order::next(), Instant::now()));
+        self.0.get_or_init(Order::next);
     }
 
     /// Whether the key was released before a frame queued at `order`.
     #[must_use]
     pub fn precedes(&self, order: Order) -> bool {
-        self.0.get().is_some_and(|(released, _)| *released < order)
-    }
-    /// When this press went up, using the same release that cuts off its frames.
-    pub(crate) fn released_at(&self) -> Option<Instant> {
-        self.0.get().map(|(_, at)| *at)
+        self.0.get().is_some_and(|released| *released < order)
     }
 }
 

@@ -4,7 +4,7 @@
 "clippy::cast_possible_wrap" = 4
 "clippy::cast_precision_loss" = 31
 "clippy::cast_sign_loss" = 23
-"clippy::expect_used" = 14
+"clippy::expect_used" = 13
 "clippy::large_enum_variant" = 2
 "clippy::needless_pass_by_value" = 1
 "clippy::panic" = 2
@@ -16,5 +16,5 @@
 "clippy::unnecessary_wraps" = 6
 "clippy::unused_async_trait_impl" = 10
 "clippy::unused_self" = 1
-"clippy::unwrap_used" = 3
+"clippy::unwrap_used" = 2
 "unsafe_code" = 6
