@@ -12,8 +12,8 @@ Branches, CI, checks and releases.
   integration branch (a workflow faked issue closing for it), a version commit per dev build.
 - **One approval, from the owner or the hold.** The `main` ruleset requires one approving review. The `hold` workflow
   approves, as GitHub Actions, a PR the owner wrote or one that closes only fixes and changes no protected path; any other
-  waits for the owner's Approve. Why: agents write the PRs, so the owner can approve them, and a check that failed until a
-  label was added read as broken CI. Rejected: the `owner-ok` label, a pending status (agent runs wait on it), code owners (paths only).
+  waits for a review, which on an agent's PR only the owner can give. Why: a check that failed until a label was added read
+  as broken CI. Rejected: the `owner-ok` label, a pending status (agent runs wait on it), code owners (the owner's own PRs would need a bypass).
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit
   history are record enough. Rejected: an issue for every change.
 - **`unsafe` only at native FFI boundaries.** The workspace denies `unsafe`; Windows host modules and
