@@ -90,6 +90,8 @@ gate_server() {
   step .github/scripts/rust-layout.test.sh
   step .github/scripts/lint-exceptions
   step python3 .github/scripts/lint-exceptions.test.py
+  step python3 .github/scripts/test-hygiene
+  step python3 .github/scripts/test-hygiene.test.py
   step cargo lint
   tests --workspace
   RUSTDOCFLAGS="-D warnings" step cargo docs
