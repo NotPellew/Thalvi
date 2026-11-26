@@ -3898,7 +3898,7 @@ describe("updates", () => {
   }
 
   it("offers Stable first", async () => {
-    const stub = await open();
+    await open();
     const channel = control("Update channel", "select");
     expect(Array.from(channel.options).map((option) => [option.value, option.textContent])).toEqual([
       ["stable", "Stable"],
