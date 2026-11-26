@@ -20,6 +20,9 @@ use crate::recognizer::{
 /// How far behind the microphone the model may fall before the capture stops.
 const KEEP_UP: Duration = Duration::from_secs(3);
 
+/// Maximum 80 ms frames drained together for a stream that coalesces queued steps (1.28 s).
+const MAX_BATCH_FRAMES: usize = 16;
+
 /// When a frame went to the model, on the runtime's clock so a paused one can move the lag.
 type Sent = tokio::time::Instant;
 
@@ -67,15 +70,22 @@ impl Backlog {
     }
 
     /// The model finished the oldest frame it had not processed.
+    #[cfg(test)]
     fn took(&self) {
-        if self
-            .waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop_front()
-            .is_some()
-        {
-            self.finished.fetch_add(1, Ordering::Relaxed);
+        self.took_many(1);
+    }
+
+    /// The model finished the oldest `count` frames it had not processed.
+    fn took_many(&self, count: usize) {
+        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut done = 0_u64;
+        for _ in 0..count {
+            if waiting.pop_front().is_some() {
+                done += 1;
+            }
+        }
+        if done > 0 {
+            self.finished.fetch_add(done, Ordering::Relaxed);
         }
     }
 
@@ -143,6 +153,25 @@ pub trait SpeechStream: Send + 'static {
     /// # Errors
     /// Fails when the model cannot continue; the stream is then abandoned.
     fn accept(&mut self, frame: &Frame) -> Result<Vec<RecognizerEvent>, RecognizerError>;
+
+    /// Takes one or more consecutive 80 ms frames in order. Only streams whose
+    /// [`batches_frames`](Self::batches_frames) is true receive more than one frame at once.
+    ///
+    /// # Errors
+    /// Fails when the model cannot continue; the stream is then abandoned.
+    fn accept_batch(&mut self, frames: &[Frame]) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        let mut events = Vec::new();
+        for frame in frames {
+            events.extend(self.accept(frame)?);
+        }
+        Ok(events)
+    }
+
+    /// Whether queued frames can be handed to [`accept_batch`](Self::accept_batch) together so a
+    /// sliding-window encoder catches up in one pass instead of one per step.
+    fn batches_frames(&self) -> bool {
+        false
+    }
 
     /// The input is complete: no more frames will come. Answers with the text the model held back
     /// for the end of the audio, if any.
@@ -419,6 +448,10 @@ impl RecognizerSession for LocalSession {
         self.backlog.behind()
     }
 
+    fn needs_release_silence(&self) -> bool {
+        false
+    }
+
     fn hold_released(&mut self) {
         self.backlog.hold_released();
     }
@@ -482,36 +515,63 @@ struct Tally {
 }
 
 impl<S: SpeechStream> Work<S> {
+    fn end_input(&mut self) -> bool {
+        match self.stream.end_input() {
+            Ok(texts) => {
+                for text in texts {
+                    let _ = self.events.send(Ok(text));
+                }
+                let _ = self.events.send(Ok(RecognizerEvent::Ended));
+                true
+            }
+            Err(error) => {
+                (self.forget)();
+                let _ = self.events.send(Err(error));
+                false
+            }
+        }
+    }
+
     fn run(mut self) {
         let mut tally = Tally::default();
         let mut outcome = "ok";
+        let batches = self.stream.batches_frames();
         while let Ok(order) = self.frames.recv() {
             if self.cancelled.load(Ordering::Relaxed) {
                 outcome = "cancelled";
                 break;
             }
             let Order::Frame(sent, frame) = order else {
-                match self.stream.end_input() {
-                    Ok(texts) => {
-                        for text in texts {
-                            let _ = self.events.send(Ok(text));
-                        }
-                    }
-                    Err(error) => {
-                        (self.forget)();
-                        let _ = self.events.send(Err(error));
-                        outcome = "error";
-                        break;
-                    }
+                if !self.end_input() {
+                    outcome = "error";
+                    break;
                 }
-                let _ = self.events.send(Ok(RecognizerEvent::Ended));
                 continue;
             };
+            let mut batch = vec![*frame];
+            let mut saw_end = false;
+            if batches {
+                while batch.len() < MAX_BATCH_FRAMES {
+                    match self.frames.try_recv() {
+                        Ok(Order::Frame(_, next)) => batch.push(*next),
+                        Ok(Order::End) => {
+                            saw_end = true;
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
             let started = Instant::now();
-            let result = self.stream.accept(&frame);
+            let result = if let [only] = batch.as_slice() {
+                self.stream.accept(only)
+            } else {
+                self.stream.accept_batch(&batch)
+            };
             let took = started.elapsed();
-            self.backlog.took();
-            tally.frames += 1;
+            let count = batch.len();
+            self.backlog.took_many(count);
+            tally.frames += u32::try_from(count).unwrap_or(u32::MAX);
             tally.model += took;
             tally.slowest = tally.slowest.max(took);
             match result {
@@ -526,6 +586,16 @@ impl<S: SpeechStream> Work<S> {
                 Err(error) => {
                     (self.forget)();
                     let _ = self.events.send(Err(error));
+                    outcome = "error";
+                    break;
+                }
+            }
+            if saw_end {
+                if self.cancelled.load(Ordering::Relaxed) {
+                    outcome = "cancelled";
+                    break;
+                }
+                if !self.end_input() {
                     outcome = "error";
                     break;
                 }
