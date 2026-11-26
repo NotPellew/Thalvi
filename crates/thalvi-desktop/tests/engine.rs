@@ -5976,6 +5976,34 @@ async fn a_hold_with_no_final_within_the_limit_pastes_what_is_there_at_the_limit
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hold_without_a_replaying_final_pastes_at_the_short_release_wait() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Partial("partial text")).await;
+            rig.release(1200).await;
+            rig.at(1449).await;
+            assert!(
+                rig.started(Cue::Accepted).is_empty(),
+                "no paste before the 250 ms wait"
+            );
+            rig.at(1450).await;
+            assert_eq!(
+                rig.started(Cue::Accepted),
+                [1450],
+                "a recognizer that does not re-hear the end pastes at the 250 ms wait"
+            );
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "partial text")
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancelling_during_the_post_release_wait_cancels_at_once_and_delivers_nothing() {
     LocalSet::new()
         .run_until(async {
