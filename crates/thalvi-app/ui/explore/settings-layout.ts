@@ -44,6 +44,7 @@ async function sweep(page: Page, url: string): Promise<void> {
   for (const button of await buttons.all()) {
     const name = (await button.innerText()).trim();
     await button.click();
+    await page.getByRole("region", { name, exact: true }).waitFor();
     if (name === "Chat model" && await details.evaluate((node: HTMLDetailsElement) => node.open)) {
       await details.locator("summary").click();
     }
