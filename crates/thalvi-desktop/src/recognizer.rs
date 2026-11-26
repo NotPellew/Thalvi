@@ -294,6 +294,13 @@ pub trait RecognizerSession: Send {
         false
     }
 
+    /// Whether a hold release needs generated silence frames to flush the last word and reach an
+    /// endpoint. True for streaming servers without an end-of-input message; false for sessions
+    /// that flush themselves on [`input_ended`](Self::input_ended).
+    fn needs_release_silence(&self) -> bool {
+        true
+    }
+
     /// The hold's key came up after the audio sent so far: only that audio is owed a result, not
     /// the release flush that follows it.
     fn hold_released(&mut self) {}
@@ -441,6 +448,8 @@ pub struct FakeRecognizer {
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
+    flushes_on_end: Arc<AtomicBool>,
+    ended_calls: Arc<AtomicU64>,
     final_wait_ms: Arc<AtomicU64>,
     release_limit_ms: Arc<AtomicU64>,
     behind: Arc<AtomicBool>,
@@ -456,6 +465,8 @@ pub struct FakeControl {
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
+    flushes_on_end: Arc<AtomicBool>,
+    ended_calls: Arc<AtomicU64>,
     final_wait_ms: Arc<AtomicU64>,
     release_limit_ms: Arc<AtomicU64>,
     behind: Arc<AtomicBool>,
@@ -469,6 +480,8 @@ pub struct FakeSession {
     calls: Arc<Mutex<Vec<FakeCall>>>,
     stalled: Arc<AtomicBool>,
     buffers: Arc<AtomicBool>,
+    flushes_on_end: Arc<AtomicBool>,
+    ended_calls: Arc<AtomicU64>,
     final_wait_ms: Arc<AtomicU64>,
     release_limit_ms: Arc<AtomicU64>,
     behind: Arc<AtomicBool>,
@@ -498,6 +511,8 @@ impl FakeRecognizer {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let stalled = Arc::new(AtomicBool::new(false));
         let buffers = Arc::new(AtomicBool::new(false));
+        let flushes_on_end = Arc::new(AtomicBool::new(false));
+        let ended_calls = Arc::new(AtomicU64::new(0));
         let final_wait_ms = Arc::new(AtomicU64::new(
             u64::try_from(BUFFERED_FINAL_WAIT.as_millis()).unwrap_or(u64::MAX),
         ));
@@ -515,6 +530,8 @@ impl FakeRecognizer {
                 calls: Arc::clone(&calls),
                 stalled: Arc::clone(&stalled),
                 buffers: Arc::clone(&buffers),
+                flushes_on_end: Arc::clone(&flushes_on_end),
+                ended_calls: Arc::clone(&ended_calls),
                 final_wait_ms: Arc::clone(&final_wait_ms),
                 release_limit_ms: Arc::clone(&release_limit_ms),
                 behind: Arc::clone(&behind),
@@ -528,6 +545,8 @@ impl FakeRecognizer {
                 calls,
                 stalled,
                 buffers,
+                flushes_on_end,
+                ended_calls,
                 final_wait_ms,
                 release_limit_ms,
                 behind,
@@ -559,6 +578,8 @@ impl Recognizer for FakeRecognizer {
             calls: Arc::clone(&self.calls),
             stalled: Arc::clone(&self.stalled),
             buffers: Arc::clone(&self.buffers),
+            flushes_on_end: Arc::clone(&self.flushes_on_end),
+            ended_calls: Arc::clone(&self.ended_calls),
             final_wait_ms: Arc::clone(&self.final_wait_ms),
             release_limit_ms: Arc::clone(&self.release_limit_ms),
             behind: Arc::clone(&self.behind),
@@ -632,6 +653,18 @@ impl FakeControl {
         self.release_limit_ms.store(millis, Ordering::Relaxed);
     }
 
+    /// Marks this session as flushing itself on [`RecognizerSession::input_ended`], so a release
+    /// sends no synthetic silence frames.
+    pub fn flushes_on_end(&self) {
+        self.flushes_on_end.store(true, Ordering::Relaxed);
+    }
+
+    /// How many times [`RecognizerSession::input_ended`] was called on the session.
+    #[must_use]
+    pub fn input_ended_calls(&self) -> u64 {
+        self.ended_calls.load(Ordering::Relaxed)
+    }
+
     /// Whether the session reports that audio from before the release is still unanswered.
     pub fn behind(&self, behind: bool) {
         self.behind.store(behind, Ordering::Relaxed);
@@ -670,6 +703,14 @@ impl RecognizerSession for FakeSession {
 
     fn behind(&self) -> bool {
         self.behind.load(Ordering::Relaxed)
+    }
+
+    fn needs_release_silence(&self) -> bool {
+        !self.flushes_on_end.load(Ordering::Relaxed)
+    }
+
+    fn input_ended(&mut self) {
+        self.ended_calls.fetch_add(1, Ordering::Relaxed);
     }
 
     fn language(&self) -> Option<Language> {

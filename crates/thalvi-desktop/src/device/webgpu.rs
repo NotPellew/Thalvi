@@ -271,6 +271,7 @@ pub fn open(builder: SessionBuilder, path: &Path) -> Result<(Session, Nodes), Fa
     };
     let start = || -> ort::Result<Session> {
         builder
+            .with_config_entry("session.intra_op.allow_spinning", "0")?
             .with_config_entry("session.record_ep_graph_assignment_info", "1")?
             .with_execution_providers([WebGPU::default().build().error_on_failure()])?
             .commit_from_file(path)

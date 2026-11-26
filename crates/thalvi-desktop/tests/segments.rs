@@ -128,3 +128,20 @@ fn words_the_look_ahead_promised_but_never_came_delay_the_final_only_briefly() {
     let events = run(&[(0, 0)], true, 20);
     assert_eq!(finals(&events), [(10, "one")]);
 }
+
+#[test]
+fn end_input_flushes_words_held_in_the_look_ahead_without_trailing_silence() {
+    let pieces: Arc<Vec<String>> = Arc::new(vec!["\u{2581}one".to_owned()]);
+    let fake = Fake {
+        spoken: vec![(0, 0)],
+        ghost: false,
+        frame: 0,
+    };
+    let mut segments = Segments::new(fake, pieces, ENDPOINT, LOOKAHEAD);
+    let frame: Frame = [0; FRAME_SAMPLES];
+    assert_eq!(segments.accept(&frame).expect("frame is accepted"), []);
+    assert_eq!(
+        segments.end_input().expect("end flushes look-ahead"),
+        [RecognizerEvent::Final("one".to_owned())]
+    );
+}

@@ -1822,8 +1822,10 @@ where
                     route: held.route(),
                 });
             } else {
-                if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
-                    return Some(stop.into());
+                if live.session.needs_release_silence() {
+                    if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                        return Some(stop.into());
+                    }
                 }
                 live.session.input_ended();
             }
@@ -2096,8 +2098,10 @@ where
                 route: held.route(),
             });
         } else {
-            if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
-                return Some(Done::from(stop));
+            if live.session.needs_release_silence() {
+                if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                    return Some(Done::from(stop));
+                }
             }
             live.session.input_ended();
         }

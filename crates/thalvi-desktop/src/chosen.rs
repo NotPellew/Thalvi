@@ -224,6 +224,15 @@ impl RecognizerSession for ChosenSession {
         }
     }
 
+    fn needs_release_silence(&self) -> bool {
+        match self {
+            Self::Realtime(session) => session.needs_release_silence(),
+            Self::OpenAi(session) => session.needs_release_silence(),
+            Self::Local(session, _) => session.needs_release_silence(),
+            Self::Whisper(session, _) => session.needs_release_silence(),
+        }
+    }
+
     fn hold_released(&mut self) {
         match self {
             Self::Realtime(session) => session.hold_released(),

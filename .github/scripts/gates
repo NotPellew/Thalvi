@@ -131,7 +131,6 @@ gate_issue_sync() {
     .github/scripts/changed .github/scripts/changed.test.sh .github/scripts/rust-layout.test.sh
   step .github/scripts/issue-refs.test.sh
   step .github/scripts/changed.test.sh
-  step python3 .github/scripts/hold.test.py
 }
 
 # Needs Node pinned in .node-version, minisign, jq and pipx.

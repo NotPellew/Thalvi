@@ -7203,6 +7203,28 @@ async fn a_released_buffered_hold_waits_as_long_as_its_recognizer_needs_for_the_
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_release_skips_silence_when_the_session_flushes_on_end() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            rig.server.flushes_on_end();
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.feed_until(500, Kind::Voice).await;
+            let before = rig.sent();
+            rig.release(700).await;
+            assert_eq!(
+                rig.sent(),
+                before,
+                "no synthetic silence frames reach a session that flushes on input_ended"
+            );
+            assert_eq!(rig.server.input_ended_calls(), 1);
+            task.abort();
+            let _ = task.await;
+        })
+        .await;
+}
+#[tokio::test(start_paused = true)]
 async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
     LocalSet::new()
         .run_until(async {
