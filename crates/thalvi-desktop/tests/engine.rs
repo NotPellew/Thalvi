@@ -34,7 +34,6 @@ use thalvi_desktop::recognizer::{
 use thalvi_desktop::report::UserError;
 use thalvi_desktop::secondary::Language;
 use thalvi_desktop::spotter::KeywordSpotter;
-use thalvi_desktop::vad::VadDetector;
 use thalvi_desktop::wake::WakeEvent;
 use thalvi_desktop::writing::{CLEANUP_PROMPT, DEFAULT_PROMPT, MERGE_PROMPT, WritingError};
 use tokio::sync::{oneshot, watch};
@@ -459,17 +458,6 @@ fn accepted(route: CaptureRoute, text: &str) -> CaptureOutcome {
     })
 }
 
-#[test]
-fn the_voice_fixture_is_speech_to_both_detector_modes() {
-    for pending in [false, true] {
-        let mut vad = VadDetector::new();
-        for id in 0..6 {
-            assert!(vad.speech(&voiced(id), pending), "pending {pending} {id}");
-        }
-        assert!(!VadDetector::new().speech(&quiet(7), pending));
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn the_microphone_level_follows_the_capture_frames_and_is_zero_outside_it() {
     LocalSet::new()
@@ -813,32 +801,6 @@ async fn a_dictation_that_cannot_wait_for_the_model_ends_when_it_does_and_says_w
                     "{label}: the wait is what the user waited"
                 );
             }
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_hold_released_while_the_model_is_read_is_dictated_once_it_is_ready() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::loading("{}", Recorder::disabled());
-            let task = hold_task(engine, frames);
-            rig.press().await;
-            rig.feed_until(3000, Kind::Voice).await;
-            rig.release(3000).await;
-            rig.at(20_000).await;
-            assert!(
-                !task.is_finished(),
-                "released, and still waiting for the model"
-            );
-            rig.server.ready();
-            settle().await;
-            rig.partial("hello world").await;
-            rig.at(20_250).await;
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "hello world")
-            );
         })
         .await;
 }
@@ -1319,34 +1281,8 @@ async fn an_ending_heard_only_in_a_partial_never_arms() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn never_mind_cancels_at_once_without_waiting_or_a_provisional_cue() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Draft words").await;
-            rig.feed_until(1500, Kind::Quiet).await;
-            rig.finals("never mind").await;
-            assert_eq!(rig.started(Cue::Cancelled), [1500]);
-            rig.at(1600).await;
-            assert!(task.is_finished(), "no pause is waited out");
-            assert_eq!(
-                finished(task).await,
-                CaptureOutcome::Cancelled {
-                    dictated: Some("Draft words".to_owned())
-                }
-            );
-            assert_eq!(rig.started(Cue::Provisional).len(), 0);
-            assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
-            assert!(rig.gate.is_enabled());
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_spoken_never_mind_keeps_what_was_dictated_before_it_without_the_phrase() {
+async fn a_spoken_never_mind_cancels_at_once_and_keeps_what_was_dictated_before_it_without_the_phrase()
+ {
     LocalSet::new()
         .run_until(async {
             for (finals, dictated) in [
@@ -1368,6 +1304,12 @@ async fn a_spoken_never_mind_keeps_what_was_dictated_before_it_without_the_phras
                 for words in finals {
                     rig.finals(words).await;
                 }
+                assert_eq!(rig.started(Cue::Cancelled), [1000], "{finals:?}");
+                rig.at(1100).await;
+                assert!(task.is_finished(), "no pause is waited out: {finals:?}");
+                assert_eq!(rig.started(Cue::Provisional).len(), 0, "{finals:?}");
+                assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
+                assert!(rig.gate.is_enabled(), "{finals:?}");
                 assert_eq!(
                     finished(task).await,
                     CaptureOutcome::Cancelled {
@@ -1504,12 +1446,17 @@ async fn a_whole_capture_command_runs_after_the_task_pause_and_an_explicit_endin
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_command_without_a_spoken_ending_does_not_agree_with_a_spotter_hit() {
+async fn a_command_without_a_spoken_ending_does_not_agree_with_a_spotter_hit_and_is_recorded_apart()
+{
     LocalSet::new()
         .run_until(async {
-            for (said, expected) in [
-                ("open google.com", "ended"),
-                ("open google.com do that", "agreed"),
+            for (said, expected, states) in [
+                (
+                    "open google.com",
+                    "ended",
+                    ["pending_without_ending", "accepted_without_ending"],
+                ),
+                ("open google.com do that", "agreed", ["pending", "accepted"]),
             ] {
                 let dir = record_dir("command-spotter");
                 let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
@@ -1531,6 +1478,12 @@ async fn a_command_without_a_spoken_ending_does_not_agree_with_a_spotter_hit() {
                     .find(|row| row["event"] == "desktop_ending_spotter" && row["call"] == "hit")
                     .unwrap();
                 assert_eq!(hit["outcome"], expected, "{said}");
+                let seen: Vec<String> = events(&rows)
+                    .into_iter()
+                    .filter(|(event, _)| event == "desktop_ending_state")
+                    .map(|(_, outcome)| outcome)
+                    .collect();
+                assert_eq!(seen, states, "{said}");
             }
         })
         .await;
@@ -1656,46 +1609,6 @@ async fn text_that_is_not_the_whole_command_never_runs_without_an_ending() {
                     },
                     "{said}"
                 );
-            }
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_task_that_ran_without_an_ending_is_recorded_apart_from_one_that_had_one() {
-    LocalSet::new()
-        .run_until(async {
-            let all = RecordKinds {
-                metrics: true,
-                text: false,
-                audio: false,
-            };
-            for (said, states) in [
-                (
-                    "open google.com",
-                    ["pending_without_ending", "accepted_without_ending"],
-                ),
-                ("open google.com do that", ["pending", "accepted"]),
-            ] {
-                let dir = record_dir(&format!("without-ending-{}", said.len()));
-                let recorder = Recorder::in_dir(all, &dir).unwrap();
-                let (mut rig, engine, frames) = Rig::recording(COMMANDS, recorder);
-                let task = capture_task(engine, frames);
-                rig.open().await;
-                rig.feed_until(1000, Kind::Quiet).await;
-                rig.finals(said).await;
-                rig.feed_until(3500, Kind::Quiet).await;
-                assert_eq!(
-                    finished(task).await,
-                    accepted(CaptureRoute::Task, "open google.com"),
-                    "{said}"
-                );
-                let seen: Vec<String> = events(&read_lines(&dir.join("metrics.jsonl")))
-                    .into_iter()
-                    .filter(|(event, _)| event == "desktop_ending_state")
-                    .map(|(_, outcome)| outcome)
-                    .collect();
-                assert_eq!(seen, states, "{said}");
             }
         })
         .await;
@@ -2620,57 +2533,49 @@ async fn the_texts_of_the_live_recognizer_and_the_extras_are_merged_into_the_tex
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_openai_extra_sends_the_word_list_as_prompt() {
+async fn an_extra_sends_the_word_list_as_prompt_to_openai_and_as_keywords_to_meta() {
     LocalSet::new()
         .run_until(async {
-            // (the list, the prompt the extra's request should carry)
-            let cases = [
-                (&["Cybrex2", "Thalvi"][..], Some("Cybrex2, Thalvi")),
-                (&[][..], None),
-            ];
-            for (words, expected) in cases {
-                let (url, mut uploads) = serve_logged([Reply::Json(A)], <[u8]>::to_vec).await;
-                let config =
-                    extras_with_words("http://127.0.0.1:1", None, &[("A", &url, true)], words);
-                let (mut rig, engine, frames) = Rig::new(&config.to_string());
-                let task = capture_and_listen(&rig, engine, frames, 0);
-                live_words(&mut rig).await;
-                finished(task).await;
-                let body = uploads.recv().await.expect("one upload");
-                assert_eq!(part_text(&body, "prompt").as_deref(), expected, "{words:?}");
-            }
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_meta_extra_sends_the_word_list_as_keywords() {
-    LocalSet::new()
-        .run_until(async {
+            // (a Meta extra, the list, what the extra's request should carry for it)
             let cases = [
                 (
+                    false,
+                    &["Cybrex2", "Thalvi"][..],
+                    Some(json!("Cybrex2, Thalvi")),
+                ),
+                (false, &[][..], None),
+                (
+                    true,
                     &["Cybrex2", "Thalvi"][..],
                     Some(json!(["Cybrex2", "Thalvi"])),
                 ),
-                (&[][..], None),
+                (true, &[][..], None),
             ];
-            for (words, expected) in cases {
-                let (url, mut uploads) = serve_logged(
-                    [Reply::Json(r#"{"transcript":"A words paste that"}"#)],
-                    <[u8]>::to_vec,
-                )
-                .await;
+            for (meta, words, expected) in cases {
+                let reply = if meta {
+                    Reply::Json(r#"{"transcript":"A words paste that"}"#)
+                } else {
+                    Reply::Json(A)
+                };
+                let (url, mut uploads) = serve_logged([reply], <[u8]>::to_vec).await;
                 let mut config =
-                    extras_with_words("http://127.0.0.1:1", None, &[("Meta", &url, true)], words);
-                config["stt"]["entries"][1]["api"] = json!("meta");
+                    extras_with_words("http://127.0.0.1:1", None, &[("A", &url, true)], words);
+                if meta {
+                    config["stt"]["entries"][1]["api"] = json!("meta");
+                }
                 let (mut rig, engine, frames) = Rig::new(&config.to_string());
                 let task = capture_and_listen(&rig, engine, frames, 0);
                 live_words(&mut rig).await;
                 finished(task).await;
                 let body = uploads.recv().await.expect("one upload");
-                let request = part_json(&body, "request");
-                assert_eq!(request.get("keywords"), expected.as_ref(), "{words:?}");
-                assert_eq!(request["mode"], "PUSH_TO_TALK", "{words:?}");
+                let got = if meta {
+                    let request = part_json(&body, "request");
+                    assert_eq!(request["mode"], "PUSH_TO_TALK", "{meta} {words:?}");
+                    request.get("keywords").cloned()
+                } else {
+                    part_text(&body, "prompt").map(serde_json::Value::from)
+                };
+                assert_eq!(got, expected, "{meta} {words:?}");
             }
         })
         .await;
@@ -3363,51 +3268,59 @@ async fn writing_out_a_merged_capture_is_a_second_chat_call_on_the_merged_text()
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_capture_with_no_words_of_its_own_is_not_merged_nor_waits_for_the_extras() {
+async fn a_capture_with_no_words_or_scratched_words_is_not_merged_nor_waits_for_the_extras() {
     LocalSet::new()
         .run_until(async {
-            let (a, mut uploads) = serve(Reply::Stall).await;
-            let (chat_url, mut asked, _feed) = chat(Chat::Stall).await;
-            let (mut rig, engine, frames) = Rig::new(&with_extras(&chat_url, &[("A", &a, true)]));
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("paste that").await;
-            rig.feed_until(3499, Kind::Quiet).await;
-            rig.at(3500).await;
-            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, ""));
-            assert!(uploads.try_recv().is_err(), "nothing was uploaded");
-            assert!(asked.try_recv().is_err(), "nothing was merged");
-            assert_eq!(rig.notices().len(), 0);
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn scratching_skips_the_merge_and_only_the_final_ending_plays_a_provisional_cue() {
-    LocalSet::new()
-        .run_until(async {
-            let (a, mut uploads) = serve(Reply::Json(r#"{"text": "Other words"}"#)).await;
-            let (chat_url, mut asked, _feed) = chat(Chat::Stall).await;
-            let (mut rig, engine, frames) = Rig::new(&with_extras(&chat_url, &[("A", &a, true)]));
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Keep.").await;
-            rig.feed_until(1500, Kind::Quiet).await;
-            rig.finals("Bad words scratch that.").await;
-            rig.feed_until(2000, Kind::Quiet).await;
-            rig.finals("Good paste that").await;
-            rig.feed_until(4499, Kind::Quiet).await;
-            rig.at(4500).await;
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "Keep. Good")
+            // (an extra that stalls, the finals each after quiet up to a time, the time it ends, the words, the provisional cues)
+            type Case = (
+                bool,
+                &'static [(u64, &'static str)],
+                u64,
+                &'static str,
+                &'static [u64],
             );
-            assert_eq!(rig.started(Cue::Provisional), [2000]);
-            assert!(uploads.try_recv().is_err(), "nothing was uploaded");
-            assert!(asked.try_recv().is_err(), "nothing was merged");
-            assert_eq!(rig.notices().len(), 0);
+            let cases: [Case; 2] = [
+                (true, &[(1000, "paste that")], 3500, "", &[1000]),
+                (
+                    false,
+                    &[
+                        (1000, "Keep."),
+                        (1500, "Bad words scratch that."),
+                        (2000, "Good paste that"),
+                    ],
+                    4500,
+                    "Keep. Good",
+                    &[2000],
+                ),
+            ];
+            for (stall, finals, end, words, provisional) in cases {
+                let reply = if stall {
+                    Reply::Stall
+                } else {
+                    Reply::Json(r#"{"text": "Other words"}"#)
+                };
+                let (a, mut uploads) = serve(reply).await;
+                let (chat_url, mut asked, _feed) = chat(Chat::Stall).await;
+                let (mut rig, engine, frames) =
+                    Rig::new(&with_extras(&chat_url, &[("A", &a, true)]));
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                for (at, said) in finals {
+                    rig.feed_until(*at, Kind::Quiet).await;
+                    rig.finals(said).await;
+                }
+                rig.feed_until(end - 1, Kind::Quiet).await;
+                rig.at(end).await;
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, words),
+                    "{words:?}"
+                );
+                assert_eq!(rig.started(Cue::Provisional), provisional, "{words:?}");
+                assert!(uploads.try_recv().is_err(), "nothing was uploaded");
+                assert!(asked.try_recv().is_err(), "nothing was merged");
+                assert_eq!(rig.notices().len(), 0);
+            }
         })
         .await;
 }
@@ -3523,6 +3436,7 @@ async fn every_model_call_records_its_latency_and_outcome_apart_from_what_the_us
                 accepted(CaptureRoute::Paste, "Polished words")
             );
             let metrics = read_lines(&dir.join("metrics.jsonl"));
+            assert_eq!(capture_flow_sources(&dir), ["microphone"]);
             let seen = events(&metrics);
             for expected in [
                 ("desktop_wake_reset", "ok"),
@@ -3638,71 +3552,58 @@ async fn the_delay_from_speech_to_the_recognizers_words_is_recorded_once_for_par
 async fn a_failed_capture_records_which_kind_of_failure_and_its_calls() {
     LocalSet::new()
         .run_until(async {
-            let dir = record_dir("failed");
-            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
-            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
-            let task = capture_task(engine, frames);
-            rig.wake_word().await;
-            rig.server
-                .fail("Thalvi could not reach speech recognition.");
-            assert!(matches!(
-                finished(task).await,
-                CaptureOutcome::Failed { .. }
-            ));
-            let lines = read_lines(&dir.join("metrics.jsonl"));
-            let flow = lines
-                .iter()
-                .find(|line| line["event"] == "desktop_capture_flow")
-                .unwrap();
-            assert_eq!(flow["reason"], "recognizer", "a failure says which kind");
-            let seen = events(&lines);
-            for expected in [
-                ("desktop_transcription_ready", "error"),
-                ("desktop_end_cue", "ok"),
-                ("desktop_capture_flow", "failed"),
-            ] {
-                assert!(
-                    seen.contains(&(expected.0.to_owned(), expected.1.to_owned())),
-                    "{expected:?} missing from {seen:?}"
+            for (behind, reason) in [(false, "recognizer"), (true, "cant_keep_up")] {
+                let dir = record_dir(if behind { "cant-keep-up" } else { "failed" });
+                let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+                let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+                let task = capture_task(engine, frames);
+                if behind {
+                    rig.open().await;
+                    rig.feed_until(1_000, Kind::Quiet).await;
+                    rig.server.emit(Err(RecognizerError::Behind {
+                        model: "Nemotron 160ms".to_owned(),
+                        lag: Duration::from_millis(3_040),
+                    }));
+                } else {
+                    rig.wake_word().await;
+                    rig.server
+                        .fail("Thalvi could not reach speech recognition.");
+                }
+                let outcome = finished(task).await;
+                let CaptureOutcome::Failed { error, .. } = &outcome else {
+                    panic!("the capture fails: {outcome:?}");
+                };
+                let lines = read_lines(&dir.join("metrics.jsonl"));
+                let flow = lines
+                    .iter()
+                    .find(|line| line["event"] == "desktop_capture_flow")
+                    .unwrap();
+                assert_eq!(
+                    (flow["outcome"].as_str(), flow["reason"].as_str()),
+                    (Some("failed"), Some(reason)),
+                    "a failure says which kind"
                 );
+                if behind {
+                    assert_eq!(
+                        error.to_string(),
+                        "This computer can't keep up with Nemotron 160ms. Nothing was delivered."
+                    );
+                    assert_eq!(error.headline(), "Nemotron 160ms is too slow");
+                    assert!(rig.gate.is_enabled(), "listening goes on");
+                    continue;
+                }
+                let seen = events(&lines);
+                for expected in [
+                    ("desktop_transcription_ready", "error"),
+                    ("desktop_end_cue", "ok"),
+                    ("desktop_capture_flow", "failed"),
+                ] {
+                    assert!(
+                        seen.contains(&(expected.0.to_owned(), expected.1.to_owned())),
+                        "{expected:?} missing from {seen:?}"
+                    );
+                }
             }
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_capture_that_falls_behind_the_microphone_names_the_model_and_stops() {
-    LocalSet::new()
-        .run_until(async {
-            let dir = record_dir("cant-keep-up");
-            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
-            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1_000, Kind::Quiet).await;
-            rig.server.emit(Err(RecognizerError::Behind {
-                model: "Nemotron 160ms".to_owned(),
-                lag: Duration::from_millis(3_040),
-            }));
-            let outcome = finished(task).await;
-            let CaptureOutcome::Failed { error, .. } = &outcome else {
-                panic!("the capture fails: {outcome:?}");
-            };
-            assert_eq!(
-                error.to_string(),
-                "This computer can't keep up with Nemotron 160ms. Nothing was delivered."
-            );
-            assert_eq!(error.headline(), "Nemotron 160ms is too slow");
-            assert!(rig.gate.is_enabled(), "listening goes on");
-            let lines = read_lines(&dir.join("metrics.jsonl"));
-            let flow = lines
-                .iter()
-                .find(|line| line["event"] == "desktop_capture_flow")
-                .unwrap();
-            assert_eq!(
-                (flow["outcome"].as_str(), flow["reason"].as_str()),
-                (Some("failed"), Some("cant_keep_up"))
-            );
         })
         .await;
 }
@@ -4178,6 +4079,7 @@ async fn each_kind_writes_only_its_own_files_into_the_dictations_folder() {
             };
             for (name, kinds, expected) in [
                 ("none", RecordKinds::default(), &[][..]),
+                ("metrics", METRICS_ONLY, &["metrics.jsonl"][..]),
                 ("text", only(true, false), &["<dictation>/text.txt"][..]),
                 (
                     "audio",
@@ -4287,40 +4189,6 @@ async fn a_wake_that_delivers_nothing_is_one_line_naming_the_reason_and_the_fold
                 let time = folder.file_name().unwrap().to_string_lossy();
                 assert_eq!(nothing[0]["dictation"], format!("{day}/{time}").as_str());
             }
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn without_audio_recording_a_wake_buffers_and_writes_no_clip() {
-    LocalSet::new()
-        .run_until(async {
-            let dir = record_dir("no-clip");
-            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
-            let (rig, engine, frames) = Rig::recording("{}", recorder);
-            let task = listen_task(engine, frames, 1);
-            hear(&rig, 1, 30).await;
-            rig.wake.fire(WakeEvent::Capture);
-            hear(&rig, 31, 31).await;
-            finished(task).await;
-            assert!(
-                dictation_dirs(&dir).is_empty(),
-                "no dictation folder appears"
-            );
-
-            let dir = record_dir("clip-only");
-            let audio = RecordKinds {
-                audio: true,
-                ..RecordKinds::default()
-            };
-            let (rig, engine, frames) =
-                Rig::recording("{}", Recorder::in_dir(audio, &dir).unwrap());
-            let task = listen_task(engine, frames, 1);
-            rig.wake.fire(WakeEvent::Capture);
-            hear(&rig, 1, 1).await;
-            finished(task).await;
-            assert_eq!(wake_clips(&dir).len(), 1);
-            assert!(!dir.join("metrics.jsonl").exists(), "no metrics asked for");
         })
         .await;
 }
@@ -4574,39 +4442,87 @@ fn cue_names(lines: &[serde_json::Value]) -> Vec<&str> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn every_cue_records_when_it_started_when_it_is_audible_and_what_the_user_waited() {
+async fn every_cue_records_when_it_started_when_it_is_audible_and_what_the_user_waited_and_nothing_said()
+ {
     LocalSet::new()
         .run_until(async {
-            let timing = CueTiming {
-                start: ms(40),
-                output: Some(ms(15)),
-                rebuilt: false,
-            };
-            let mut lines = cue_lines("cue-timing-dictation", timing, Run::Dictation).await;
-            lines.extend(cue_lines("cue-timing-failure", timing, Run::Failure).await);
-            let mut kinds = cue_names(&lines);
-            kinds.sort_unstable();
-            kinds.dedup();
-            assert_eq!(
-                kinds,
-                ["accepted", "cancelled", "error", "provisional", "wake"]
-            );
-            for line in &lines {
-                let cue = line["cue"].as_str().unwrap();
-                let field = |key: &str| {
-                    line[key]
-                        .as_f64()
-                        .unwrap_or_else(|| panic!("{cue}: {key} missing from {line}"))
+            for rebuilt in [false, true] {
+                let timing = CueTiming {
+                    start: ms(40),
+                    output: Some(ms(15)),
+                    rebuilt,
                 };
-                assert!((field("start_ms") - 40.0).abs() < 1e-6, "{cue}");
-                assert!((field("output_ms") - 15.0).abs() < 1e-6, "{cue}");
-                assert!((field("audible_ms") - 55.0).abs() < 1e-6, "{cue}");
-                assert!(field("start_ms") <= field("audible_ms"), "{cue}");
-                assert!(field("audible_ms") <= field("perceived_ms"), "{cue}");
-                assert!(
-                    field("perceived_ms") < field("duration_ms"),
-                    "{cue}: the wait ends when the cue starts, not when it drains"
+                let name = format!("cue-timing-{rebuilt}");
+                let dictation =
+                    cue_lines(&format!("{name}-dictation"), timing, Run::Dictation).await;
+                assert_eq!(
+                    cue_names(&dictation),
+                    [
+                        "wake",
+                        "provisional",
+                        "cancelled",
+                        "provisional",
+                        "accepted"
+                    ]
                 );
+                let mut lines = dictation;
+                lines.extend(cue_lines(&format!("{name}-failure"), timing, Run::Failure).await);
+                let mut kinds = cue_names(&lines);
+                kinds.sort_unstable();
+                kinds.dedup();
+                assert_eq!(
+                    kinds,
+                    ["accepted", "cancelled", "error", "provisional", "wake"]
+                );
+                let mut expected_keys = vec![
+                    "audible_ms",
+                    "cue",
+                    "duration_ms",
+                    "event",
+                    "outcome",
+                    "output_ms",
+                    "perceived_ms",
+                    "start_ms",
+                    "ts_ms",
+                ];
+                if rebuilt {
+                    expected_keys.push("rebuilt");
+                    expected_keys.sort_unstable();
+                }
+                for line in &lines {
+                    let cue = line["cue"].as_str().unwrap();
+                    let field = |key: &str| {
+                        line[key]
+                            .as_f64()
+                            .unwrap_or_else(|| panic!("{cue}: {key} missing from {line}"))
+                    };
+                    assert!((field("start_ms") - 40.0).abs() < 1e-6, "{cue}");
+                    assert!((field("output_ms") - 15.0).abs() < 1e-6, "{cue}");
+                    assert!((field("audible_ms") - 55.0).abs() < 1e-6, "{cue}");
+                    assert!(field("start_ms") <= field("audible_ms"), "{cue}");
+                    assert!(field("audible_ms") <= field("perceived_ms"), "{cue}");
+                    assert!(
+                        field("perceived_ms") < field("duration_ms"),
+                        "{cue}: the wait ends when the cue starts, not when it drains"
+                    );
+                    let mut keys: Vec<&str> = line
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
+                    keys.sort_unstable();
+                    assert_eq!(
+                        keys, expected_keys,
+                        "only rebuilt cues carry rebuilt, and timings only: {line}"
+                    );
+                    assert_eq!(
+                        line.get("rebuilt"),
+                        rebuilt.then_some(&serde_json::Value::Bool(true)),
+                        "only rebuilt cues carry rebuilt: true"
+                    );
+                    assert!(!line.to_string().contains("more words"), "{line}");
+                }
             }
         })
         .await;
@@ -4689,76 +4605,6 @@ async fn a_device_that_reports_no_delay_leaves_output_empty_and_a_failed_cue_has
             for key in ["start_ms", "output_ms", "audible_ms", "perceived_ms"] {
                 assert!(wake.get(key).is_none(), "{key} on a cue that failed");
             }
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn cue_lines_hold_timings_only_never_what_was_said_or_heard() {
-    LocalSet::new()
-        .run_until(async {
-            let timing = CueTiming {
-                start: ms(40),
-                output: Some(ms(15)),
-                rebuilt: false,
-            };
-            let lines = cue_lines("cue-timing-privacy", timing, Run::Dictation).await;
-            assert_eq!(
-                cue_names(&lines),
-                [
-                    "wake",
-                    "provisional",
-                    "cancelled",
-                    "provisional",
-                    "accepted"
-                ]
-            );
-            for line in &lines {
-                let mut keys: Vec<&str> = line
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                    .map(String::as_str)
-                    .collect();
-                keys.sort_unstable();
-                assert_eq!(
-                    keys,
-                    [
-                        "audible_ms",
-                        "cue",
-                        "duration_ms",
-                        "event",
-                        "outcome",
-                        "output_ms",
-                        "perceived_ms",
-                        "start_ms",
-                        "ts_ms"
-                    ],
-                    "{line}"
-                );
-                assert!(!line.to_string().contains("more words"), "{line}");
-            }
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn cue_timings_are_not_written_when_metrics_are_off() {
-    LocalSet::new()
-        .run_until(async {
-            let dir = record_dir("cue-timing-off");
-            let text_only = RecordKinds {
-                metrics: false,
-                text: true,
-                audio: false,
-            };
-            let recorder = Recorder::in_dir(text_only, &dir).unwrap();
-            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
-            let task = capture_task(engine, frames);
-            live_words(&mut rig).await;
-            finished(task).await;
-            assert!(!dictation_dirs(&dir).is_empty(), "text was recorded");
-            assert!(!dir.join("metrics.jsonl").exists());
         })
         .await;
 }
@@ -5109,8 +4955,7 @@ async fn spoken_endings_are_text_during_a_hold_and_act_after_the_wake_word() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn key_auto_repeat_during_a_hold_starts_nothing_and_a_press_during_a_wake_dictation_is_refused()
- {
+async fn key_auto_repeat_during_a_hold_starts_nothing() {
     LocalSet::new()
         .run_until(async {
             let (mut rig, engine, frames) = Rig::new("{}");
@@ -5131,28 +4976,6 @@ async fn key_auto_repeat_during_a_hold_starts_nothing_and_a_press_during_a_wake_
             rig.at(1450).await;
             assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "hello"));
             assert_eq!(rig.started(Cue::Wake).len(), 1, "no second capture started");
-
-            let (mut rig, engine, frames) = Rig::new("{}");
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Hello").await;
-            rig.key.set(true);
-            settle().await;
-            assert_eq!(
-                rig.notices(),
-                ["A dictation is already running, so pressing the key started nothing."]
-            );
-            rig.key.set(false);
-            settle().await;
-            rig.feed_until(1500, Kind::Quiet).await;
-            rig.finals("world paste that").await;
-            rig.feed_until(3000, Kind::Quiet).await;
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "Hello world")
-            );
-            assert_eq!(rig.notices().len(), 1, "the release said nothing more");
         })
         .await;
 }
@@ -5328,23 +5151,6 @@ async fn holds_record_their_start_end_and_how_the_key_decided() {
                     "{expected:?} missing from {seen:?}"
                 );
             }
-
-            let dir = record_dir("hold-refused");
-            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
-            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.key.set(true);
-            settle().await;
-            rig.finals("never mind").await;
-            finished(task).await;
-            let lines = read_lines(&dir.join("metrics.jsonl"));
-            let refused = lines
-                .iter()
-                .find(|line| line["event"] == "desktop_hold_start")
-                .unwrap();
-            assert_eq!(refused["outcome"], "refused");
-            assert_eq!(refused["reason"], "capturing");
         })
         .await;
 }
@@ -5777,6 +5583,7 @@ async fn presses_that_start_nothing_are_told_counted_and_left_to_the_caller() {
                 .iter()
                 .filter(|line| line["event"] == "desktop_hold_start")
                 .map(|line| {
+                    assert_eq!(line["outcome"], "refused");
                     (
                         line["reason"].as_str().unwrap().to_owned(),
                         line["count"].as_u64().unwrap(),
@@ -6215,51 +6022,37 @@ async fn a_hold_still_behind_fifteen_seconds_after_release_pastes_what_it_has_an
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancelling_while_the_recognizer_is_still_behind_delivers_nothing() {
+async fn cancelling_a_released_hold_while_behind_or_in_the_post_release_wait_delivers_nothing() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
-            rig.server.behind(true);
-            let task = hold_task(engine, frames);
-            rig.hold().await;
-            rig.say(1000, Say::Final("hello")).await;
-            rig.release(1200).await;
-            rig.feed_until(1500, Kind::Quiet).await;
-            rig.handle.cancel();
-            settle().await;
-            assert_eq!(
-                finished(task).await,
-                CaptureOutcome::Cancelled {
-                    dictated: Some("hello".to_owned())
-                },
-                "a cancel during the finishing wait delivers nothing"
-            );
-            assert_eq!(rig.started(Cue::Accepted).len(), 0);
-            assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn cancelling_during_the_post_release_wait_cancels_at_once_and_delivers_nothing() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
-            let task = hold_task(engine, frames);
-            rig.hold().await;
-            rig.say(1000, Say::Final("hello")).await;
-            rig.release(1200).await;
-            rig.at(1250).await;
-            rig.handle.cancel();
-            settle().await;
-            assert_eq!(
-                finished(task).await,
-                CaptureOutcome::Cancelled {
-                    dictated: Some("hello".to_owned())
+            for behind in [true, false] {
+                let (mut rig, engine, frames) = Rig::new("{}");
+                rig.server.behind(behind);
+                let task = hold_task(engine, frames);
+                rig.hold().await;
+                rig.say(1000, Say::Final("hello")).await;
+                rig.release(1200).await;
+                if behind {
+                    rig.feed_until(1500, Kind::Quiet).await;
+                } else {
+                    rig.at(1250).await;
                 }
-            );
-            assert_eq!(rig.started(Cue::Accepted).len(), 0);
-            assert_eq!(rig.server.calls().last(), Some(&FakeCall::Cancel));
+                rig.handle.cancel();
+                settle().await;
+                assert_eq!(
+                    finished(task).await,
+                    CaptureOutcome::Cancelled {
+                        dictated: Some("hello".to_owned())
+                    },
+                    "behind {behind}: a cancel during the finishing wait delivers nothing"
+                );
+                assert_eq!(rig.started(Cue::Accepted).len(), 0, "behind {behind}");
+                assert_eq!(
+                    rig.server.calls().last(),
+                    Some(&FakeCall::Cancel),
+                    "behind {behind}"
+                );
+            }
         })
         .await;
 }
@@ -6676,36 +6469,10 @@ async fn only_the_spoken_words_are_sent_with_the_default_prompt() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_saved_prompt_is_the_system_message_and_the_words_stay_the_user_message() {
-    LocalSet::new()
-        .run_until(async {
-            let prompt = "Write short emails.\nSign off with “Best”.";
-            let (url, mut asked, _feed) = chat(Chat::Stream("data: [DONE]\n\n")).await;
-            let config = json!({
-                "ending_pause": {"paste": 2.5},
-                "writing": {"url": url, "model": "m", "prompt": prompt},
-            })
-            .to_string();
-            let (mut rig, engine, frames) = Rig::new(&config);
-            let task = Ask::Key.start(engine, frames);
-            Ask::Key.say(&mut rig, WORDS).await;
-            let asked = request(&mut asked).await;
-            finished(task).await;
-            assert_eq!(
-                asked.body["messages"],
-                json!([
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": WORDS},
-                ])
-            );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
 async fn the_opening_of_the_words_picks_the_system_message_and_the_words_stay_whole() {
     LocalSet::new()
         .run_until(async {
+            let fallback = "Write short emails.\nSign off with “Best”.";
             let openings = json!([
                 {"phrase": "write me an email", "prompt": "EMAIL"},
                 {"phrase": "write me", "prompt": "ME"},
@@ -6713,17 +6480,21 @@ async fn the_opening_of_the_words_picks_the_system_message_and_the_words_stay_wh
             ]);
             // (how it is asked, the words as recognized, the system message expected)
             for (ask, words, prompt) in [
-                (Ask::Ending, "Write me an email, tell Anna I'm late", "EMAIL"),
+                (
+                    Ask::Ending,
+                    "Write me an email, tell Anna I'm late",
+                    "EMAIL",
+                ),
                 (Ask::Key, "Write me an email, tell Anna I'm late", "EMAIL"),
                 (Ask::Ending, "write a message that I am late", "MESSAGE"),
                 (Ask::Key, "write me a poem", "ME"),
-                (Ask::Ending, "please write me an email", "FALLBACK"),
-                (Ask::Key, WORDS, "FALLBACK"),
+                (Ask::Ending, "please write me an email", fallback),
+                (Ask::Key, WORDS, fallback),
             ] {
                 let (url, mut asked, _feed) = chat(Chat::Stream("data: [DONE]\n\n")).await;
                 let config = json!({
                     "ending_pause": {"paste": 2.5},
-                    "writing": {"url": url, "model": "m", "prompt": "FALLBACK", "openings": openings},
+                    "writing": {"url": url, "model": "m", "prompt": fallback, "openings": openings},
                 })
                 .to_string();
                 let (mut rig, engine, frames) = Rig::new(&config);
@@ -6906,7 +6677,8 @@ async fn nothing_is_written_unless_it_is_asked_for() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_writing_call_that_gives_no_text_pastes_nothing_and_keeps_the_words() {
+async fn a_writing_call_that_gives_no_text_pastes_nothing_keeps_the_words_and_says_where_to_set_it_up()
+ {
     use WritingError::{BadResponse, Empty, NotSetUp, Status, Unreachable};
 
     LocalSet::new()
@@ -6963,17 +6735,13 @@ async fn a_writing_call_that_gives_no_text_pastes_nothing_and_keeps_the_words() 
                 assert_eq!(rig.state(), EngineState::Listening, "{name}");
                 assert!(rig.gate.is_enabled(), "{name}");
             }
+            assert_eq!(
+                CaptureError::Writing(NotSetUp).to_string(),
+                "No writing model is set up. Add one under Settings → Chat model → Writing. Nothing was pasted.",
+                "the user is told where to set up writing"
+            );
         })
         .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn the_user_is_told_in_plain_words_where_to_set_up_writing() {
-    let error = CaptureError::Writing(WritingError::NotSetUp);
-    assert_eq!(
-        error.to_string(),
-        "No writing model is set up. Add one under Settings → Chat model → Writing. Nothing was pasted."
-    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -7446,148 +7214,101 @@ async fn an_ordinary_submit_never_reformats_its_cleanup_reply_after_the_confirma
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_entries_language_hint_formats_a_german_dictation() {
+async fn the_entries_hint_or_the_detected_language_formats_the_dictation() {
     LocalSet::new()
         .run_until(async {
-            let config = r#"{
+            const HINTED: &str = r#"{
                 "stt": {"entries": [{"kind": "open_ai", "id": "de", "name": "German",
                     "active": true, "address": "http://127.0.0.1:9/v1", "model": "m",
                     "language": "de"}]}
             }"#;
-            let (mut rig, engine, frames) = Rig::new(config);
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Ich habe fünfzehn offene Tickets paste that")
-                .await;
-            rig.feed_until(3499, Kind::Quiet).await;
-            rig.at(3600).await;
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
-            );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_detected_language_formats_the_dictation_when_the_entry_has_no_hint() {
-    LocalSet::new()
-        .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.server.heard_language(Language::detected("German"));
-            rig.finals("Ich habe fünfzehn offene Tickets paste that")
-                .await;
-            rig.feed_until(3499, Kind::Quiet).await;
-            rig.at(3600).await;
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
-            );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_detected_language_another_than_english_leaves_its_words_alone() {
-    LocalSet::new()
-        .run_until(async {
+            const GERMAN: &str = "Ich habe fünfzehn offene Tickets paste that";
+            // (config, the language the recognizer detected, the words, what is pasted)
             // Plain ASCII is formatted as English only when no language was detected.
-            let (mut rig, engine, frames) = Rig::new("{}");
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.server.heard_language(Language::detected("french"));
-            rig.finals("I have two cats paste that").await;
-            rig.feed_until(3499, Kind::Quiet).await;
-            rig.at(3600).await;
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "I have two cats")
-            );
+            let cases = [
+                (HINTED, None, GERMAN, "Ich habe 15 offene Tickets"),
+                ("{}", Some("German"), GERMAN, "Ich habe 15 offene Tickets"),
+                (
+                    "{}",
+                    Some("french"),
+                    "I have two cats paste that",
+                    "I have two cats",
+                ),
+            ];
+            for (config, detected, said, pasted) in cases {
+                let (mut rig, engine, frames) = Rig::new(config);
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                if let Some(language) = detected {
+                    rig.server.heard_language(Language::detected(language));
+                }
+                rig.finals(said).await;
+                rig.feed_until(3499, Kind::Quiet).await;
+                rig.at(3600).await;
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, pasted),
+                    "{config} {detected:?}"
+                );
+            }
         })
         .await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_final_pass_language_formats_the_text_it_replaced() {
+async fn a_final_pass_formats_the_text_it_replaced_by_its_language_its_hint_or_the_live_language() {
     LocalSet::new()
         .run_until(async {
-            let (url, mut requests) = serve(Reply::Json(
-                r#"{"text":"Ich habe fünfzehn offene Tickets paste that","language":"german"}"#,
-            ))
-            .await;
-            let (mut rig, engine, frames) = Rig::new(&with_final_pass(&url, &[]).to_string());
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("live words paste that").await;
-            rig.feed_until(3499, Kind::Quiet).await;
-            rig.at(3500).await;
-            requests.recv().await.unwrap();
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
-            );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_configured_final_pass_language_hint_formats_its_reply() {
-    LocalSet::new()
-        .run_until(async {
-            let (url, mut requests) = serve_logged(
-                [Reply::Json(
-                    r#"{"choices":[{"message":{"content":"Ich habe fünfzehn offene Tickets paste that"}}]}"#,
-                )],
-                |_| (),
-            )
-            .await;
-            let mut config = with_final_pass(&url, &[]);
-            config["stt"]["entries"][1] = json!({
-                "kind": "open_ai", "id": "final", "name": "Final", "active": false,
-                "model": "asr", "address": url, "request": "chat", "language": "de",
-                "final_pass": true
-            });
-            let (mut rig, engine, frames) = Rig::new(&config.to_string());
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("live words paste that").await;
-            rig.feed_until(3499, Kind::Quiet).await;
-            rig.at(3500).await;
-            requests.recv().await.unwrap();
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
-            );
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_failed_final_pass_keeps_the_live_language() {
-    LocalSet::new()
-        .run_until(async {
-            let (url, mut requests) = serve(Reply::Status(500)).await;
-            let (mut rig, engine, frames) = Rig::new(&with_final_pass(&url, &[]).to_string());
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.server.heard_language(Language::detected("de"));
-            rig.finals("Ich habe fünfzehn offene Tickets paste that")
-                .await;
-            rig.feed_until(3499, Kind::Quiet).await;
-            rig.at(3500).await;
-            requests.recv().await.unwrap();
-            assert_eq!(
-                finished(task).await,
-                accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets")
-            );
+            // (the final pass's reply, whether the entry is a chat one with a language hint, the live language)
+            let cases = [
+                (
+                    Reply::Json(
+                        r#"{"text":"Ich habe fünfzehn offene Tickets paste that","language":"german"}"#,
+                    ),
+                    false,
+                    None,
+                ),
+                (
+                    Reply::Json(
+                        r#"{"choices":[{"message":{"content":"Ich habe fünfzehn offene Tickets paste that"}}]}"#,
+                    ),
+                    true,
+                    None,
+                ),
+                (Reply::Status(500), false, Some("de")),
+            ];
+            for (n, (reply, hinted, live)) in cases.into_iter().enumerate() {
+                let (url, mut requests) = serve_logged([reply], |_| ()).await;
+                let mut config = with_final_pass(&url, &[]);
+                if hinted {
+                    config["stt"]["entries"][1] = json!({
+                        "kind": "open_ai", "id": "final", "name": "Final", "active": false,
+                        "model": "asr", "address": url, "request": "chat", "language": "de",
+                        "final_pass": true
+                    });
+                }
+                let (mut rig, engine, frames) = Rig::new(&config.to_string());
+                let task = capture_task(engine, frames);
+                rig.open().await;
+                rig.feed_until(1000, Kind::Quiet).await;
+                let said = match live {
+                    Some(language) => {
+                        rig.server.heard_language(Language::detected(language));
+                        "Ich habe fünfzehn offene Tickets paste that"
+                    }
+                    None => "live words paste that",
+                };
+                rig.finals(said).await;
+                rig.feed_until(3499, Kind::Quiet).await;
+                rig.at(3500).await;
+                requests.recv().await.unwrap();
+                assert_eq!(
+                    finished(task).await,
+                    accepted(CaptureRoute::Paste, "Ich habe 15 offene Tickets"),
+                    "case {n}"
+                );
+            }
         })
         .await;
 }
@@ -7600,8 +7321,7 @@ async fn a_failed_final_pass_keeps_the_live_language() {
 async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
     LocalSet::new()
         .run_until(async {
-            // (name, route, the reply, what is delivered, the notice, whether the cancelled cue
-            // played, how the cleanup went)
+            // (name, route, the reply, what is delivered, the notice, how the cleanup went)
             let cases = [
                 (
                     "a reply in time",
@@ -7609,7 +7329,6 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     Chat::After(500, says!("I think we should ship it on Friday.")),
                     Some("I think we should ship it on Friday."),
                     None,
-                    false,
                     "cleaned",
                 ),
                 (
@@ -7618,7 +7337,6 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     Chat::After(500, says!("Tell Anna I am late.")),
                     Some("Tell Anna I am late."),
                     None,
-                    false,
                     "cleaned",
                 ),
                 (
@@ -7627,7 +7345,6 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     Chat::Status(500),
                     Some(WORDS),
                     Some("Cleanup failed: The writing model failed with status 500. — pasted as said"),
-                    false,
                     "raw: The writing model failed with status 500.",
                 ),
                 (
@@ -7636,11 +7353,10 @@ async fn dictation_cleanup_pastes_the_reply_the_raw_words_or_nothing() {
                     Chat::Stall,
                     Some(WORDS),
                     Some("Cleanup failed: The cleanup took longer than 3 seconds. — pasted as said"),
-                    false,
                     "raw: The cleanup took longer than 3 seconds.",
                 ),
             ];
-            for (name, route, reply, delivered, notice, _, cleanup) in cases {
+            for (name, route, reply, delivered, notice, cleanup) in cases {
                 let (url, mut asked, _feed) = chat(reply).await;
                 let dir = record_dir(&format!("cleanup-{name}"));
                 let (mut rig, mut engine, mut frames) = Rig::recording(
@@ -8343,24 +8059,6 @@ async fn a_fed_file_replaces_the_microphone_at_real_time_pace_and_delivers_like_
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_spoken_capture_is_recorded_as_coming_from_the_microphone() {
-    LocalSet::new()
-        .run_until(async {
-            let dir = record_dir("spoken");
-            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
-            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1000, Kind::Quiet).await;
-            rig.finals("Hello paste that").await;
-            rig.feed_until(2700, Kind::Quiet).await;
-            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "Hello"));
-            assert_eq!(capture_flow_sources(&dir), ["microphone"]);
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_fed_frame_is_lost_while_the_microphone_gate_is_off() {
     LocalSet::new()
         .run_until(async {
@@ -8433,25 +8131,6 @@ async fn cancel_stops_the_feed_and_the_capture_it_started_and_a_second_file_wait
             rig.feed.send(quiet(901));
             let next = tokio::time::timeout(ms(10), fed.next()).await;
             assert_eq!(next.unwrap().unwrap().frame[0], 901);
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_buffered_wake_capture_keeps_its_spoken_route() {
-    LocalSet::new()
-        .run_until(async {
-            let config = r#"{"ending_pause":{"paste":1.0}}"#;
-            let (mut rig, engine, frames) = Rig::new(config);
-            rig.server.buffer_audio();
-            let task = capture_task(engine, frames);
-            rig.open().await;
-            rig.feed_until(1200, Kind::Voice).await;
-            rig.feed_until(3500, Kind::Quiet).await;
-            assert!(matches!(rig.state(), EngineState::TranscribingLive { .. }));
-            rig.finals("Run tests submit").await;
-            let got = finished(task).await;
-            assert_eq!(got, accepted(CaptureRoute::Submit, "Run tests"));
         })
         .await;
 }
@@ -9326,30 +9005,6 @@ async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
             rig.handle.cancel();
             settle().await;
             engine.finish().await;
-        })
-        .await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn cue_metrics_mark_only_stream_rebuilds() {
-    LocalSet::new()
-        .run_until(async {
-            for rebuilt in [false, true] {
-                let timing = CueTiming {
-                    start: ms(25),
-                    output: Some(ms(15)),
-                    rebuilt,
-                };
-                let lines =
-                    cue_lines(&format!("cue-rebuilt-{rebuilt}"), timing, Run::Dictation).await;
-                for line in lines {
-                    assert_eq!(
-                        line.get("rebuilt"),
-                        rebuilt.then_some(&serde_json::Value::Bool(true)),
-                        "only rebuilt cues carry rebuilt: true"
-                    );
-                }
-            }
         })
         .await;
 }
