@@ -1003,59 +1003,51 @@ mod tests {
     }
 
     #[test]
-    fn a_state_machine_boosts_phrases_and_recognises_them_through_shared_prefixes() {
+    fn a_state_machine_boosts_phrases_and_recognises_them_through_shared_and_overlapping_prefixes()
+    {
         // Tokens 1 2 3 and 1 2 4 share a prefix; 9 is a phrase by itself.
-        let graph = Graph::new(&[vec![1, 2, 3], vec![1, 2, 4], vec![9]]);
-        let walk = |tokens: &[usize]| {
-            let mut state = ROOT;
-            let mut total = 0.0;
-            for &token in tokens {
-                let (score, next) = graph.step(state, token);
-                total += score;
-                state = next;
-            }
-            (total, graph.matched(state))
-        };
-        // Each token earns the boost, and finishing a phrase also pays out what it earned.
-        assert_eq!(walk(&[1, 2, 3]), (6.0, Some((0, 3))));
-        assert_eq!(walk(&[1, 2, 4]), (6.0, Some((1, 3))));
-        assert_eq!(walk(&[9]), (2.0, Some((2, 1))));
-        // A wrong turn takes back the boost the prefix earned, and the phrase is not matched.
-        assert_eq!(walk(&[1, 2, 7]), (0.0, None));
-        // A phrase that starts inside a failed one is still found.
-        assert_eq!(walk(&[1, 1, 2, 3]), (6.0, Some((0, 3))));
-    }
-
-    #[test]
-    fn overlapping_phrases_keep_their_suffix_matches_and_scores_after_a_wrong_turn() {
+        let shared = || vec![vec![1, 2, 3], vec![1, 2, 4], vec![9]];
         let cases = [
-            (vec![vec![1, 2, 3], vec![2, 4]], vec![1, 2, 4], 4.0, (1, 2)),
+            // Each token earns the boost, and finishing a phrase also pays out what it earned.
+            (shared(), vec![1, 2, 3], 6.0, Some((0, 3))),
+            (shared(), vec![1, 2, 4], 6.0, Some((1, 3))),
+            (shared(), vec![9], 2.0, Some((2, 1))),
+            // A wrong turn takes back the boost the prefix earned, and the phrase is not matched.
+            (shared(), vec![1, 2, 7], 0.0, None),
+            // A phrase that starts inside a failed one is still found.
+            (shared(), vec![1, 1, 2, 3], 6.0, Some((0, 3))),
+            (
+                vec![vec![1, 2, 3], vec![2, 4]],
+                vec![1, 2, 4],
+                4.0,
+                Some((1, 2)),
+            ),
             (
                 vec![vec![1, 2, 3, 4], vec![2, 3]],
                 vec![1, 2, 3],
                 5.0,
-                (1, 2),
+                Some((1, 2)),
             ),
             (
                 vec![vec![1, 2, 3, 5], vec![2, 3, 4], vec![3, 5]],
                 vec![1, 2, 3, 5],
                 10.0,
-                (0, 4),
+                Some((0, 4)),
             ),
         ];
         for (phrases, tokens, expected_score, expected_match) in cases {
             let graph = Graph::new(&phrases);
             let mut state = ROOT;
             let mut score = 0.0;
-            for token in tokens {
+            for &token in &tokens {
                 let (gained, next) = graph.step(state, token);
                 score += gained;
                 state = next;
             }
             assert_eq!(
                 (score, graph.matched(state)),
-                (expected_score, Some(expected_match)),
-                "{phrases:?}"
+                (expected_score, expected_match),
+                "{phrases:?} {tokens:?}"
             );
         }
     }

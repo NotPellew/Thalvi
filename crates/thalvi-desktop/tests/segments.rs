@@ -103,28 +103,38 @@ fn finals(events: &[(usize, RecognizerEvent)]) -> Vec<(usize, &str)> {
 }
 
 #[test]
-fn silence_ends_a_stretch_as_soon_as_the_model_has_nothing_more_for_it() {
-    // "one" is emitted at frame 3; its own frame and three blanks make four at frame 6.
-    let events = run(&[(0, 0)], false, 12);
-    assert_eq!(finals(&events), [(6, "one")]);
-}
-
-#[test]
-fn a_word_spoken_as_the_endpoint_falls_is_in_the_final_not_lost_or_cut_off() {
-    // "two" is spoken at frame 6, so it is still in the model's look-ahead when the silence after
-    // "one" (emitted at frame 3) reaches the endpoint at frame 6; "two" arrives at frame 9.
-    let events = run(&[(0, 0), (6, 1)], false, 20);
-    assert_eq!(finals(&events), [(12, "one two")]);
-}
-
-#[test]
-fn words_after_a_long_pause_start_the_next_stretch() {
-    let events = run(&[(0, 0), (14, 1)], false, 30);
-    assert_eq!(finals(&events), [(6, "one"), (20, "two")]);
-}
-
-#[test]
-fn words_the_look_ahead_promised_but_never_came_delay_the_final_only_briefly() {
-    let events = run(&[(0, 0)], true, 20);
-    assert_eq!(finals(&events), [(10, "one")]);
+fn a_stretch_ends_in_a_final_with_the_words_the_look_ahead_still_held() {
+    for (case, spoken, ghost, frames, expected) in [
+        (
+            "silence ends a stretch as soon as the model has nothing more for it: \"one\" is emitted at frame 3, and its own frame and three blanks make four at frame 6",
+            &[(0, 0)][..],
+            false,
+            12,
+            &[(6, "one")][..],
+        ),
+        (
+            "a word spoken as the endpoint falls is in the final: \"two\" is spoken at frame 6, still in the look-ahead when the endpoint is reached, and arrives at frame 9",
+            &[(0, 0), (6, 1)],
+            false,
+            20,
+            &[(12, "one two")],
+        ),
+        (
+            "words after a long pause start the next stretch",
+            &[(0, 0), (14, 1)],
+            false,
+            30,
+            &[(6, "one"), (20, "two")],
+        ),
+        (
+            "words the look-ahead promised but never came delay the final only briefly",
+            &[(0, 0)],
+            true,
+            20,
+            &[(10, "one")],
+        ),
+    ] {
+        let events = run(spoken, ghost, frames);
+        assert_eq!(finals(&events), expected, "{case}");
+    }
 }

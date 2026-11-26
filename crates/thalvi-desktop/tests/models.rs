@@ -152,13 +152,17 @@ async fn a_download_names_the_client_for_hosts_that_refuse_anonymous_ones() {
 #[tokio::test]
 async fn a_download_that_is_not_the_pinned_file_is_deleted_and_refused() {
     let (address, _server) = serve().await;
-    for served in ["other.onnx", "endless.onnx"] {
-        let dir = dir(&format!("mismatch-{served}"));
+    for (served, kind, file_name, noun) in [
+        ("other.onnx", ModelKind::Wake, "good.onnx", "wake"),
+        ("endless.onnx", ModelKind::Wake, "good.onnx", "wake"),
+        ("other.onnx", ModelKind::Speech, "speech.onnx", "speech"),
+    ] {
+        let dir = dir(&format!("mismatch-{noun}-{served}"));
         let url = format!("http://{address}/{served}");
         let sha = sha256(GOOD);
         let asset = Asset {
-            kind: ModelKind::Wake,
-            file_name: "good.onnx",
+            kind,
+            file_name,
             url: &url,
             size: GOOD.len() as u64,
             sha256: &sha,
@@ -174,7 +178,10 @@ async fn a_download_that_is_not_the_pinned_file_is_deleted_and_refused() {
         assert!(matches!(error, ModelError::Checksum { .. }), "{served}");
         assert_eq!(
             error.to_string(),
-            "The downloaded wake model good.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+            format!(
+                "The downloaded {noun} model {file_name} did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+            ),
+            "{served}"
         );
         assert_eq!(leftovers(&dir), Vec::<String>::new(), "{served}");
     }
@@ -288,23 +295,6 @@ async fn a_download_that_stalls_times_out_instead_of_hanging() {
 }
 
 #[tokio::test]
-async fn the_kind_of_a_failure_after_a_damaged_file_was_removed_is_the_failure_itself() {
-    let (address, _server) = serve().await;
-    let dir = dir("damaged-kind");
-    fs::create_dir_all(&dir).expect("dir");
-    fs::write(dir.join("good.onnx"), b"half a mod").expect("damaged file");
-    let url = format!("http://{address}/gone.onnx");
-    let sha = sha256(GOOD);
-
-    let error = ModelStore::in_dir(&dir)
-        .fetch(&asset(&url, &sha))
-        .await
-        .expect_err("cannot download");
-
-    assert_eq!(error.metric_kind(), "status:404");
-}
-
-#[tokio::test]
 async fn a_damaged_file_on_disk_is_downloaded_again() {
     let (address, _server) = serve().await;
     let dir = dir("damaged");
@@ -347,30 +337,6 @@ async fn a_file_blocking_the_model_folder_reports_that_the_path_is_not_a_directo
         b"a file, not the model folder"
     );
     fs::remove_file(dir).expect("cleanup");
-}
-
-#[tokio::test]
-async fn a_speech_model_is_named_as_one_when_it_cannot_be_trusted() {
-    let (address, _server) = serve().await;
-    let dir = dir("speech");
-    let url = format!("http://{address}/other.onnx");
-    let sha = sha256(GOOD);
-    let asset = Asset {
-        kind: ModelKind::Speech,
-        file_name: "speech.onnx",
-        url: &url,
-        size: GOOD.len() as u64,
-        sha256: &sha,
-    };
-
-    let error = ModelStore::in_dir(&dir)
-        .fetch(&asset)
-        .await
-        .expect_err("refused");
-    assert_eq!(
-        error.to_string(),
-        "The downloaded speech model speech.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
-    );
 }
 
 #[tokio::test]
@@ -433,6 +399,7 @@ async fn a_damaged_file_is_removed_even_when_it_cannot_be_downloaded_again() {
         error.to_string(),
         "The stored speech model good.onnx was damaged, so it was removed. Could not download the speech model good.onnx: the server refused it (HTTP 404 Not Found). Try again, and report it if it keeps happening."
     );
+    assert_eq!(error.metric_kind(), "status:404");
     assert_eq!(leftovers(&dir), Vec::<String>::new());
 }
 
@@ -789,41 +756,9 @@ fn the_ending_phrase_model_files_are_pinned_and_apart_from_the_other_models() {
 }
 
 #[tokio::test]
-async fn a_speech_download_reports_progress_up_to_done() {
+async fn a_speech_download_reports_progress_up_to_done_and_shows_each_step_it_reports() {
     let (address, _server) = serve().await;
     let dir = dir("speech-progress");
-    let url = format!("http://{address}/good.onnx");
-    let sha = sha256(GOOD);
-    let assets = speech([&url; 4], &sha);
-    let store = ModelStore::in_dir(&dir);
-
-    let mut events = Vec::new();
-    store
-        .fetch_speech(&assets, |event| events.push(event))
-        .await
-        .expect("downloads");
-
-    assert_eq!(
-        events,
-        [
-            SpeechProgress::Verifying,
-            SpeechProgress::Downloading { percent: 25 },
-            SpeechProgress::Downloading { percent: 50 },
-            SpeechProgress::Downloading { percent: 75 },
-            SpeechProgress::Downloading { percent: 100 },
-            SpeechProgress::Done,
-        ]
-    );
-    assert!(store.is_cached(&assets).await);
-    assert_eq!(leftovers(&dir).len(), 4);
-    assert_eq!(store.path(&assets.encoder), dir.join("m.encoder.onnx"));
-    assert!(store.path(&assets.tokens).is_file());
-}
-
-#[tokio::test]
-async fn a_running_speech_download_shows_each_step_it_reports() {
-    let (address, _server) = serve().await;
-    let dir = dir("speech-shown");
     let url = format!("http://{address}/good.onnx");
     let sha = sha256(GOOD);
     let assets = speech([&url; 4], &sha);
@@ -838,35 +773,28 @@ async fn a_running_speech_download_shows_each_step_it_reports() {
         .await
         .expect("downloads");
 
-    assert_eq!(shown.len(), 6);
+    let events: Vec<_> = shown.iter().map(|(event, _)| *event).collect();
+    assert_eq!(
+        events,
+        [
+            SpeechProgress::Verifying,
+            SpeechProgress::Downloading { percent: 25 },
+            SpeechProgress::Downloading { percent: 50 },
+            SpeechProgress::Downloading { percent: 75 },
+            SpeechProgress::Downloading { percent: 100 },
+            SpeechProgress::Done,
+        ]
+    );
     assert!(shown.iter().all(|(event, seen)| *seen == Some(*event)));
     assert_eq!(
         downloads.progress("m"),
         None,
         "a finished download is not shown"
     );
-}
-
-#[tokio::test]
-async fn a_speech_fetch_of_files_already_on_disk_reports_no_download() {
-    let (address, _server) = serve().await;
-    let dir = dir("speech-intact");
-    let url = format!("http://{address}/good.onnx");
-    let sha = sha256(GOOD);
-    let assets = speech([&url; 4], &sha);
-    let store = ModelStore::in_dir(&dir);
-    store
-        .fetch_speech(&assets, |_| {})
-        .await
-        .expect("downloads");
-
-    let mut events = Vec::new();
-    store
-        .fetch_speech(&assets, |event| events.push(event))
-        .await
-        .expect("finds them");
-
-    assert_eq!(events, [SpeechProgress::Verifying, SpeechProgress::Done]);
+    assert!(store.is_cached(&assets).await);
+    assert_eq!(leftovers(&dir).len(), 4);
+    assert_eq!(store.path(&assets.encoder), dir.join("m.encoder.onnx"));
+    assert!(store.path(&assets.tokens).is_file());
 }
 
 #[tokio::test]

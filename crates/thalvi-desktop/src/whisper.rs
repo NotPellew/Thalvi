@@ -2582,40 +2582,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_helper_that_exited_is_started_again_for_the_next_capture() {
-        let scratch = Scratch::with_files("died");
-        let fake = Fake::new([
-            Plan::default(),
-            Plan {
-                replies: vec![Reply::Text("again")],
-                ..Plan::default()
-            },
-        ]);
-        let recognizer = recognizer(&fake, WhisperBackend::Cpu, &scratch);
-        within(recognizer.load()).await.unwrap();
-        *locked(&fake.helper(0).exit) = Some(Exit(Some(139)));
-        assert_eq!(
-            recognizer.device(),
-            None,
-            "a helper that ended is not a loaded model"
-        );
+    async fn a_helper_that_exited_is_started_again_for_the_next_capture_without_reading_the_model_files()
+     {
+        for exit in [Exit(Some(139)), Exit(None)] {
+            let scratch = Scratch::with_files("died");
+            let fake = Fake::new([
+                Plan::default(),
+                Plan {
+                    replies: vec![Reply::Text("again")],
+                    ..Plan::default()
+                },
+            ]);
+            let recognizer = recognizer(&fake, WhisperBackend::Cpu, &scratch);
+            within(recognizer.load()).await.unwrap();
+            std::fs::remove_dir_all(scratch.0.join("models")).unwrap();
+            *locked(&fake.helper(0).exit) = Some(exit);
+            assert_eq!(
+                recognizer.device(),
+                None,
+                "a helper that ended is not a loaded model"
+            );
 
-        let event = dictate(&recognizer, &[frame(1)]).await.unwrap();
-        assert_eq!(event, RecognizerEvent::Final("again".to_owned()));
-        assert_eq!(fake.launches(), 2);
-    }
-
-    #[tokio::test]
-    async fn a_restart_does_not_read_the_model_files_again() {
-        let scratch = Scratch::with_files("verified-once");
-        let fake = Fake::new([]);
-        let recognizer = recognizer(&fake, WhisperBackend::Cpu, &scratch);
-        within(recognizer.load()).await.unwrap();
-        std::fs::remove_dir_all(scratch.0.join("models")).unwrap();
-        *locked(&fake.helper(0).exit) = Some(Exit(None));
-
-        within(recognizer.load()).await.unwrap();
-        assert_eq!(fake.launches(), 2);
+            let event = dictate(&recognizer, &[frame(1)]).await.unwrap();
+            assert_eq!(event, RecognizerEvent::Final("again".to_owned()));
+            assert_eq!(fake.launches(), 2);
+        }
     }
 
     #[tokio::test]
@@ -3516,27 +3507,6 @@ mod tests {
                 partials.len(),
                 released.elapsed()
             );
-        }
-
-        #[tokio::test]
-        async fn the_real_helper_is_gone_when_its_recognizer_is() {
-            let Some(files) = Files::from_env("the_real_helper_is_gone_when_its_recognizer_is")
-            else {
-                return;
-            };
-            let scratch = Scratch::new("real-drop");
-            let recognizer = WhisperRecognizer::new(
-                WhisperBackend::Cpu,
-                &files.helpers,
-                files.store(&scratch),
-                Recorder::disabled().metrics(),
-                &no_words(),
-            );
-            within(recognizer.load()).await.unwrap();
-            let helper = pid(&recognizer);
-            assert!(alive(helper));
-            drop(recognizer);
-            assert!(!alive(helper), "no whisper-server is left");
         }
 
         /// The app is killed without running a destructor: the test runs itself twice, and the first run

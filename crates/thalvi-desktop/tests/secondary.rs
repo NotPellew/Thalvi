@@ -20,7 +20,7 @@ use thalvi_desktop::device::Adapters;
 use thalvi_desktop::entries::{LiveEntry, LiveKind};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
-use thalvi_desktop::models::{CatalogSpeech, ModelStore};
+use thalvi_desktop::models::ModelStore;
 use thalvi_desktop::openai_live::OpenAiRecognizer;
 use thalvi_desktop::phrases::WordList;
 use thalvi_desktop::recognizer::Upsampler;
@@ -30,7 +30,6 @@ use thalvi_desktop::secondary::{
     Language, LiveRequest, OpenAiLive, SecondaryApi, SecondaryError, SecondaryStt,
     SecondarySttError, transcribe,
 };
-use thalvi_desktop::transducer::SpeechChoice;
 use tokio::sync::mpsc;
 
 /// The next request the fake received, or none when nothing arrives in time.
@@ -280,28 +279,6 @@ async fn an_active_after_you_stop_chat_entry_sends_the_word_list_as_a_system_mes
 }
 
 #[tokio::test]
-async fn a_rebuilt_after_you_stop_recognizer_sends_the_new_word_list() {
-    let lists = [
-        (
-            WordList::new(vec!["Cybrex2".to_owned(), "Thalvi".to_owned()]).expect("list"),
-            "Cybrex2, Thalvi",
-        ),
-        (
-            WordList::new(vec!["Qwen".to_owned()]).expect("list"),
-            "Qwen",
-        ),
-    ];
-    for (words, expected) in lists {
-        let (url, mut rx) = serve(200, r#"{"text":"ok"}"#).await;
-        dictate_chosen(&chosen(live(&url, ""), &words))
-            .await
-            .expect("transcription");
-        let captured = received(&mut rx).await.expect("one upload");
-        assert_eq!(sent_part(&captured, "prompt").as_deref(), Some(expected));
-    }
-}
-
-#[tokio::test]
 async fn speaches_streams_transcribed_segments_as_cumulative_text() {
     let (url, mut rx) = serve_sse(
         "data: {\"text\":\"We are checking the endpoint.\"}\n\ndata: {\"text\":\"It returns the next sentence.\"}\n\ndata: {\"text\":\"This is the end.\"}\n\n",
@@ -478,32 +455,6 @@ async fn openai_streaming_accepts_a_clean_empty_stream() {
 }
 
 #[tokio::test]
-async fn openai_plain_json_still_works() {
-    let (url, mut rx) = serve(200, r#"{"text":"plain answer"}"#).await;
-    let recognizer = OpenAiRecognizer::new(
-        "local",
-        live(&url, ""),
-        reqwest::Client::new(),
-        Recorder::disabled().metrics(),
-        &WordList::default(),
-    );
-    let mut session = recognizer.connect().await.expect("connected");
-    session.send_frame(&ramp(0)).await.expect("buffered frame");
-    session.finish_audio().await.expect("capture ended");
-    let event = tokio::time::timeout(Duration::from_secs(10), session.next_event())
-        .await
-        .expect("transcription completes")
-        .expect("final transcription");
-    let events = [event];
-    assert_eq!(events, [RecognizerEvent::Final("plain answer".to_owned())]);
-    assert_eq!(
-        received(&mut rx).await.expect("one upload").path,
-        "/v1/audio/transcriptions"
-    );
-    assert!(rx.try_recv().is_err(), "one upload for one capture");
-}
-
-#[tokio::test]
 async fn openai_transcriptions_report_the_detected_language_by_code_or_name() {
     let cases = [
         (
@@ -624,144 +575,128 @@ async fn chosen_live_openai_entry_buffers_and_forwards_the_whole_capture() {
     assert!(rx.try_recv().is_err(), "one request per capture");
 }
 
-#[test]
-fn only_an_on_device_entry_has_a_preloadable_recognizer() {
-    let entry = LiveEntry {
-        id: "local".to_owned(),
-        name: "On this computer".to_owned(),
-        kind: LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
-        extra: false,
-    };
-    let chosen = Chosen::new(
-        &entry,
-        ModelStore::in_dir("unused"),
-        reqwest::Client::new(),
-        Recorder::disabled().metrics(),
-        &WordList::default(),
-        Adapters::default(),
-        std::path::Path::new("unused"),
-    );
-    assert!(chosen.local().is_some());
-}
-
 #[tokio::test]
 async fn a_failed_capture_reports_plainly_and_the_next_capture_can_succeed() {
-    let (url, mut rx) = serve_sequence(vec![
-        (StatusCode::INTERNAL_SERVER_ERROR, "{}"),
-        (StatusCode::OK, r#"{"text":"recovered"}"#),
-    ])
-    .await;
-    let recognizer = OpenAiRecognizer::new(
-        "local",
-        live(&url, ""),
-        reqwest::Client::new(),
-        Recorder::disabled().metrics(),
-        &WordList::default(),
+    const BAD_REPLY: &str = "unreadable transcription";
+    let server_error = (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        "Speech server error — Settings",
+        "HTTP 500",
     );
-    let mut first = recognizer.connect().await.expect("first session");
-    first.send_frame(&ramp(0)).await.expect("buffer");
-    first.finish_audio().await.expect("release");
-    let failure = tokio::time::timeout(Duration::from_secs(5), first.next_event())
-        .await
-        .expect("the failed request returns an event")
-        .expect_err("server failure is shown");
-    assert_eq!(failure.headline(), "Speech server error — Settings");
-    assert!(failure.to_string().contains("HTTP 500"));
-
-    let mut next = recognizer.connect().await.expect("next capture session");
-    next.send_frame(&ramp(1)).await.expect("buffer");
-    next.finish_audio().await.expect("release");
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), next.next_event())
-            .await
-            .expect("the recovered request returns an event")
-            .expect("recovered transcription"),
-        RecognizerEvent::Final("recovered".to_owned())
-    );
-    assert_eq!(
-        received(&mut rx).await.expect("first upload").path,
-        "/v1/audio/transcriptions"
-    );
-    assert_eq!(
-        received(&mut rx).await.expect("next upload").path,
-        "/v1/audio/transcriptions"
-    );
-    assert!(rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn an_unreachable_live_endpoint_says_what_failed() {
-    let unused = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let url = format!("http://{}", unused.local_addr().expect("address"));
-    drop(unused);
-    let recognizer = OpenAiRecognizer::new(
-        "local",
-        live(&url, ""),
-        reqwest::Client::new(),
-        Recorder::disabled().metrics(),
-        &WordList::default(),
-    );
-    let mut session = recognizer.connect().await.expect("connected");
-    session.send_frame(&ramp(0)).await.expect("buffered frame");
-    session.finish_audio().await.expect("capture ended");
-    let failure = tokio::time::timeout(Duration::from_secs(15), session.next_event())
-        .await
-        .expect("the unreachable endpoint returns an error")
-        .expect_err("endpoint is down");
-    assert_eq!(failure.headline(), "Can't reach speech server — Settings");
-    assert!(failure.to_string().contains("could not be reached"));
+    let bad = |body| {
+        (
+            StatusCode::OK,
+            body,
+            "Bad speech server reply — Settings",
+            BAD_REPLY,
+        )
+    };
+    let kinds = [
+        (
+            "transcriptions",
+            (|url| live(url, "")) as fn(&str) -> OpenAiLive,
+            "/v1/audio/transcriptions",
+            vec![server_error, bad("not json")],
+            r#"{"text":"recovered"}"#,
+            "recovered",
+        ),
+        (
+            "chat",
+            |url| chat(url, "", ""),
+            "/v1/chat/completions",
+            vec![
+                server_error,
+                bad("not json"),
+                bad(r#"{"choices":[]}"#),
+                bad(r#"{"choices":[{"message":{}}]}"#),
+                bad(r#"{"choices":[{"message":{"content":null}}]}"#),
+                bad(r#"{"choices":[{"message":{"content":[{"type":"text"}]}}]}"#),
+            ],
+            r#"{"choices":[{"message":{"content":"recovered"}}]}"#,
+            "recovered",
+        ),
+    ];
+    for (kind, entry, path, failures, recovery, recovered) in kinds {
+        let mut replies: Vec<_> = failures
+            .iter()
+            .map(|(status, body, _, _)| (*status, *body))
+            .collect();
+        replies.push((StatusCode::OK, recovery));
+        let (url, mut rx) = serve_sequence(replies).await;
+        let recognizer = recognizer(entry(&url));
+        for (_, body, headline, message) in &failures {
+            let failure = dictate(&recognizer).await.expect_err(body);
+            assert_eq!(failure.headline(), *headline, "{kind} {body}");
+            assert!(
+                failure.to_string().contains(message),
+                "{kind} {body}: {failure}"
+            );
+            assert!(
+                failure.to_string().contains("Nothing was delivered"),
+                "{kind} {body}: {failure}"
+            );
+        }
+        assert_eq!(
+            dictate(&recognizer).await.expect("recovered"),
+            recovered,
+            "{kind}"
+        );
+        for _ in 0..=failures.len() {
+            assert_eq!(received(&mut rx).await.expect("an upload").path, path);
+        }
+        assert!(rx.try_recv().is_err(), "{kind}: one upload per capture");
+    }
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_slow_live_endpoint_says_what_failed() {
+async fn an_unreachable_or_silent_endpoint_says_what_failed() {
+    let unused = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let unreachable = format!("http://{}", unused.local_addr().expect("address"));
+    drop(unused);
     let app = Router::new().fallback(std::future::pending::<()>);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
-    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let silent = format!("http://{}", listener.local_addr().expect("address"));
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    let recognizer = OpenAiRecognizer::new(
-        "local",
-        live(&url, ""),
-        reqwest::Client::new(),
-        Recorder::disabled().metrics(),
-        &WordList::default(),
-    );
-    let mut session = recognizer.connect().await.expect("connected");
-    session.send_frame(&ramp(1)).await.expect("buffered frame");
-    session.finish_audio().await.expect("capture ended");
-    let failure = tokio::time::timeout(Duration::from_secs(12), session.next_event())
-        .await
-        .expect("the slow endpoint returns its bounded deadline")
-        .expect_err("request deadline");
-    assert_eq!(failure.headline(), "Speech server timed out — Settings");
-    assert!(failure.to_string().contains("took too long to transcribe"));
-}
-
-#[tokio::test]
-async fn a_malformed_live_reply_has_the_bad_reply_headline_and_full_message() {
-    let (url, _) = serve(200, "not json").await;
-    let recognizer = OpenAiRecognizer::new(
-        "local",
-        live(&url, ""),
-        reqwest::Client::new(),
-        Recorder::disabled().metrics(),
-        &WordList::default(),
-    );
-    let mut session = recognizer.connect().await.expect("connected");
-    session.send_frame(&ramp(0)).await.expect("buffered frame");
-    session.finish_audio().await.expect("capture ended");
-    let failure = tokio::time::timeout(Duration::from_secs(5), session.next_event())
-        .await
-        .expect("the malformed reply returns an error")
-        .expect_err("malformed response");
-    assert_eq!(failure.headline(), "Bad speech server reply — Settings");
-    assert!(failure.to_string().contains("unreadable transcription"));
-    assert!(failure.to_string().contains("Nothing was delivered"));
+    for (kind, entry) in [
+        (
+            "transcriptions",
+            (|url| live(url, "")) as fn(&str) -> OpenAiLive,
+        ),
+        ("chat", |url| chat(url, "", "")),
+    ] {
+        for (case, url, headline, message) in [
+            (
+                "unreachable",
+                &unreachable,
+                "Can't reach speech server — Settings",
+                "could not be reached",
+            ),
+            (
+                "silent",
+                &silent,
+                "Speech server timed out — Settings",
+                "took too long to transcribe",
+            ),
+        ] {
+            let failure =
+                tokio::time::timeout(Duration::from_secs(15), dictate(&recognizer(entry(url))))
+                    .await
+                    .expect("the failure comes back within its bounded deadline")
+                    .expect_err("the endpoint does not answer");
+            assert_eq!(failure.headline(), headline, "{kind} {case}");
+            assert!(
+                failure.to_string().contains(message),
+                "{kind} {case}: {failure}"
+            );
+        }
+    }
 }
 
 fn ramp(index: usize) -> Frame {
@@ -916,7 +851,7 @@ async fn the_bearer_header_is_sent_only_with_a_key() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn failures_are_typed() {
     let cases = [
         (SecondaryApi::OpenAi, 500, "{}", SecondaryError::Status(500)),
@@ -966,10 +901,7 @@ async fn failures_are_typed() {
         .await,
         Err(SecondaryError::Unreachable)
     );
-}
 
-#[tokio::test(start_paused = true)]
-async fn a_silent_endpoint_times_out_after_ten_seconds() {
     let app = Router::new().fallback(std::future::pending::<()>);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1212,76 +1144,6 @@ async fn transcriptions_entry_sends_language_only_when_set() {
             .map(|(_, value)| String::from_utf8(value).unwrap());
         assert_eq!(found.as_deref(), expected, "{language:?}");
     }
-}
-
-#[tokio::test]
-async fn chat_failures_are_typed_and_the_next_capture_succeeds() {
-    let bad_reply = "unreadable transcription";
-    let failures = [
-        (StatusCode::INTERNAL_SERVER_ERROR, "{}", "HTTP 500"),
-        (StatusCode::OK, "not json", bad_reply),
-        (StatusCode::OK, r#"{"choices":[]}"#, bad_reply),
-        (StatusCode::OK, r#"{"choices":[{"message":{}}]}"#, bad_reply),
-        (
-            StatusCode::OK,
-            r#"{"choices":[{"message":{"content":null}}]}"#,
-            bad_reply,
-        ),
-        (
-            StatusCode::OK,
-            r#"{"choices":[{"message":{"content":[{"type":"text"}]}}]}"#,
-            bad_reply,
-        ),
-    ];
-    let mut replies: Vec<_> = failures
-        .iter()
-        .map(|(status, body, _)| (*status, *body))
-        .collect();
-    replies.push((
-        StatusCode::OK,
-        r#"{"choices":[{"message":{"content":"recovered"}}]}"#,
-    ));
-    let (url, _rx) = serve_sequence(replies).await;
-    let recognizer = recognizer(chat(&url, "", ""));
-    for (_, body, message) in failures {
-        let failure = dictate(&recognizer).await.expect_err(body);
-        assert!(failure.to_string().contains(message), "{body}: {failure}");
-        assert!(failure.to_string().contains("Nothing was delivered"));
-    }
-    assert_eq!(dictate(&recognizer).await.expect("recovered"), "recovered");
-}
-
-#[tokio::test(start_paused = true)]
-async fn a_silent_chat_endpoint_times_out_after_ten_seconds() {
-    let app = Router::new().fallback(std::future::pending::<()>);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let url = format!("http://{}", listener.local_addr().expect("address"));
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    let failure = tokio::time::timeout(
-        Duration::from_secs(12),
-        dictate(&recognizer(chat(&url, "", ""))),
-    )
-    .await
-    .expect("the deadline is bounded")
-    .expect_err("request deadline");
-    assert_eq!(failure.headline(), "Speech server timed out — Settings");
-}
-
-#[tokio::test]
-async fn an_unreachable_chat_endpoint_says_what_failed() {
-    let unused = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let url = format!("http://{}", unused.local_addr().expect("address"));
-    drop(unused);
-    let failure = dictate(&recognizer(chat(&url, "", "")))
-        .await
-        .expect_err("endpoint is down");
-    assert_eq!(failure.headline(), "Can't reach speech server — Settings");
 }
 
 #[tokio::test]

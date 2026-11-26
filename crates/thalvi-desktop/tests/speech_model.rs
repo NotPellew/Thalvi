@@ -108,12 +108,6 @@ fn spoken(frames: &[Frame]) -> Vec<String> {
 
 #[tokio::test]
 #[ignore = "needs the unified model files in THALVI_UNIFIED_MODEL"]
-async fn the_unified_model_recognizes_the_clip() {
-    assert_eq!(spoken(&clip_frames().await), [SENTENCE]);
-}
-
-#[tokio::test]
-#[ignore = "needs the unified model files in THALVI_UNIFIED_MODEL"]
 async fn the_unified_model_recovers_a_clip_after_thirty_seconds_of_digital_silence() {
     let clip = clip_frames().await;
     let silence = std::iter::repeat_n([0; FRAME_SAMPLES], 30 * 16_000 / FRAME_SAMPLES);

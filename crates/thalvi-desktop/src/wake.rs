@@ -833,23 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_config_defaults_to_thalvi_and_preserves_the_conversation_choice() {
-        assert_eq!(read("{}").expect("valid"), WakeConfig::default());
-        let config = WakeConfig::default();
-        assert_eq!(
-            config.capture().model,
-            HeadModel::Catalog(CatalogHead::HeyThalvi)
-        );
-        assert_eq!(
-            config.conversation().model,
-            HeadModel::Catalog(CatalogHead::HeyMycroft)
-        );
-        assert_eq!(config.capture().threshold.get(), 0.7);
-        assert_eq!(config.conversation().threshold.get(), 0.5);
-    }
-
-    #[test]
-    fn a_head_is_a_catalog_name_or_an_onnx_path_and_starts_at_its_default_threshold_unless_config_stores_one()
+    fn a_fresh_config_defaults_to_thalvi_and_a_head_is_a_catalog_name_or_an_onnx_path_that_starts_at_its_default_threshold_unless_config_stores_one()
      {
         let thalvi = HeadModel::Catalog(CatalogHead::HeyThalvi);
         let mycroft = HeadModel::Catalog(CatalogHead::HeyMycroft);
@@ -885,6 +869,18 @@ mod tests {
             assert_eq!(config.capture().model, model, "{head}");
             assert_eq!(config.capture().threshold.get(), threshold, "{head}");
         }
+        assert_eq!(read("{}").expect("valid"), WakeConfig::default());
+        let config = WakeConfig::default();
+        assert_eq!(
+            config.capture().model,
+            HeadModel::Catalog(CatalogHead::HeyThalvi)
+        );
+        assert_eq!(
+            config.conversation().model,
+            HeadModel::Catalog(CatalogHead::HeyMycroft)
+        );
+        assert_eq!(config.capture().threshold.get(), 0.7);
+        assert_eq!(config.conversation().threshold.get(), 0.5);
     }
 
     #[test]

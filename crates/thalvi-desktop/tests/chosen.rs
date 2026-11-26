@@ -96,14 +96,10 @@ async fn audio_reaches_the_entry_and_closing_or_cancelling_ends_its_stream() {
 }
 
 #[test]
-fn only_an_on_device_entry_has_a_model_to_preload() {
+fn only_an_on_device_entry_has_a_preloadable_recognizer_and_a_whisper_one_is_named_by_its_model() {
     let on_device = json!({"kind": "on_device", "id": "d", "name": "Device", "active": true});
     assert!(chosen(&on_device).local().is_some());
     assert!(chosen(&realtime("ws://127.0.0.1:9")).local().is_none());
-}
-
-#[test]
-fn a_whisper_entry_has_a_preloadable_recognizer_named_by_its_model() {
     for model in ["whisper_turbo_cpu", "whisper_turbo_vulkan"] {
         let chosen = chosen(&json!({"kind": "on_device", "id": "w", "name": "Whisper",
                                     "active": true, "model": model}));
