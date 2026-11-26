@@ -167,9 +167,17 @@ areas your change touches. Editing rules are in
 - **Opening phrases, then the bound app, pick the writing prompt.** An explicit write whose words start with a `writing.openings` phrase as whole words gets its prompt (longest wins); else the first `writing.apps` style whose app (Hyprland class, Windows executable) and optional title fragment match the window bound at wake; else `writing.prompt`. Never combined; words go as said; app and title only match locally, never sent or recorded; GNOME names no window, so styles don't apply there.
   Why: small models follow one long prompt unevenly, and local matching adds no call. Rejected: dropping the opening from the message, a switch per rule, a routing model call, combining an opening with an app style, one prompt with a section per kind.
 - **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, and pastes on the next
-  final or after 250 ms. Why: a streaming recognizer emits a word only after audio past it; measured headless on the server
-  recognizer, no last word lost in 336 releases (75% before when released on the word's end). Rejected: a fixed 500 ms tail;
-  an end-of-stream message through the server (11% lost at the word's end, a protocol change).
+  final or after 250 ms; a tentative decoding that commits frames without a token while the voice detector still hears speech
+  replays its whole stretch, and the final commits only the newest window. Why: a streaming recognizer emits a word only after
+  audio past it, a windowed encode's frames differ from the stretch's so the greedy search can stop emitting (12 s lost its last
+  sentence), and a whole-stretch final grows past the wait. Measured headless on the server recognizer, no last word lost in 336
+  releases (75% before when released on the word's end). Rejected: a fixed 500 ms tail; an end-of-stream message through the
+  server (11% lost at the word's end, a protocol change); more left context or a global mel over the capture (both stall alike).
+- **Long dictation repair.** A decoding that commits 24 frames without a token while the voice detector still hears speech
+  replays the whole stretch, and the final commits only the newest window instead of re-hearing everything. Why: a windowed
+  encode's frames differ from the stretch's, so the greedy search can wander off and emit blanks forever (12 s lost its last
+  sentence); the replay keeps the tentative text whole and the incremental final keeps release to paste under 250 ms.
+  Rejected: 32 frames of left context and a global mel over the capture (both stall the same way); a longer release wait.
 - **Packaged desktop with an OS-held login entry.** AppImage on Linux, per-user NSIS on Windows, released from `desktop-vX.Y.Z` tags that match the Cargo version (development builds add `-dev.N` at build time); login startup is the OS entry (`tauri-plugin-autostart`, run with `--login`), and the config keeps the preference (`start_at_login`, written by the switch alone, not with the settings form) so each start restores an entry an upgrade removed. Hyprland runs no XDG autostart unless `xdg-desktop-autostart.target` is up (uwsm starts it), so otherwise the row shows an `exec-once` line to copy and no entry is written. The AppImage's app menu entry is Thalvi's own file (`show_in_menu`, same pattern); a startup failure shows a GTK or `MessageBoxW` box when stderr is no terminal (`gtk` is Tauri's own).
   Updates (#137): `tauri-plugin-updater` follows `update_channel` (Stable or Development; signed packages only, never an older version); a download installs only when the engine thread itself finds Thalvi idle, and a one-shot `update.json` keeps the paused state across the restart and tells the next start what came of it.
   Why: both formats suit the updater, the plugin is Tauri's own, the switch reads the OS back, and the NSIS uninstall hook cannot tell an upgrade from an uninstall.
