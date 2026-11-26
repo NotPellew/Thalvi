@@ -10,10 +10,14 @@ Branches, CI, checks and releases.
   publishes a release. An approved push to `main` publishes an `X.Y.Z-dev.N` prerelease, never Latest, for the Development
   update choice. Why: GitHub closes issues natively, and testers get fixes as they land. Rejected: a second
   integration branch (a workflow faked issue closing for it), a version commit per dev build.
-- **One approving review.** The `main` ruleset requires one approving review. The `hold` workflow
-  approves, as GitHub Actions, a PR the owner wrote or one that closes only fixes and changes no protected path; any other
-  waits for a review, which on an agent's PR only the owner can give. Why: a check that failed until a label was added read
-  as broken CI. Rejected: the `owner-ok` label, a pending status (agent runs wait on it), code owners (the owner's own PRs would need a bypass).
+- **Code owners, no required approval.** The `main` ruleset requires no approving review, only the
+  required checks and the code-owner review: a PR that changes a path in `.github/CODEOWNERS` (tooling,
+  agent rules, decisions, toolchain settings, dependencies) waits for the owner's review, and any other
+  merges on green CI. The owner bypasses the ruleset to merge their own PRs. Why: the owner approves
+  what agents build when an issue is marked `ready`, so a second check at merge only repeats it; T3 Code,
+  OpenCode and Hex gate only their release boundary this way. Rejected: the `hold` workflow, which
+  approved a fix-only PR as GitHub Actions and held every other agent PR (about 700 lines to keep in step with
+  the ruleset), the `owner-ok` label, a pending status (agent runs wait on it).
 - **Issues are optional.** Why: in a 9-day solo build, PRs and the commit
   history are record enough. Rejected: an issue for every change.
 - **`unsafe` only at native FFI boundaries.** The workspace denies `unsafe`; Windows host modules and

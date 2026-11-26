@@ -163,6 +163,8 @@ only `--in-diff` against the base with no desktop session and a throwaway
   when the PR merges. The Issues workflow reopens those issues when a merged
   `Reverts #N` PR takes the change out. Use `Refs #N` when a PR only touches
   one.
+- A PR merges once the required checks pass. One that changes a path in
+  `.github/CODEOWNERS` also waits for the owner's review.
 - Use `.github/pull_request_template.md` for every PR body, including PRs
   created through CLI tools; preserve its headings and remove instructional
   comments.
