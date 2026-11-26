@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,18 @@ type Sent = tokio::time::Instant;
 #[derive(Default)]
 struct Backlog {
     waiting: Mutex<VecDeque<Sent>>,
+    /// Frames handed to the model so far.
+    sent: AtomicU64,
+    /// Frames the model has finished: each one's text has been produced, if it had any.
+    finished: AtomicU64,
+    /// Frames handed to the model when the hold's key came up; none of the flush after them counts.
+    released: AtomicU64,
+    /// The stream keeps the end of its audio back until it hears the input end.
+    holds_text_for_end: bool,
+    /// The hold's input ended, so the model still owes the text it held back for the end.
+    ending: AtomicBool,
+    /// The model's answer for the end of the hold's audio has been delivered.
+    ended: AtomicBool,
     /// The lag this recognition stopped at, once the model fell further behind than a capture may.
     fell_behind: Mutex<Option<Duration>>,
 }
@@ -50,27 +62,50 @@ impl Backlog {
             }
         }
         waiting.push_back(now);
+        self.sent.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     /// The model finished the oldest frame it had not processed.
     fn took(&self) {
-        self.waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop_front();
-    }
-
-    /// The model has frames it has not finished.
-    fn pending(&self) -> bool {
-        !self
+        if self
             .waiting
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_empty()
+            .pop_front()
+            .is_some()
+        {
+            self.finished.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    fn behind(&self) -> Option<Duration> {
+    /// The hold's key came up: the frames sent so far are its last, before its release flush.
+    fn hold_released(&self) {
+        self.released
+            .store(self.sent.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    /// The release flush was sent: a stream that holds text back still owes it for the end.
+    fn input_ended(&self) {
+        self.ending.store(true, Ordering::Relaxed);
+    }
+
+    /// The model's answer for the end of its input reached the capture.
+    fn ended(&self) {
+        self.ended.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the model still owes a result for the hold's audio: a frame sent before its release
+    /// not finished, or the text a stream holds back until it has heard the end.
+    fn behind(&self) -> bool {
+        self.finished.load(Ordering::Relaxed) < self.released.load(Ordering::Relaxed)
+            || (self.holds_text_for_end
+                && self.ending.load(Ordering::Relaxed)
+                && !self.ended.load(Ordering::Relaxed))
+    }
+
+    /// The lag this recognition stopped at, once the model fell further behind than a capture may.
+    fn lag_stop(&self) -> Option<Duration> {
         *self
             .fell_behind
             .lock()
@@ -108,6 +143,21 @@ pub trait SpeechStream: Send + 'static {
     /// # Errors
     /// Fails when the model cannot continue; the stream is then abandoned.
     fn accept(&mut self, frame: &Frame) -> Result<Vec<RecognizerEvent>, RecognizerError>;
+
+    /// The input is complete: no more frames will come. Answers with the text the model held back
+    /// for the end of the audio, if any.
+    ///
+    /// # Errors
+    /// Fails when the model cannot continue; the stream is then abandoned.
+    fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        Ok(Vec::new())
+    }
+
+    /// Whether the stream keeps the end of its audio back until it is told the input ended, so its
+    /// partials alone would drop the last words.
+    fn holds_text_for_end(&self) -> bool {
+        false
+    }
 }
 
 /// Where a speech model comes from; loading may download it, and is retried until it works.
@@ -301,10 +351,14 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
         let (frames_tx, frames_rx) = mpsc::channel();
         let (events_tx, events_rx) = events::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let backlog = Arc::new(Backlog::default());
+        let stream = model.stream();
+        let backlog = Arc::new(Backlog {
+            holds_text_for_end: stream.holds_text_for_end(),
+            ..Backlog::default()
+        });
         let cache = Arc::clone(&self.shared.model);
         let work = Work {
-            stream: model.stream(),
+            stream,
             device: model.device(),
             frames: frames_rx,
             events: events_tx,
@@ -335,9 +389,15 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
     }
 }
 
+/// What the worker takes next: a frame, or the end of the hold's input.
+enum Order {
+    Frame(Instant, Box<Frame>),
+    End,
+}
+
 /// An open local recognition.
 pub struct LocalSession {
-    frames: mpsc::Sender<(Instant, Frame)>,
+    frames: mpsc::Sender<Order>,
     events: events::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>,
     cancelled: Arc<AtomicBool>,
     release_limit: Duration,
@@ -356,7 +416,16 @@ impl RecognizerSession for LocalSession {
     }
 
     fn behind(&self) -> bool {
-        self.backlog.pending()
+        self.backlog.behind()
+    }
+
+    fn hold_released(&mut self) {
+        self.backlog.hold_released();
+    }
+
+    fn input_ended(&mut self) {
+        self.backlog.input_ended();
+        let _ = self.frames.send(Order::End);
     }
 
     fn send_frame(
@@ -365,14 +434,18 @@ impl RecognizerSession for LocalSession {
     ) -> impl Future<Output = Result<(), RecognizerError>> + Send {
         let sent = self.backlog.send(&self.model).and_then(|()| {
             self.frames
-                .send((Instant::now(), *frame))
+                .send(Order::Frame(Instant::now(), Box::new(*frame)))
                 .map_err(|_| stopped())
         });
         std::future::ready(sent)
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
-        self.events.recv().await.unwrap_or_else(|| Err(stopped()))
+        let event = self.events.recv().await.unwrap_or_else(|| Err(stopped()));
+        if matches!(&event, Ok(RecognizerEvent::Ended)) {
+            self.backlog.ended();
+        }
+        event
     }
 
     fn cancel(self) -> impl Future<Output = ()> + Send {
@@ -388,7 +461,7 @@ impl RecognizerSession for LocalSession {
 struct Work<S> {
     stream: S,
     device: Device,
-    frames: mpsc::Receiver<(Instant, Frame)>,
+    frames: mpsc::Receiver<Order>,
     events: events::UnboundedSender<Result<RecognizerEvent, RecognizerError>>,
     cancelled: Arc<AtomicBool>,
     backlog: Arc<Backlog>,
@@ -412,11 +485,28 @@ impl<S: SpeechStream> Work<S> {
     fn run(mut self) {
         let mut tally = Tally::default();
         let mut outcome = "ok";
-        while let Ok((sent, frame)) = self.frames.recv() {
+        while let Ok(order) = self.frames.recv() {
             if self.cancelled.load(Ordering::Relaxed) {
                 outcome = "cancelled";
                 break;
             }
+            let Order::Frame(sent, frame) = order else {
+                match self.stream.end_input() {
+                    Ok(texts) => {
+                        for text in texts {
+                            let _ = self.events.send(Ok(text));
+                        }
+                    }
+                    Err(error) => {
+                        (self.forget)();
+                        let _ = self.events.send(Err(error));
+                        outcome = "error";
+                        break;
+                    }
+                }
+                let _ = self.events.send(Ok(RecognizerEvent::Ended));
+                continue;
+            };
             let started = Instant::now();
             let result = self.stream.accept(&frame);
             let took = started.elapsed();
@@ -444,7 +534,7 @@ impl<S: SpeechStream> Work<S> {
         if outcome == "ok" && self.cancelled.load(Ordering::Relaxed) {
             outcome = "cancelled";
         }
-        let behind = self.backlog.behind();
+        let behind = self.backlog.lag_stop();
         if behind.is_some() {
             outcome = "cant_keep_up";
         }
@@ -472,6 +562,60 @@ impl<S: SpeechStream> Work<S> {
             outcome,
             Some(tally.model),
             self.device.tag(fields),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hold_is_behind_until_the_stream_that_holds_text_back_answers_the_end_of_its_audio() {
+        let backlog = Backlog {
+            holds_text_for_end: true,
+            ..Backlog::default()
+        };
+        backlog.send("model").unwrap();
+        backlog.send("model").unwrap();
+        backlog.hold_released();
+        assert!(backlog.behind(), "both frames are still unanswered");
+        backlog.took();
+        assert!(backlog.behind(), "one of the two is still unanswered");
+        backlog.took();
+        assert!(
+            !backlog.behind(),
+            "every frame from before the release has its result"
+        );
+
+        backlog.send("model").unwrap();
+        backlog.input_ended();
+        assert!(
+            backlog.behind(),
+            "the stream has not answered the end of its audio yet"
+        );
+        backlog.took();
+        assert!(
+            backlog.behind(),
+            "the model still owes the text it held back for the end"
+        );
+        backlog.ended();
+        assert!(
+            !backlog.behind(),
+            "the model has answered the end of the hold's audio"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_emits_its_words_as_it_hears_them_is_caught_up_at_release() {
+        let backlog = Backlog::default();
+        backlog.send("model").unwrap();
+        backlog.took();
+        backlog.hold_released();
+        backlog.input_ended();
+        assert!(
+            !backlog.behind(),
+            "a stream whose partials carry the last words does not owe a result for the flush"
         );
     }
 }

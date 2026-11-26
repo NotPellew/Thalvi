@@ -145,7 +145,7 @@ fn the_tentative_text_of_a_twelve_second_dictation_holds_all_three_sentences() {
             match event {
                 RecognizerEvent::Partial(text) if !text.is_empty() => last = words(&text),
                 RecognizerEvent::Final(text) => panic!("ended early with {text:?}"),
-                RecognizerEvent::Partial(_) => {}
+                RecognizerEvent::Partial(_) | RecognizerEvent::Ended => {}
             }
         }
     }

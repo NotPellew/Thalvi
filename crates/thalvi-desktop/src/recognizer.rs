@@ -26,6 +26,9 @@ pub const UPSAMPLED_SAMPLES: usize = FRAME_SAMPLES / 2 * 3;
 pub enum RecognizerEvent {
     Partial(String),
     Final(String),
+    /// Every result for the audio the hold's end signal covered has been sent, including any
+    /// text the model held back until it heard the end.
+    Ended,
 }
 
 /// Where an entry recognizes speech, as errors and notices name it.
@@ -290,6 +293,14 @@ pub trait RecognizerSession: Send {
     fn behind(&self) -> bool {
         false
     }
+
+    /// The hold's key came up after the audio sent so far: only that audio is owed a result, not
+    /// the release flush that follows it.
+    fn hold_released(&mut self) {}
+
+    /// The release flush has been sent: the hold's audio is complete. A session that holds text
+    /// back answers with [`RecognizerEvent::Ended`] once it has produced the result for all of it.
+    fn input_ended(&mut self) {}
 
     /// Signals that all audio for a buffered capture has arrived.
     fn finish_audio(&mut self) -> impl Future<Output = Result<(), RecognizerError>> + Send {
@@ -689,10 +700,15 @@ impl RecognizerSession for FakeSession {
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
-        self.events
+        let event = self
+            .events
             .recv()
             .await
-            .unwrap_or_else(|| Err(fake_dropped()))
+            .unwrap_or_else(|| Err(fake_dropped()));
+        if matches!(&event, Ok(RecognizerEvent::Ended)) {
+            self.behind.store(false, Ordering::Relaxed);
+        }
+        event
     }
 
     fn cancel(self) -> impl Future<Output = ()> + Send {

@@ -224,6 +224,24 @@ impl RecognizerSession for ChosenSession {
         }
     }
 
+    fn hold_released(&mut self) {
+        match self {
+            Self::Realtime(session) => session.hold_released(),
+            Self::OpenAi(session) => session.hold_released(),
+            Self::Local(session, _) => session.hold_released(),
+            Self::Whisper(session, _) => session.hold_released(),
+        }
+    }
+
+    fn input_ended(&mut self) {
+        match self {
+            Self::Realtime(session) => session.input_ended(),
+            Self::OpenAi(session) => session.input_ended(),
+            Self::Local(session, _) => session.input_ended(),
+            Self::Whisper(session, _) => session.input_ended(),
+        }
+    }
+
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
         match self {
             Self::OpenAi(session) => session.finish_audio().await,

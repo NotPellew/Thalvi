@@ -37,15 +37,20 @@ Starting and ending a capture: wake words, hold keys, cues and silence.
 - **Wake words are a switch apart from listening.** `wake.enabled` (stored only when off) turns spoken activation off while listening stays on: the engine skips the wake model and the hold keys work, the switch applies as a retune with no rebuild, and keyboard-only is its own status (`keyboardOnly`, tray icon and `state` word `keyboard`). Why: pausing also refuses the hold keys, and a user who wants only the keyboard has no other way to stop wake words from starting captures. Rejected: pausing as the way to turn wake words off, unloading the wake model (re-enabling would need a rebuild).
 - **AltGr alone may be a hold key on Windows.** `AltRight` held alone dictates; AltGr with any other key is a chord that types, so the hook passes every event, ignores the Ctrl Windows adds, and starts the hold only after 0.2 s alone, keeping the audio from the press. Why: AltGr types `@`, `€` and `{` on layouts that have it, and a swallowed AltGr would break typing for them. Reversible: a hold started by AltGr and a second key stays a hold.
   Rejected: swallowing AltGr, starting the hold at the press and cancelling on a chord (cue and overlay would flash on every `@`).
-- **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, and pastes on the next
-  final or after a session-reported wait: 250 ms, or 400 ms only for a decoder whose final re-hears the end of the stretch
-  (Parakeet's, measured at 235-397 ms loaded); a tentative decoding that commits frames without a token while the voice detector
-  still hears speech replays its whole stretch. A session still behind at that wait (audio sent before the release not answered
-  yet: a frame the model's worker has not finished hearing) keeps a hold waiting for its final, overlay "Finishing…", up to 15 s;
-  then the hold pastes what it has and says the end may be missing. Why: a streaming recognizer emits a word only after audio past
-  it, and only that final needs the longer wait; Nemotron Unified emits no final in the flush and would just wait it out; and a
-  busy machine (Settings opening during a hold) made the recognizer fall seconds behind, so the 250 ms paste lost the end while
-  saying it worked. Measured headless on the server recognizer, no last word lost in 336 releases (75% before when released on the
-  word's end). Rejected: one longer wait for every recognizer; a fixed 500 ms tail; an end-of-stream message through the server
-  (11% lost at the word's end, a protocol change); pasting at the wait and only warning; more left context or a global mel over
-  the capture (both stall alike).
+- **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, then tells the session its input
+  ended, and pastes on the next final or after a session-reported wait: 250 ms, or 400 ms only for a decoder whose final re-hears the end
+  of the stretch (Parakeet's, measured at 235-397 ms loaded); a tentative decoding that commits frames without a token while the voice
+  detector still hears speech replays its whole stretch. The session is told where the hold's audio ends, so only audio sent before the
+  release is owed a result: a session is behind only while one of those frames has none, and a final ends the wait only once none is left,
+  so a final covering one stretch of a longer hold keeps it waiting. A decoder whose last window's words come out only once the silence
+  after them has been decoded (Nemotron Unified's) stays behind until it has answered the end of the input, while one whose partials
+  already carry them (Nemotron Streaming, and Parakeet within its wait) is caught up at release. Only a session still behind past that wait shows "Finishing…"; it keeps the hold waiting up to
+  15 s, then the hold pastes what it has and says the end may be missing. The wait is recorded apart from the model's latency. Why: a
+  streaming recognizer emits a word only after audio past it, an early final used to cut a lagging hold to the audio heard so far; a busy
+  machine (Settings opening during a hold) made the recognizer fall seconds behind, so the 250 ms paste lost the end while saying it
+  worked; and Nemotron Unified keeps its last word until its stretch is finished, so the partial at the wait dropped it; showing Finishing
+  from the release flashed it on ordinary releases. Measured headless on the server recognizer, no last word lost in 336 releases (75%
+  before when released on the word's end). Rejected: one longer wait for every recognizer; a fixed 500 ms tail; an end-of-stream message
+  through the server (11% lost at the word's end, a protocol change); pasting at the wait and only warning; more left context or a global
+  mel over the capture (both stall alike); counting the flush as owed for every decoder (ordinary releases would wait on silence and
+  flash Finishing).

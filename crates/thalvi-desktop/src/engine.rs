@@ -841,14 +841,13 @@ impl<S: RecognizerSession> Live<S> {
     /// What the overlay shows while a released hold waits for the recognizer to finish the words
     /// said before the release.
     fn waiting(&self) -> Option<EngineState> {
-        let route = self
-            .hold_route
-            .filter(|_| self.released().is_some())
-            .filter(|_| self.text.pending().is_none())?;
-        Some(if self.session.buffers_audio() {
-            EngineState::TranscribingLive { route }
-        } else {
-            EngineState::Finishing { route }
+        let route = self.hold_route.filter(|_| self.text.pending().is_none())?;
+        Some(match self.release {
+            Release::Behind(_) => EngineState::Finishing { route },
+            Release::Tail(_) if self.session.buffers_audio() => {
+                EngineState::TranscribingLive { route }
+            }
+            _ => return None,
         })
     }
 
@@ -2130,6 +2129,7 @@ where
         }
         if let (Some(at), Some(held)) = (released, held) {
             self.held_for = Some(at.duration_since(held.at));
+            live.session.hold_released();
             if live.session.buffers_audio() {
                 self.streams.send(&RELEASE_SILENCE);
                 if let Err(error) = live.session.finish_audio().await {
@@ -2138,8 +2138,11 @@ where
                 self.set_state(EngineState::TranscribingLive {
                     route: held.route(),
                 });
-            } else if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
-                return Some(stop.into());
+            } else {
+                if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                    return Some(stop.into());
+                }
+                live.session.input_ended();
             }
             live.release = Release::Tail(Instant::now());
             self.publish(live);
@@ -2302,6 +2305,16 @@ where
     ) -> Option<Done> {
         match event {
             Err(error) => Some(Done::Failed(error.into())),
+            Ok(RecognizerEvent::Ended) => {
+                let released = live.released()?;
+                if live.session.behind() {
+                    return None;
+                }
+                if matches!(live.release, Release::Behind(_)) {
+                    self.release_caught_up(live, released);
+                }
+                Some(self.hold_done(live, held))
+            }
             Ok(RecognizerEvent::Partial(text)) => {
                 if has_words(&text) {
                     live.last_words = Instant::now();
@@ -2323,23 +2336,31 @@ where
                 let done = self.on_final(live, &text);
                 done.or_else(|| {
                     let released = live.released()?;
+                    // A final covers one stretch of speech. While the recognizer has audio from
+                    // before the release left, this one is not the hold's last word.
+                    if live.session.behind() {
+                        return None;
+                    }
                     if matches!(live.release, Release::Behind(_)) {
                         self.release_caught_up(live, released);
                     }
-                    Some(
-                        if held.is_none()
-                            && let Some(pending) = live.text.pending()
-                        {
-                            Done::Accepted(CaptureRequest {
-                                route: pending.route,
-                                text: pending.text.clone(),
-                            })
-                        } else {
-                            self.finish_hold(live, held)
-                        },
-                    )
+                    Some(self.hold_done(live, held))
                 })
             }
+        }
+    }
+
+    /// Ends a released hold with the text the recognizer has.
+    fn hold_done(&mut self, live: &mut Live<R::Session>, held: Option<&Held>) -> Done {
+        if held.is_none()
+            && let Some(pending) = live.text.pending()
+        {
+            Done::Accepted(CaptureRequest {
+                route: pending.route,
+                text: pending.text.clone(),
+            })
+        } else {
+            self.finish_hold(live, held)
         }
     }
 
@@ -2388,6 +2409,7 @@ where
                 return Some(Done::from(stop));
             }
         }
+        live.session.hold_released();
         if live.session.buffers_audio() {
             self.streams.send(&RELEASE_SILENCE);
             if let Err(error) = live.session.finish_audio().await {
@@ -2396,8 +2418,11 @@ where
             self.set_state(EngineState::TranscribingLive {
                 route: held.route(),
             });
-        } else if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
-            return Some(Done::from(stop));
+        } else {
+            if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                return Some(Done::from(stop));
+            }
+            live.session.input_ended();
         }
         live.release = Release::Tail(Instant::now());
         self.publish(live);

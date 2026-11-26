@@ -77,6 +77,8 @@ struct Fake {
     seen: Arc<AtomicUsize>,
     done: mpsc::Sender<()>,
     release_limit: Duration,
+    /// Words the model holds back until the input ends.
+    held_back: Option<&'static str>,
 }
 
 /// Fails to load this many times, then provides the [`Fake`]s it was given, one for each load.
@@ -133,6 +135,7 @@ struct FakeStream {
     gate: Option<Gate>,
     seen: Arc<AtomicUsize>,
     done: mpsc::Sender<()>,
+    held_back: Option<&'static str>,
 }
 
 impl SpeechModel for Fake {
@@ -160,6 +163,7 @@ impl SpeechModel for Fake {
                 .take(),
             seen: Arc::clone(&self.seen),
             done: self.done.clone(),
+            held_back: self.held_back,
         }
     }
 }
@@ -174,6 +178,16 @@ impl SpeechStream for FakeStream {
             let _ = gate.release.recv_timeout(WAIT);
         }
         (self.script)(n)
+    }
+
+    fn end_input(&mut self) -> Reply {
+        Ok(self.held_back.take().map_or_else(Vec::new, |text| {
+            vec![RecognizerEvent::Final(text.to_owned())]
+        }))
+    }
+
+    fn holds_text_for_end(&self) -> bool {
+        self.held_back.is_some()
     }
 }
 
@@ -229,6 +243,7 @@ fn rig_on(
         seen: Arc::clone(&seen),
         done: done_tx.clone(),
         release_limit: RELEASE_LIMIT,
+        held_back: None,
     };
     Rig {
         recognizer: LocalRecognizer::new(
@@ -266,7 +281,20 @@ impl Rig {
                 seen: Arc::new(AtomicUsize::new(0)),
                 done: self.done_tx.clone(),
                 release_limit: RELEASE_LIMIT,
+                held_back: None,
             });
+    }
+
+    /// Makes the model the next load provides hold `text` back until the input ends.
+    fn then_hold_back(&self, text: &'static str) {
+        self.recognizer
+            .source()
+            .fakes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .front_mut()
+            .expect("a model to load")
+            .held_back = Some(text);
     }
 
     /// Sets how long the model the next load provides takes for its final after the release.
@@ -335,6 +363,54 @@ async fn the_session_reports_how_long_its_model_takes_for_its_final_after_the_re
         session.close().await;
         let _ = rig.metrics().await;
     }
+}
+
+#[tokio::test]
+async fn a_released_hold_stays_behind_until_the_model_answers_the_end_of_its_audio() {
+    // Nemotron Unified holds the last word back until the release flush's silence gives it the
+    // right context, so the wait must last until that answer, not until the flush is sent.
+    let rig = rig(
+        "release-flush",
+        |n| match n {
+            0 => Ok(vec![partial("reduced our hosting")]),
+            _ => Ok(vec![]),
+        },
+        None,
+        0,
+    );
+    rig.then_hold_back("reduced our hosting bills");
+    let mut session = rig.recognizer.connect().await.expect("connects");
+    session.send_frame(&FRAME).await.expect("sends");
+    session.hold_released();
+    for _ in 0..10 {
+        session.send_frame(&FRAME).await.expect("sends");
+    }
+    session.input_ended();
+    tokio::time::timeout(WAIT, async {
+        assert_eq!(
+            session.next_event().await,
+            Ok(partial("reduced our hosting"))
+        );
+        assert!(
+            session.behind(),
+            "the model has not brought out the words it held back from the release flush yet"
+        );
+        assert_eq!(
+            session.next_event().await,
+            Ok(RecognizerEvent::Final(
+                "reduced our hosting bills".to_owned()
+            ))
+        );
+        assert_eq!(session.next_event().await, Ok(RecognizerEvent::Ended));
+    })
+    .await
+    .expect("the model answers the end of its input");
+    assert!(
+        !session.behind(),
+        "the model has answered every frame and the end of the hold's audio"
+    );
+    session.close().await;
+    let _ = rig.metrics().await;
 }
 
 #[tokio::test]

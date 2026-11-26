@@ -6018,7 +6018,9 @@ async fn a_hold_with_no_final_within_the_limit_pastes_what_is_there_at_the_limit
 async fn a_hold_without_a_replaying_final_pastes_at_the_short_release_wait() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
+            let dir = record_dir("short-release-wait");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
             let task = hold_task(engine, frames);
             rig.hold().await;
             rig.say(1000, Say::Partial("partial text")).await;
@@ -6030,10 +6032,12 @@ async fn a_hold_without_a_replaying_final_pastes_at_the_short_release_wait() {
             );
             assert_eq!(
                 rig.state(),
-                EngineState::Finishing {
-                    route: CaptureRoute::Paste
+                EngineState::Capturing {
+                    committed: String::new(),
+                    partial: Some("partial text".to_owned()),
+                    notice: None,
                 },
-                "the overlay says it is finishing from the release"
+                "an ordinary release shows no finishing state during the normal wait"
             );
             rig.at(1450).await;
             assert_eq!(
@@ -6045,6 +6049,13 @@ async fn a_hold_without_a_replaying_final_pastes_at_the_short_release_wait() {
                 finished(task).await,
                 accepted(CaptureRoute::Paste, "partial text")
             );
+            let waited = read_lines(&dir.join("metrics.jsonl"))
+                .into_iter()
+                .find(|line| line["event"] == "desktop_release_wait");
+            assert!(
+                waited.is_none(),
+                "a caught-up release records no finishing wait, only the model's latency: {waited:?}"
+            );
         })
         .await;
 }
@@ -6053,7 +6064,9 @@ async fn a_hold_without_a_replaying_final_pastes_at_the_short_release_wait() {
 async fn a_hold_released_while_the_recognizer_is_behind_waits_for_its_final_and_pastes_it_all() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
+            let dir = record_dir("release-wait-caught-up");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
             rig.server.behind(true);
             let task = hold_task(engine, frames);
             rig.hold().await;
@@ -6072,23 +6085,84 @@ async fn a_hold_released_while_the_recognizer_is_behind_waits_for_its_final_and_
                 },
                 "the overlay says the hold is finishing"
             );
-            rig.feed_until(2999, Kind::Quiet).await;
+            // A final for the stretches heard so far, while the rest of the queued audio is not
+            // answered yet: it must not end the hold.
+            rig.feed_until(2000, Kind::Quiet).await;
+            rig.finals("please bring all the coffee").await;
+            assert!(
+                !task.is_finished(),
+                "a final that covers only part of the audio does not end a hold that is behind"
+            );
             assert!(
                 rig.started(Cue::Accepted).is_empty(),
-                "the hold keeps waiting while the recognizer is behind"
+                "the hold keeps waiting while audio from before the release is unanswered"
             );
+            rig.feed_until(2999, Kind::Quiet).await;
             assert!(!task.is_finished(), "the capture is still open");
+            rig.server.behind(false);
             rig.at(3000).await;
-            rig.finals("please bring all the coffee we have").await;
+            rig.finals("we have").await;
             assert_eq!(
                 rig.started(Cue::Accepted),
                 [3000],
-                "the recognizer's final pastes at once, with every word"
+                "the recognizer's final after it caught up pastes at once, with every word"
             );
             assert_eq!(
                 finished(task).await,
                 accepted(CaptureRoute::Paste, "please bring all the coffee we have")
             );
+            let waited = read_lines(&dir.join("metrics.jsonl"))
+                .into_iter()
+                .find(|line| line["event"] == "desktop_release_wait")
+                .expect("the finishing wait is recorded");
+            assert_eq!(waited["outcome"], "caught_up", "{waited}");
+            assert_eq!(waited["duration_ms"], 1800.0, "{waited}");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_ends_when_the_recognizer_answers_the_end_of_its_audio() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("release-wait-ended");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            rig.server.behind(true);
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Partial("reduced our hosting")).await;
+            rig.release(1200).await;
+            rig.feed_until(1499, Kind::Quiet).await;
+            assert_eq!(
+                rig.state(),
+                EngineState::Finishing {
+                    route: CaptureRoute::Paste
+                },
+                "the overlay says the hold is finishing"
+            );
+            rig.finals("reduced our hosting bills").await;
+            assert!(
+                !task.is_finished(),
+                "a final does not end a hold whose session is still behind"
+            );
+            rig.server.emit(Ok(RecognizerEvent::Ended));
+            settle().await;
+            assert_eq!(
+                rig.started(Cue::Accepted),
+                [1499],
+                "the recognizer's answer for the end of the audio ends the hold at once"
+            );
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "reduced our hosting bills")
+            );
+            let waited = read_lines(&dir.join("metrics.jsonl"))
+                .into_iter()
+                .find(|line| line["event"] == "desktop_release_wait")
+                .expect("the finishing wait is recorded");
+            assert_eq!(waited["outcome"], "caught_up", "{waited}");
+            assert_eq!(waited["duration_ms"], 299.0, "{waited}");
         })
         .await;
 }
