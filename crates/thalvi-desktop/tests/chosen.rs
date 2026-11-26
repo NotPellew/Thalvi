@@ -1,6 +1,6 @@
 //! The chosen recognizer hands audio to the entry's session and ends it when asked, and only an on-device entry has a model to preload.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::time::Duration;
 

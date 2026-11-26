@@ -3,7 +3,7 @@
 //! Needs the model files (`encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx`,
 //! `tokens.txt`) in the directory named by `THALVI_SPEECH_MODEL`; run with `--ignored`.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::path::PathBuf;
 

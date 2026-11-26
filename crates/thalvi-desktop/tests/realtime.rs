@@ -1,6 +1,6 @@
 //! A recognizer reached directly speaks Meta's realtime ASR protocol to a local fake; no Thalvi server runs.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::time::Duration;
 

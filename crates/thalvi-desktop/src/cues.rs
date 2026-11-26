@@ -105,7 +105,7 @@ pub fn synthesize(cue: Cue, rate: u32) -> Vec<f32> {
             let count = (rate * duration) as u32;
             (0..count).map(move |n| {
                 let t = f64::from(n) / rate;
-                #[expect(clippy::cast_possible_truncation, reason = "audio samples are f32")]
+                #[expect(clippy::cast_possible_truncation, reason = "two sines scale the 0.15 amplitude to [-0.15, 0.15], rounded to f32 for playback")]
                 let sample = (AMPLITUDE
                     * (2.0 * PI * frequency * t).sin()
                     * (PI * t / duration).sin()) as f32;

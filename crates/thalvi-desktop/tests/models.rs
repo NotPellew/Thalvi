@@ -1,6 +1,6 @@
 //! Model downloads are verified, cached, and never leave a bad file behind.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::fmt::Write;
 use std::fs;

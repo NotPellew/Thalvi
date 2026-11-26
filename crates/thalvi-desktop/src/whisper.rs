@@ -1093,7 +1093,7 @@ impl<L: Launcher> RecognizerSession for WhisperSession<L> {
 
     #[expect(
         clippy::unused_async_trait_impl,
-        reason = "Finishing only updates buffered capture state."
+        reason = "Marks the final frame count, aborts any preview and wakes next_event without awaiting."
     )]
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
         self.finished_frames = Some(self.frames.len());
@@ -1104,7 +1104,7 @@ impl<L: Launcher> RecognizerSession for WhisperSession<L> {
 
     #[expect(
         clippy::unused_async_trait_impl,
-        reason = "Frames are buffered locally without I/O."
+        reason = "Buffers one frame and can spawn a preview; next_event awaits the reply."
     )]
     async fn send_frame(&mut self, frame: &Frame) -> Result<(), RecognizerError> {
         self.frames.push(*frame);

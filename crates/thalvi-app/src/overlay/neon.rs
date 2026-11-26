@@ -234,7 +234,10 @@ impl Neon {
             Tone::Quiet => theme.state.quiet,
             _ => theme.muted,
         };
-        #[expect(clippy::cast_possible_truncation, reason = "a clock in seconds")]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "monotonic Duration milliseconds fit f32; only a rounded bar phase is needed"
+        )]
         let now_ms = (view.clock * art::MILLIS_PER_SECOND) as f32;
         for (index, envelope) in (0u8..).zip(art::ENVELOPE) {
             let share = if moving {
@@ -527,7 +530,10 @@ fn draft(view: &View) -> Option<Draft> {
             waiting_for_quiet,
             ..
         } => {
-            #[expect(clippy::cast_precision_loss, reason = "milliseconds of a pause")]
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "left and total are at most 5000 ms, exactly representable in f32"
+            )]
             let left = view.countdown.as_ref().map_or(1.0, |running| {
                 view.left_ms(running) as f32 / running.total_ms.max(1) as f32
             });
@@ -581,7 +587,10 @@ fn card(
     let layout = Layout::Wrapped { width: inner };
     let lines = text.line_widths(&spans, style, layout, scale);
     let last = lines.last().copied().unwrap_or(0.0);
-    #[expect(clippy::cast_precision_loss, reason = "a few lines")]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "rounding starts above 2^24 lines, where the count still exceeds the three-line cap"
+    )]
     let mut count = lines.len().max(1) as f32;
     // The ending sits after the last word, or on a line of its own when it does not fit.
     let (ending_gap, ending_pad, ..) = art::ENDING;
@@ -833,7 +842,10 @@ mod tests {
         let (short, long) = ("hi", "hello there");
         let (at_short, row) = caret(&words(short, true, None)).unwrap();
         let (at_long, same_row) = caret(&words(long, true, None)).unwrap();
-        #[expect(clippy::cast_precision_loss, reason = "pixel columns")]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the two scale-1 caret columns differ by less than 460, exact in f32"
+        )]
         let moved = (at_long - at_short) as f32;
         assert!(
             (moved - (width(long) - width(short))).abs() <= 1.5,
