@@ -420,6 +420,45 @@ async fn cancelling_drops_the_frames_still_waiting_for_the_model() {
     assert_eq!(metric["frames"], 1);
 }
 
+/// The model is still on the first frame while the microphone has moved on, as one slower than real time is.
+#[tokio::test(start_paused = true)]
+async fn a_model_three_seconds_behind_stops_the_recognition_and_names_itself() {
+    let (release, gate) = mpsc::channel();
+    let rig = rig("behind", |_| Ok(vec![]), Some(gate), 0);
+    let seen = Arc::clone(&rig.seen);
+    let mut session = rig.recognizer.connect().await.expect("connects");
+    let mut stopped = None;
+    for _ in 0..40 {
+        match session.send_frame(&FRAME).await {
+            Ok(()) => tokio::time::advance(Duration::from_millis(80)).await,
+            Err(error) => {
+                stopped = Some(error);
+                break;
+            }
+        }
+    }
+    let error = stopped.expect("a model three seconds behind stops the recognition");
+    assert_eq!(
+        error.to_string(),
+        "This computer can't keep up with fake-model. Nothing was delivered."
+    );
+    session.cancel().await;
+    let _ = release.send(());
+
+    let metric = rig.metric().await;
+    assert_eq!(metric["outcome"], "cant_keep_up");
+    assert_eq!(metric["frames"], 1, "the audio queued behind it is dropped");
+    assert!(
+        metric["lag_ms"].as_f64().expect("a lag") >= 3_000.0,
+        "{metric}"
+    );
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the model was never fed the backlog"
+    );
+}
+
 #[tokio::test]
 async fn a_model_that_cannot_be_fetched_is_reported_and_fetched_again_on_the_next_try() {
     let rig = rig("load", dictation, None, 1);
