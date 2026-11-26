@@ -1248,7 +1248,26 @@ function speech(context: PageContext): SpeechRows {
     openEditor(useServer, null, "realtime");
   });
   const retry = button("Retry", retryDownload);
-  const summaryActions = el("div", { class: "trow", hidden: true }, useServer, retry, retryProblem);
+  const lighterProblem = note();
+  const lighter = button("Use the lighter model", () => {
+    const offer = currentStatus.state === "failed" ? (currentStatus.offer ?? null) : null;
+    const entry = activeLive();
+    if (offer === null || entry?.kind !== "on_device") return;
+    say(lighterProblem, "");
+    lighter.disabled = true;
+    backend.useLighterModel(offer.name).then(
+      () => {
+        liveApplied.textContent = controls.confirmation();
+        updateSummary();
+      },
+      (error: unknown) => {
+        say(lighterProblem, errorText(error));
+      },
+    ).finally(() => {
+      lighter.disabled = false;
+    });
+  });
+  const summaryActions = el("div", { class: "trow", hidden: true }, useServer, lighter, retry, retryProblem, lighterProblem);
   let currentStatus: Status = { state: "listening" };
   let rebuilding = false;
   const modelTitles = new Map<string, string>();
@@ -1339,10 +1358,18 @@ function speech(context: PageContext): SpeechRows {
     const how = entry.kind === "on_device" ? modelTitleFor(entry) : ARRIVES[entry.kind];
     nextDictation.textContent = `Next dictation: ${entry.name} · ${how} · ${statusState(currentStatus)}`;
     const recognizerFailed = currentStatus.state === "failed" && currentStatus.kind === "recognizer";
+    const offer = currentStatus.state === "failed" ? (currentStatus.offer ?? null) : null;
     const preparing = entry.kind === "on_device" && (currentStatus.state === "loading" || recognizerFailed);
-    summaryActions.hidden = !preparing;
+    summaryActions.hidden = !(preparing || offer !== null);
     // Only a catalog model can be downloaded again; a folder of the user's own is fixed on disk.
     retry.hidden = !recognizerFailed || (entry.kind === "on_device" && isModelFolder(entry.model ?? SPEECH_MODEL));
+    lighter.hidden = offer === null;
+    if (offer !== null) {
+      const wanted = `Use ${offer.title} (lighter on this computer)`;
+      if (lighter.textContent !== wanted) lighter.textContent = wanted;
+    } else {
+      say(lighterProblem, "");
+    }
     if (!preparing) say(retryProblem, "");
   }
 

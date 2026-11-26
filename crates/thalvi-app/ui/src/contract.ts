@@ -38,8 +38,16 @@ export type Status =
   | { state: "merging"; target: string | null; route: Route } // extra recognizers' texts are being merged with the live text; cancellable
   | { state: "cleaningUp"; target: string | null } // a dictation is being cleaned before it is pasted; cancellable
   | { state: "done"; target: string | null; route: Route; notice: string }
-  | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report
+  | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind; offer: LighterModel | null } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report; offer: a lighter on-device model to switch to after a cant-keep-up failure
   | { state: "loading"; notice: string }; // the speech model is being fetched or loaded
+
+/** A lighter on-device model offered after this computer could not keep up. */
+export interface LighterModel {
+  /** The catalog name the settings store. */
+  name: string;
+  /** What Settings calls it. */
+  title: string;
+}
 
 export interface Level {
   level: number;
@@ -428,6 +436,8 @@ export interface Backend {
   listSpeechModels(): Promise<SpeechModelInfo[]>;
   /** Resolves when the model is on disk and verified; rejects with a `DownloadFailure`. */
   downloadSpeechModel(name: string): Promise<void>;
+  /** Downloads the lighter model a failure offers and makes it the model in use; resolves the same way. */
+  useLighterModel(name: string): Promise<void>;
   onSpeechModelProgress(listener: (progress: SpeechModelProgress) => void): void;
   /** Where the model runs, or will run when it loads, in plain words: the GPU, or the CPU and why. */
   speechDevice(name: string): Promise<string>;

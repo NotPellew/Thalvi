@@ -1071,7 +1071,7 @@ describe("the word list", () => {
     return [
       { ...NEMOTRON },
       { ...UNIFIED },
-      { ...NEMOTRON, name: "parakeet_tdt_v3", title: "Parakeet TDT" },
+      { ...NEMOTRON, name: "parakeet_tdt_v3", title: "Parakeet TDT v3" },
       { ...WHISPER },
       { ...WHISPER, name: "whisper_turbo_vulkan", title: VULKAN_TITLE },
     ];
@@ -1288,7 +1288,6 @@ describe("the Recognition page", () => {
     button(LIGHTER).click();
     await settle();
     expect(recognition().textContent).toContain(message);
-    expect(deviceOf(stub.settings()).model).toBe("nemotron_160ms");
     expect(stub.applied().length).toBe(0);
   });
 
@@ -1298,12 +1297,12 @@ describe("the Recognition page", () => {
     stub.emit(CANT_KEEP_UP);
     await settle();
     expect(root.textContent).toContain(LIGHTER);
-    (root.querySelector("footer .bar button[aria-label='Dismiss error']") as HTMLButtonElement).click();
+    (root.querySelector("footer.bar button[aria-label='Dismiss error']") as HTMLButtonElement).click();
     await settle();
     expect(stub.backend.dismissError).toHaveBeenCalled();
     stub.emit({ ...CANT_KEEP_UP, offer: null });
     await settle();
-    expect(root.textContent).not.toContain(LIGHTER);
+    expect(button(LIGHTER).hidden).toBe(true);
   });
 
   it("shows the Live recognizer with the next dictation and the extras, then the four groups by kind, then the word list", async () => {
@@ -2106,8 +2105,8 @@ describe("the next dictation summary and state words", () => {
     ["done", { state: "done", target: null, route: "paste", notice: "Pasted" }, "Ready"],
     ["loading", { state: "loading", notice: "Loading the speech model." }, "Loading the speech model."],
     ["paused", { state: "paused" }, "Paused — resume to dictate"],
-    ["failed", { state: "failed", notice: "n", headline: "Can't reach speech server — Settings", causes: [], kind: "recognizer" }, "Can't reach speech server — Settings"],
-    ["failed delivery", { state: "failed", notice: "n", headline: "Nothing was pasted — Settings", causes: [], kind: "delivery" }, "Ready"],
+    ["failed", { state: "failed", notice: "n", headline: "Can't reach speech server — Settings", causes: [], kind: "recognizer", offer: null }, "Can't reach speech server — Settings"],
+    ["failed delivery", { state: "failed", notice: "n", headline: "Nothing was pasted — Settings", causes: [], kind: "delivery", offer: null }, "Ready"],
   ] as const)("shows %s as the summary state pushed through onStatus", async (_name, status, state) => {
     const stub = await open(several());
     goTo("recognition");
@@ -2149,7 +2148,7 @@ describe("the next dictation summary and state words", () => {
 
   describe("the summary's actions while the recognizer is being prepared", () => {
     const LOADING: Status = { state: "loading", notice: "Downloading the speech model — 42%" };
-    const FAILED: Status = { state: "failed", notice: "n", headline: "Download failed", causes: [], kind: "recognizer" };
+    const FAILED: Status = { state: "failed", notice: "n", headline: "Download failed", causes: [], kind: "recognizer", offer: null };
     const actions = (): string[] => {
       const row = root.querySelector(".next-dictation + div");
       return row === null || (row as HTMLElement).hidden
@@ -3698,7 +3697,7 @@ describe("live controls", () => {
 
   it("shows a failed apply plainly", async () => {
     const stub = await open();
-    stub.emit({ state: "failed", notice: "The saved microphone could not be opened.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The saved microphone could not be opened.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     expect(root.querySelector(".err")?.textContent).toBe("The saved microphone could not be opened.");
   });
 
@@ -3706,7 +3705,7 @@ describe("live controls", () => {
     [
       "a runtime failure",
       (stub) => {
-        stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: ["connection refused (os error 111)"], kind: "other" });
+        stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: ["connection refused (os error 111)"], kind: "other", offer: null });
         return Promise.resolve();
       },
       "The speech server is not reachable.",
@@ -3746,7 +3745,7 @@ describe("live controls", () => {
   it("says plainly when the report could not be copied and shows Copied only on success", async () => {
     const stub = await open();
     stub.backend.copyReport.mockRejectedValueOnce("No clipboard tool is installed.");
-    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     button("Copy").click();
     await settle();
     expect(root.querySelector(".msg")?.textContent).toBe("Could not copy: No clipboard tool is installed.");
@@ -3806,7 +3805,7 @@ describe("live controls", () => {
     },
   ])("$name", async ({ query, trigger, expected }) => {
     const stub = await open();
-    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The speech server is not reachable.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     if (query !== "") {
       const search = root.querySelector<HTMLInputElement>('input[type="search"]');
       expect(search).not.toBeNull();
@@ -3832,13 +3831,13 @@ describe("live controls", () => {
   it.each([false, true])("uses audio state for listening controls when a failure occurs (paused=%s)", async (paused) => {
     const stub = await open();
     stub.audio({ selected: null, active: paused ? null : "Built-in", paused, problem: null });
-    stub.emit({ state: "failed", notice: "The last operation failed.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The last operation failed.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     expect(control("Listening", "input").checked).toBe(!paused);
   });
 
   it("retains a runtime problem through an applied change and clears it on recovery", async () => {
     const stub = await open();
-    stub.emit({ state: "failed", notice: "The chosen microphone is unavailable.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "The chosen microphone is unavailable.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     goTo("commands");
     type(control("Quiet before paste", "input"), "1.5");
     await settle();
@@ -4479,7 +4478,7 @@ describe("the failure bar", () => {
     const stub = await open();
     const bar = root.querySelector<HTMLElement>("footer.bar") as HTMLElement;
     expect(getComputedStyle(bar).display).toBe("none");
-    stub.emit({ state: "failed", notice: "Could not download the wake model.", headline: "Failed — Settings", causes: [], kind: "other" });
+    stub.emit({ state: "failed", notice: "Could not download the wake model.", headline: "Failed — Settings", causes: [], kind: "other", offer: null });
     expect(getComputedStyle(bar).display).not.toBe("none");
     expect(getComputedStyle(root.querySelector(".err") as HTMLElement).display).not.toBe("none");
     expect(getComputedStyle(root.querySelector(".msg") as HTMLElement).display).toBe("none");

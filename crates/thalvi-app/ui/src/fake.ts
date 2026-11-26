@@ -97,7 +97,7 @@ function script(): Status[] {
     { state: "pending", target: slack, route: "paste", text: "Remind me to call", waitingForQuiet: false, pauseMs: 700, copies: false },
     { state: "done", target: slack, route: "paste", notice: "Pasted" },
     { state: "starting", target: null },
-    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Check that it is running, or fix its address under Settings → Recognition.", headline: "Can't reach speech server — Settings", causes: [], kind: "other" },
+    { state: "failed", notice: "Thalvi could not reach the speech server at ws://127.0.0.1:8080 (connection refused). Check that it is running, or fix its address under Settings → Recognition.", headline: "Can't reach speech server — Settings", causes: [], kind: "other", offer: null },
     { state: "loading", notice: "Loading the speech model." },
     { state: "starting", target: "Firefox" },
     { state: "capturing", target: "Firefox", committed: "", partial: null, notice: null },
@@ -379,6 +379,11 @@ export function fakeBackend(params: URLSearchParams): Backend {
           resolve();
         }, 400);
       }),
+    useLighterModel: (name) => {
+      const entry = SETTINGS.stt.entries.find((candidate) => candidate.kind === "on_device" && candidate.active);
+      if (entry) entry.model = name;
+      return Promise.resolve();
+    },
     onSpeechModelProgress: (listener) => speechListeners.push(listener),
     speechDevice: (name) =>
       Promise.resolve(name === "unified_160ms" ? "Will run on the GPU (NVIDIA GeForce RTX 5070 Ti, Vulkan)" : "Will run on the CPU: this model runs on the CPU"),
