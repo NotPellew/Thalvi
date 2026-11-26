@@ -221,11 +221,13 @@ admitting delivery, and `Engine::on_quiet` rechecks `Presentation::Shown` before
 `confirm_final_submit` keep the same cancellation writes and delivery fence, so the model actions
 are unchanged.
 
-A longer release wait (#449 repair): `RELEASE_LIMIT` rises from 250 ms to 400 ms. `Live::tail`
-returns `at + RELEASE_LIMIT` for a recognizer that does not buffer audio, so a hold pastes its
-final up to 400 ms after the release instead of 250 ms. The tail deadline is not a modeled action,
-await boundary or delivery guard, and a control queued before the final empty receive still
-prevents admission, so the model actions are unchanged.
+A release wait the session reports (#449 repair): `RELEASE_LIMIT` is 250 ms again, and
+`RecognizerSession::release_limit` gives 400 ms only to a session whose final re-hears the end of
+the stretch (Parakeet's TDT decoder, carried from `SpeechModel::release_limit`); `Live::tail`
+returns `at + self.session.release_limit()` for a recognizer that does not buffer audio, and the
+final pass's `finished` uses the same value. The tail deadline is not a modeled action, await
+boundary or delivery guard, and a control queued before the final empty receive still prevents
+admission, so the model actions are unchanged.
 
 The five checked invariants have these exact meanings:
 
