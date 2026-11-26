@@ -1,5 +1,6 @@
 # Mutation testing examines only the high-risk state, delivery, hold-key and config-save files;
-# a survivor in any of them fails the Heavy shard that found it.
+# a survivor in any of them fails the Heavy shard that found it. Add the missing test, or record a proven
+# equivalent or OS-only wiring exclusion below with a one-line reason.
 examine_globs = [
     "crates/thalvi-desktop/src/hold.rs",
     "crates/thalvi-desktop/src/delivery.rs",

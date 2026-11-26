@@ -396,7 +396,7 @@ This copies tracked Rust sources to a new `/var/tmp/thalvi-cancel-repro-...`
 directory, runs the workspace's pinned Rust toolchain and locked Cargo
 dependencies offline, and builds only the desktop library test in a dedicated
 user-cache target directory. It needs cached Cargo dependencies and native
-build prerequisites from AGENTS.md. It uses immediate fake cues, an event-gated
+build prerequisites listed in `.github/scripts/gates`. It uses immediate fake cues, an event-gated
 fake recognizer close and a recording host; no audio, native host, model, or
 service is used. The runner's `Control`, `Settling`, `while_delivering`,
 `Requests` and `drive` are extracted byte for byte, so the replay settles the

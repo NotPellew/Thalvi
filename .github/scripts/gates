@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs a component's gates, the same commands CI runs; stops at the first failure.
-# Toolchains and system packages are installed outside this script (see AGENTS.md).
+# Toolchains and system packages are installed outside this script; each gate lists what it needs.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
@@ -56,6 +56,9 @@ bundle() {
   fi
 }
 
+# Needs the Rust toolchain, Node pinned in .node-version, Python pinned in .python-version and, on Linux,
+# libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev. The package also needs what
+# whisper-helper builds with: git, cmake, a C++ compiler and libvulkan-dev glslc spirv-headers.
 gate_server() {
   desktop_ui
   step cargo fmt --all -- --check
@@ -72,6 +75,8 @@ gate_server() {
     LINUXDEPLOY_EXCLUDED_LIBRARIES='libvulkan.so*'
 }
 
+# Needs the server gate's toolchains on windows-latest, with the Vulkan SDK that vulkan-sdk.ps1 installs
+# in place of the Linux packages, and runs from Git Bash.
 gate_desktop_windows() {
   desktop_ui
   step cargo fmt --all -- --check
@@ -80,13 +85,16 @@ gate_desktop_windows() {
   bundle nsis
 }
 
+# Needs Node pinned in .node-version and, on Linux, the system libraries Chromium needs: ubuntu-latest has
+# them; elsewhere `npm exec --prefix crates/thalvi-app/ui -- playwright-core install-deps chromium` as root.
 gate_desktop_ui() {
   node_checks crates/thalvi-app/ui
-  # Fetches the headless shell playwright-core pins; Chromium's system libraries are a prerequisite (AGENTS.md).
+  # Fetches the headless shell playwright-core pins.
   in_dir crates/thalvi-app/ui npm exec -- playwright-core install --only-shell chromium
   in_dir crates/thalvi-app/ui npm run explore
 }
 
+# Needs pipx and uv (Python pinned in speech/asr/.python-version).
 gate_speech() {
   step "${SHELLCHECK[@]}" speech/nemotron-asr.sh
   in_dir speech/asr uv run --frozen ruff check
@@ -94,6 +102,7 @@ gate_speech() {
   in_dir speech/asr uv run --frozen pytest
 }
 
+# Needs pipx, git, perl and python3.
 gate_issue_sync() {
   step "${SHELLCHECK[@]}" .github/scripts/gates .github/scripts/whisper-helper .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh \
     .github/scripts/changed .github/scripts/changed.test.sh .github/scripts/rust-layout.test.sh
@@ -102,6 +111,7 @@ gate_issue_sync() {
   step python3 .github/scripts/hold.test.py
 }
 
+# Needs Node pinned in .node-version, minisign, jq and pipx.
 gate_release() {
   step npm ci --ignore-scripts --prefix crates/thalvi-app/ui
   step "${SHELLCHECK[@]}" .github/scripts/updater-feed .github/scripts/updater-feed.test.sh \
@@ -110,6 +120,8 @@ gate_release() {
   step .github/scripts/newer-version.test.sh
 }
 
+# The hash checks need Python pinned in .python-version, standard library only. Each formal skill a run
+# selects (.agents/skills/formal-*) names what its checker needs.
 gate_formal() {
   step python3 .github/scripts/formal-source-hashes.py
   step python3 .github/scripts/formal-source-hashes.test.py

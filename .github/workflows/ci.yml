@@ -20,7 +20,8 @@ permissions:
 
 jobs:
   # Its outputs are 'true', 'false', or for tests cargo package arguments or `none`; the jobs below
-  # run a step unless an output says 'false', so a failed detection runs everything.
+  # run a step unless an output says 'false', so a failed detection runs everything. A job with nothing
+  # to run still reports under its name, so required checks stay satisfied.
   changes:
     name: changes
     runs-on: ubuntu-latest

@@ -24,7 +24,7 @@ Three invariants, each one sentence:
   is that of the last form save that set it and returned Ok (a save that sets
   one setting never undoes another's), and the switch is that of the last
   switch save that returned Ok. A Save never writes the
-  switch, and a switch never writes the form (DECISIONS.md, "Packaged desktop
+  switch, and a switch never writes the form (decisions/app.md, "Packaged desktop
   with an OS-held login entry": the preference is "written by the switch alone,
   never by Save").
 
@@ -337,7 +337,7 @@ steps in the code's words, with the harm. The traces above describe the fixed bu
    Model it as the code does it, not as the `Serialized` flag happens to.
    Keep each file-system call and each lock its own step.
 3. Change an invariant only if the promise changed on purpose, with evidence (a
-   doc comment, test, DECISIONS.md entry or commit message), and record the old
+   doc comment, test, `decisions/` entry or commit message), and record the old
    wording, the new wording and that evidence here.
 4. Update each changed file's SHA-256 in `source.json` (`sha256sum <path>`), and
    move `sync_commit` only after confirming that the model describes that commit.
