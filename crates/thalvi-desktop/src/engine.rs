@@ -843,12 +843,13 @@ impl<S: RecognizerSession> Live<S> {
     fn waiting(&self) -> Option<EngineState> {
         let route = self
             .hold_route
-            .filter(|_| self.released().is_some())
             .filter(|_| self.text.pending().is_none())?;
-        Some(if self.session.buffers_audio() {
-            EngineState::TranscribingLive { route }
-        } else {
-            EngineState::Finishing { route }
+        Some(match self.release {
+            Release::Behind(_) => EngineState::Finishing { route },
+            Release::Tail(_) if self.session.buffers_audio() => {
+                EngineState::TranscribingLive { route }
+            }
+            _ => return None,
         })
     }
 
@@ -2130,6 +2131,7 @@ where
         }
         if let (Some(at), Some(held)) = (released, held) {
             self.held_for = Some(at.duration_since(held.at));
+            live.session.hold_released();
             if live.session.buffers_audio() {
                 self.streams.send(&RELEASE_SILENCE);
                 if let Err(error) = live.session.finish_audio().await {
@@ -2323,6 +2325,11 @@ where
                 let done = self.on_final(live, &text);
                 done.or_else(|| {
                     let released = live.released()?;
+                    // A final covers one stretch of speech. While the recognizer has audio from
+                    // before the release left, this one is not the hold's last word.
+                    if live.session.behind() {
+                        return None;
+                    }
                     if matches!(live.release, Release::Behind(_)) {
                         self.release_caught_up(live, released);
                     }
@@ -2388,6 +2395,7 @@ where
                 return Some(Done::from(stop));
             }
         }
+        live.session.hold_released();
         if live.session.buffers_audio() {
             self.streams.send(&RELEASE_SILENCE);
             if let Err(error) = live.session.finish_audio().await {

@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,12 @@ type Sent = tokio::time::Instant;
 #[derive(Default)]
 struct Backlog {
     waiting: Mutex<VecDeque<Sent>>,
+    /// Frames handed to the model so far.
+    sent: AtomicU64,
+    /// Frames the model has finished: each one's text has been produced, if it had any.
+    finished: AtomicU64,
+    /// Frames handed to the model when the hold's key came up; none of the flush after them counts.
+    released: AtomicU64,
     /// The lag this recognition stopped at, once the model fell further behind than a capture may.
     fell_behind: Mutex<Option<Duration>>,
 }
@@ -50,32 +56,33 @@ impl Backlog {
             }
         }
         waiting.push_back(now);
+        self.sent.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     /// The model finished the oldest frame it had not processed.
     fn took(&self) {
-        self.waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop_front();
-    }
-
-    /// The hold's key came up: the frames sent so far are its last.
-    fn hold_released(&self) {}
-
-    /// Whether audio from before the hold's release is still unanswered.
-    fn behind(&self) -> bool {
-        self.pending()
-    }
-
-    /// The model has frames it has not finished.
-    fn pending(&self) -> bool {
-        !self
+        if self
             .waiting
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_empty()
+            .pop_front()
+            .is_some()
+        {
+            self.finished.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The hold's key came up: the frames sent so far are its last.
+    fn hold_released(&self) {
+        self.released
+            .store(self.sent.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    /// Whether the model has audio from before the hold's release left to finish. The release flush
+    /// only triggers the final, so a session with nothing left to hear is not behind.
+    fn behind(&self) -> bool {
+        self.finished.load(Ordering::Relaxed) < self.released.load(Ordering::Relaxed)
     }
 
     /// The lag this recognition stopped at, once the model fell further behind than a capture may.
