@@ -45,6 +45,12 @@ pub trait FrameDecoder: Send + 'static {
 
     /// A new stretch of text begins; what the model heard stays its acoustic context.
     fn next_segment(&mut self);
+
+    /// Whether the decoder holds the end of its audio back: its partials would drop the last words
+    /// until it has heard the silence after them.
+    fn holds_text_for_end(&self) -> bool {
+        false
+    }
 }
 
 /// Cuts a decoder's tokens into partials and finals.
@@ -250,6 +256,28 @@ impl<D: SnapshotDecoder> SpeechStream for Revising<D> {
         let samples: Vec<f32> = frame.iter().map(|s| f32::from(*s) / PCM_SCALE).collect();
         self.push(&samples, speech)
     }
+
+    fn holds_text_for_end(&self) -> bool {
+        true
+    }
+
+    fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        if self.audio.is_empty() {
+            return Ok(Vec::new());
+        }
+        let frames = self.decoder.finish(&self.audio)?;
+        let tokens: Vec<usize> = frames.into_iter().flatten().collect();
+        let current = text(&tokens, &self.pieces);
+        self.audio.clear();
+        self.zeros = 0;
+        self.shown.clear();
+        self.decoder.next_segment();
+        Ok(if current.is_empty() {
+            Vec::new()
+        } else {
+            vec![RecognizerEvent::Final(current)]
+        })
+    }
 }
 
 impl<D: FrameDecoder> SpeechStream for Segments<D> {
@@ -275,6 +303,23 @@ impl<D: FrameDecoder> SpeechStream for Segments<D> {
             self.shown = text;
         }
         Ok(events)
+    }
+
+    fn holds_text_for_end(&self) -> bool {
+        self.decoder.holds_text_for_end()
+    }
+
+    fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        if self.spoken.is_empty() {
+            return Ok(Vec::new());
+        }
+        let text = self.text();
+        self.spoken.clear();
+        self.trailing_blanks = 0;
+        self.looked_ahead = false;
+        self.shown.clear();
+        self.decoder.next_segment();
+        Ok(vec![RecognizerEvent::Final(text)])
     }
 }
 
@@ -447,6 +492,24 @@ mod tests {
     }
 
     #[test]
+    fn the_end_of_the_input_brings_out_the_words_the_stretch_still_holds() {
+        let (events, mut stream) =
+            run("S", vec![(false, 8, vec![(0, 1)]), (true, 8, vec![(0, 1)])]);
+        assert_eq!(events, [RecognizerEvent::Partial("one".into())]);
+        assert_eq!(
+            stream.end_input().unwrap(),
+            [RecognizerEvent::Final("one".into())]
+        );
+        assert!(stream.decoder.script.is_empty());
+        assert_eq!(stream.decoder.resets, 1);
+        assert_eq!(
+            stream.end_input().unwrap(),
+            [],
+            "an input that already ended brings out nothing more"
+        );
+    }
+
+    #[test]
     fn room_noise_without_words_keeps_only_a_bounded_tail() {
         let mut snapshots = vec![(true, 8, vec![]), (true, 16, vec![])];
         snapshots.extend(std::iter::repeat_n((true, 24, vec![]), 4));
@@ -492,5 +555,51 @@ mod tests {
             );
             assert!(stream.decoder.script.is_empty(), "{name}");
         }
+    }
+
+    struct Encoded {
+        frames: std::collections::VecDeque<Vec<Vec<usize>>>,
+        resets: usize,
+    }
+
+    impl FrameDecoder for Encoded {
+        fn push(&mut self, _samples: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            Ok(self.frames.pop_front().unwrap_or_default())
+        }
+
+        fn lookahead(&self, _silence: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            Ok(Vec::new())
+        }
+
+        fn next_segment(&mut self) {
+            self.resets += 1;
+        }
+    }
+
+    #[test]
+    fn a_stream_that_never_reaches_its_endpoint_answers_when_the_input_ends() {
+        let pieces = Arc::new(["▁one"].map(str::to_owned).to_vec());
+        let mut stream = Segments::new(
+            Encoded {
+                frames: std::collections::VecDeque::from([vec![vec![0]], vec![]]),
+                resets: 0,
+            },
+            pieces,
+            8,
+            1_280,
+        );
+        let frame = [0i16; FRAME_SAMPLES];
+        let mut events = stream.accept(&frame).unwrap();
+        events.extend(stream.accept(&frame).unwrap());
+        assert_eq!(events, [RecognizerEvent::Partial("one".into())]);
+        assert_eq!(
+            stream.end_input().unwrap(),
+            [RecognizerEvent::Final("one".into())]
+        );
+        assert_eq!(
+            stream.end_input().unwrap(),
+            [],
+            "a stretch that already ended brings out nothing more"
+        );
     }
 }

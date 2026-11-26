@@ -174,20 +174,23 @@ areas your change touches. Editing rules are in
   storing the default text, a prompt without an endpoint.
 - **Opening phrases, then the bound app, pick the writing prompt.** An explicit write whose words start with a `writing.openings` phrase as whole words gets its prompt (longest wins); else the first `writing.apps` style whose app (Hyprland class, Windows executable) and optional title fragment match the window bound at wake; else `writing.prompt`. Never combined; words go as said; app and title only match locally, never sent or recorded; GNOME names no window, so styles don't apply there.
   Why: small models follow one long prompt unevenly, and local matching adds no call. Rejected: dropping the opening from the message, a switch per rule, a routing model call, combining an opening with an app style, one prompt with a section per kind.
-- **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, and pastes on the next
-  final or after a session-reported wait: 250 ms, or 400 ms only for a decoder whose final re-hears the end of the stretch
-  (Parakeet's, measured at 235-397 ms loaded); a tentative decoding that commits frames without a token while the voice detector
-  still hears speech replays its whole stretch. The session is told where the hold's audio ends, so only audio sent before the
-  release is owed a result: a session is behind only while one of those frames has none, and a final ends the wait only once none
-  is left, so a final covering one stretch of a longer hold keeps it waiting. Only a session still behind past that wait shows
-  "Finishing…"; it keeps the hold waiting up to 15 s, then the hold pastes what it has and says the end may be missing. The wait
-  is recorded apart from the model's latency. Why: a streaming recognizer emits a word only after audio past it, an early final
-  used to cut a lagging hold to the audio heard so far, counting the flush as owed made Nemotron Unified wait its full bound, and
-  showing Finishing from the release flashed it on ordinary releases; and a busy machine (Settings opening during a hold) made the
-  recognizer fall seconds behind, so the 250 ms paste lost the end while saying it worked. Measured headless on the server recognizer, no last word lost in 336 releases (75% before when released on the
-  word's end). Rejected: one longer wait for every recognizer; a fixed 500 ms tail; an end-of-stream message through the server
-  (11% lost at the word's end, a protocol change); pasting at the wait and only warning; more left context or a global mel over
-  the capture (both stall alike).
+- **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, then tells the session its input
+  ended, and pastes on the next final or after a session-reported wait: 250 ms, or 400 ms only for a decoder whose final re-hears the end
+  of the stretch (Parakeet's, measured at 235-397 ms loaded); a tentative decoding that commits frames without a token while the voice
+  detector still hears speech replays its whole stretch. The session is told where the hold's audio ends, so only audio sent before the
+  release is owed a result: a session is behind only while one of those frames has none, and a final ends the wait only once none is left,
+  so a final covering one stretch of a longer hold keeps it waiting. A decoder whose last window's words come out only once the silence
+  after them has been decoded (Nemotron Unified's) stays behind until it has answered the end of the input, while one whose partials
+  already carry them (Nemotron Streaming, and Parakeet within its wait) is caught up at release. Only a session still behind past that wait shows "Finishing…"; it keeps the hold waiting up to
+  15 s, then the hold pastes what it has and says the end may be missing. The wait is recorded apart from the model's latency. Why: a
+  streaming recognizer emits a word only after audio past it, an early final used to cut a lagging hold to the audio heard so far; a busy
+  machine (Settings opening during a hold) made the recognizer fall seconds behind, so the 250 ms paste lost the end while saying it
+  worked; and Nemotron Unified keeps its last word until its stretch is finished, so the partial at the wait dropped it; showing Finishing
+  from the release flashed it on ordinary releases. Measured headless on the server recognizer, no last word lost in 336 releases (75%
+  before when released on the word's end). Rejected: one longer wait for every recognizer; a fixed 500 ms tail; an end-of-stream message
+  through the server (11% lost at the word's end, a protocol change); pasting at the wait and only warning; more left context or a global
+  mel over the capture (both stall alike); counting the flush as owed for every decoder (ordinary releases would wait on silence and
+  flash Finishing).
 - **Long dictation repair.** A decoding that commits 24 frames without a token while the voice detector still hears speech
   replays the whole stretch, and the final hears the last eight seconds again from a word boundary, with the silence after it;
   only a stretch up to 9.6 s is heard whole. Why: a windowed encode's frames differ from the stretch's, so the greedy search can

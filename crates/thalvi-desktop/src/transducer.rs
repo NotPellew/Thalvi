@@ -592,6 +592,20 @@ impl SpeechStream for Recognition {
             Self::Revising(stream) => stream.accept(frame),
         }
     }
+
+    fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        match self {
+            Self::Frames(stream) => stream.end_input(),
+            Self::Revising(stream) => stream.end_input(),
+        }
+    }
+
+    fn holds_text_for_end(&self) -> bool {
+        match self {
+            Self::Frames(stream) => stream.holds_text_for_end(),
+            Self::Revising(stream) => stream.holds_text_for_end(),
+        }
+    }
 }
 
 /// One recognition on a [`Transducer`], of whichever kind its encoder is.
@@ -620,6 +634,13 @@ impl FrameDecoder for ModelStream {
         match self {
             Self::CacheAware(stream) => stream.next_segment(),
             Self::Buffered(stream) => stream.next_segment(),
+        }
+    }
+
+    fn holds_text_for_end(&self) -> bool {
+        match self {
+            Self::CacheAware(stream) => stream.holds_text_for_end(),
+            Self::Buffered(stream) => stream.holds_text_for_end(),
         }
     }
 }
@@ -1417,6 +1438,10 @@ impl<B: Backend> FrameDecoder for Buffered<B> {
     fn next_segment(&mut self) {
         self.tree = TreeState::default();
         self.stretch_ended = true;
+    }
+
+    fn holds_text_for_end(&self) -> bool {
+        true
     }
 }
 

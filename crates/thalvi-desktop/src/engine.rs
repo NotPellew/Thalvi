@@ -2138,8 +2138,11 @@ where
                 self.set_state(EngineState::TranscribingLive {
                     route: held.route(),
                 });
-            } else if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
-                return Some(stop.into());
+            } else {
+                if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                    return Some(stop.into());
+                }
+                live.session.input_ended();
             }
             live.release = Release::Tail(Instant::now());
             self.publish(live);
@@ -2302,7 +2305,16 @@ where
     ) -> Option<Done> {
         match event {
             Err(error) => Some(Done::Failed(error.into())),
-            Ok(RecognizerEvent::Ended) => None,
+            Ok(RecognizerEvent::Ended) => {
+                let released = live.released()?;
+                if live.session.behind() {
+                    return None;
+                }
+                if matches!(live.release, Release::Behind(_)) {
+                    self.release_caught_up(live, released);
+                }
+                Some(self.hold_done(live, held))
+            }
             Ok(RecognizerEvent::Partial(text)) => {
                 if has_words(&text) {
                     live.last_words = Instant::now();
@@ -2332,20 +2344,23 @@ where
                     if matches!(live.release, Release::Behind(_)) {
                         self.release_caught_up(live, released);
                     }
-                    Some(
-                        if held.is_none()
-                            && let Some(pending) = live.text.pending()
-                        {
-                            Done::Accepted(CaptureRequest {
-                                route: pending.route,
-                                text: pending.text.clone(),
-                            })
-                        } else {
-                            self.finish_hold(live, held)
-                        },
-                    )
+                    Some(self.hold_done(live, held))
                 })
             }
+        }
+    }
+
+    /// Ends a released hold with the text the recognizer has.
+    fn hold_done(&mut self, live: &mut Live<R::Session>, held: Option<&Held>) -> Done {
+        if held.is_none()
+            && let Some(pending) = live.text.pending()
+        {
+            Done::Accepted(CaptureRequest {
+                route: pending.route,
+                text: pending.text.clone(),
+            })
+        } else {
+            self.finish_hold(live, held)
         }
     }
 
@@ -2403,8 +2418,11 @@ where
             self.set_state(EngineState::TranscribingLive {
                 route: held.route(),
             });
-        } else if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
-            return Some(Done::from(stop));
+        } else {
+            if let Err(stop) = self.feed(live, &RELEASE_SILENCE).await {
+                return Some(Done::from(stop));
+            }
+            live.session.input_ended();
         }
         live.release = Release::Tail(Instant::now());
         self.publish(live);

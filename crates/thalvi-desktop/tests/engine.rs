@@ -6122,6 +6122,52 @@ async fn a_hold_released_while_the_recognizer_is_behind_waits_for_its_final_and_
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_hold_ends_when_the_recognizer_answers_the_end_of_its_audio() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("release-wait-ended");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            rig.server.behind(true);
+            let task = hold_task(engine, frames);
+            rig.hold().await;
+            rig.say(1000, Say::Partial("reduced our hosting")).await;
+            rig.release(1200).await;
+            rig.feed_until(1499, Kind::Quiet).await;
+            assert_eq!(
+                rig.state(),
+                EngineState::Finishing {
+                    route: CaptureRoute::Paste
+                },
+                "the overlay says the hold is finishing"
+            );
+            rig.finals("reduced our hosting bills").await;
+            assert!(
+                !task.is_finished(),
+                "a final does not end a hold whose session is still behind"
+            );
+            rig.server.emit(Ok(RecognizerEvent::Ended));
+            settle().await;
+            assert_eq!(
+                rig.started(Cue::Accepted),
+                [1499],
+                "the recognizer's answer for the end of the audio ends the hold at once"
+            );
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "reduced our hosting bills")
+            );
+            let waited = read_lines(&dir.join("metrics.jsonl"))
+                .into_iter()
+                .find(|line| line["event"] == "desktop_release_wait")
+                .expect("the finishing wait is recorded");
+            assert_eq!(waited["outcome"], "caught_up", "{waited}");
+            assert_eq!(waited["duration_ms"], 299.0, "{waited}");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_hold_still_behind_fifteen_seconds_after_release_pastes_what_it_has_and_says_so() {
     LocalSet::new()
         .run_until(async {

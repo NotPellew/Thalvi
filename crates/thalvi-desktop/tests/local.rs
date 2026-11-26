@@ -147,6 +147,10 @@ impl SpeechStream for FakeStream {
             vec![RecognizerEvent::Final(text.to_owned())]
         }))
     }
+
+    fn holds_text_for_end(&self) -> bool {
+        self.held_back.is_some()
+    }
 }
 
 impl Drop for FakeStream {

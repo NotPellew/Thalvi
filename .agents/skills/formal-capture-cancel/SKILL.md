@@ -254,6 +254,19 @@ await, control read, cancellation write or delivery path: a control seen during 
 ends the capture before admission, through the same cancellation-first select, so the model
 actions and bounds are unchanged.
 
+Finishing a hold until its stream answers the end of its audio (#678 repair 2):
+`Engine::on_release` and the pre-release start call `RecognizerSession::input_ended` after the
+release flush. For the on-device session that queues an `Order::End` after the flush frames; the
+worker answers with `SpeechStream::end_input`'s text and `RecognizerEvent::Ended`, and
+`LocalSession::next_event` records the answer. `Backlog::behind` still counts frames sent before
+the release, and only for a stream whose `holds_text_for_end` is true (the whole-stretch
+`Revising` layout and the buffered encoder, which otherwise paste a partial) the end answer.
+`Engine::on_event` ends the hold on `Ended`, or on a `Final` once `behind` clears, through the
+same tail select. These are
+synchronous session reads, one queued worker order and a display state: a control seen during the
+wait still ends the capture before admission, and no new await, cancellation write or delivery
+path is added, so the model actions and bounds are unchanged.
+
 Stopping an on-device recognition that fell 3 s behind the microphone (#455) makes
 `LocalSession::send_frame` return `RecognizerError::Behind`, which `Engine::feed` turns into the
 same `Stop::Failed` a failed frame send already produced, under the same cancellation-biased

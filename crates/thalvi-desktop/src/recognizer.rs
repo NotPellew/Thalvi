@@ -700,10 +700,15 @@ impl RecognizerSession for FakeSession {
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
-        self.events
+        let event = self
+            .events
             .recv()
             .await
-            .unwrap_or_else(|| Err(fake_dropped()))
+            .unwrap_or_else(|| Err(fake_dropped()));
+        if matches!(&event, Ok(RecognizerEvent::Ended)) {
+            self.behind.store(false, Ordering::Relaxed);
+        }
+        event
     }
 
     fn cancel(self) -> impl Future<Output = ()> + Send {
