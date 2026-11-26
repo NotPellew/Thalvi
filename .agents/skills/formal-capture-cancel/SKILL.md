@@ -240,6 +240,20 @@ the final empty receive still prevents admission. Suspending the microphone watc
 wait and the on-device session's backlog count in `local.rs` are neither a cancellation write nor a
 delivery path. The model actions are unchanged.
 
+Finishing a lagging hold with all its audio (#678 repair): `Engine::on_release` and the
+pre-release start call `RecognizerSession::hold_released`, which the on-device `Backlog` uses to
+record how many frames were sent before the release; its `behind` is then true only while one of
+those has no result, so the 800 ms flush that triggers the final is not owed one and a session
+with nothing left to hear never waits. A `RecognizerEvent::Final` in `Release::Behind` returns
+without ending the hold while `RecognizerSession::behind` still says so, so a final for one
+stretch of a longer hold cannot paste a cut-off sentence; the 15 s bound and the warning are
+unchanged. `Live::waiting` now shows `EngineState::Finishing` only for `Release::Behind`, so the
+ordinary release shows no Finishing flash; that overlay choice is display state, read while the
+same tail select runs. These are synchronous session reads and a display state, with no new
+await, control read, cancellation write or delivery path: a control seen during the wait still
+ends the capture before admission, through the same cancellation-first select, so the model
+actions and bounds are unchanged.
+
 Stopping an on-device recognition that fell 3 s behind the microphone (#455) makes
 `LocalSession::send_frame` return `RecognizerError::Behind`, which `Engine::feed` turns into the
 same `Stop::Failed` a failed frame send already produced, under the same cancellation-biased
