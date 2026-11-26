@@ -1851,11 +1851,12 @@ impl<S: Rig> Runner<S> {
         } else {
             None
         };
-        if behind && lighter.is_none() {
-            if let Some(finished) = finished.as_mut() {
-                finished.notice.push(' ');
-                finished.notice.push_str(SERVER_RECOGNIZER_HINT);
-            }
+        if behind
+            && lighter.is_none()
+            && let Some(finished) = finished.as_mut()
+        {
+            finished.notice.push(' ');
+            finished.notice.push_str(SERVER_RECOGNIZER_HINT);
         }
         let mode = told(
             noted(delivered(finished, route, undelivered), note),
@@ -2232,7 +2233,7 @@ impl Requests {
                 self.hold_problem = None;
                 false
             }
-            Some(Control::Overlay(_)) => false,
+            Some(Control::Overlay(_) | Control::DismissError | Control::OfferFailed(_)) => false,
             Some(Control::RemoveChat(reply)) => {
                 let _ = reply.send(Err(
                     "Wait for the current dictation to finish before removing the chat model."
@@ -2244,8 +2245,6 @@ impl Requests {
                 self.reload = Some(model);
                 false
             }
-            Some(Control::DismissError) => false,
-            Some(Control::OfferFailed(_)) => false,
             Some(Control::Feed(feed)) => {
                 feed.refuse("Thalvi was busy. Try again in a moment.");
                 false
