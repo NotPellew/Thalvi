@@ -144,6 +144,8 @@ impl Launch {
         arguments.extend(["--host".into(), "127.0.0.1".into()]);
         arguments.extend(["--port".into(), self.port.to_string().into()]);
         arguments.extend(["-t".into(), self.threads.to_string().into()]);
+        // Greedy single candidate (`-bo 1`) and `-nlp` keep `verbose_json` language detection free.
+        arguments.extend(["-bo".into(), "1".into(), "-nlp".into()]);
         arguments.extend(self.backend.device_arguments().iter().map(OsString::from));
         arguments
     }
@@ -493,14 +495,20 @@ fn audio_seconds(frames: usize) -> f64 {
     (frames * crate::frame::FRAME_SAMPLES) as f64 / f64::from(SAMPLE_RATE)
 }
 
-/// The text of one inference, with its lines run together.
+/// What one inference answered: normalized text and any detected language name.
+struct Transcript {
+    text: String,
+    language: Option<String>,
+}
+
+/// The text of one inference, with its lines run together, plus the detected language if reported.
 async fn infer(
     client: &reqwest::Client,
     port: u16,
     fields: &[(&str, &str)],
     wav: &[u8],
     timeout: Duration,
-) -> Result<String, Failure> {
+) -> Result<Transcript, Failure> {
     let request = client
         .post(format!("http://127.0.0.1:{port}/inference"))
         .header(
@@ -526,7 +534,16 @@ async fn infer(
         .get("text")
         .and_then(Value::as_str)
         .ok_or(Failure::BadReply)?;
-    Ok(text.split_whitespace().collect::<Vec<_>>().join(" "))
+    let language = answer
+        .get("language")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|language| !language.is_empty() && !language.eq_ignore_ascii_case("auto"))
+        .map(str::to_owned);
+    Ok(Transcript {
+        text: text.split_whitespace().collect::<Vec<_>>().join(" "),
+        language,
+    })
 }
 
 async fn healthy(client: &reqwest::Client, port: u16) -> bool {
@@ -871,6 +888,7 @@ impl<L: Launcher> Recognizer for WhisperRecognizer<L> {
             preview: None,
             previewed_frames: 0,
             shown: String::new(),
+            language: None,
         })
     }
 
@@ -881,7 +899,7 @@ impl<L: Launcher> Recognizer for WhisperRecognizer<L> {
 
 /// A request to the helper that is under way.
 struct Sent {
-    reply: oneshot::Receiver<Result<String, RecognizerError>>,
+    reply: oneshot::Receiver<Result<Transcript, RecognizerError>>,
     task: JoinHandle<()>,
     at: Instant,
 }
@@ -926,6 +944,8 @@ pub struct WhisperSession<L: Launcher = ProcessLauncher> {
     previewed_frames: usize,
     /// The text of the last preview shown.
     shown: String,
+    /// The language the latest non-empty preview detected, which the final pass reuses.
+    language: Option<String>,
 }
 
 fn stopped() -> RecognizerError {
@@ -939,6 +959,7 @@ impl<L: Launcher> Shared<L> {
         outcome: &str,
         at: Instant,
         reading: Reading,
+        reused_language: bool,
         seconds: Option<f64>,
     ) {
         let mut fields = json!({"engine": "whisper_helper", "model": self.name});
@@ -947,6 +968,9 @@ impl<L: Launcher> Shared<L> {
         }
         if reading == Reading::Preview {
             fields["preview"] = json!(true);
+        }
+        if reused_language {
+            fields["preview_language"] = json!(true);
         }
         self.metrics.metric(
             Event::LocalStt,
@@ -964,14 +988,25 @@ impl<L: Launcher> WhisperSession<L> {
         let running = Arc::clone(&self.running);
         let shared = Arc::clone(&self.shared);
         let prompt = self.shared.prompt.clone();
+        let (format, lang) = match reading {
+            Reading::Preview => ("verbose_json", "auto".to_owned()),
+            Reading::Final => (
+                "json",
+                self.language.as_deref().unwrap_or("auto").to_owned(),
+            ),
+        };
+        let reused_language = reading == Reading::Final && self.language.is_some();
         let at = Instant::now();
         let task = tokio::spawn(async move {
             let seconds = audio_seconds(frames.len());
             let result = if frames.is_empty() {
-                Ok(String::new())
+                Ok(Transcript {
+                    text: String::new(),
+                    language: None,
+                })
             } else {
                 let audio = wav(frames.as_flattened());
-                let mut fields = vec![("response_format", "json"), ("language", "auto")];
+                let mut fields = vec![("response_format", format), ("language", lang.as_str())];
                 if let Some(prompt) = &prompt {
                     // VAD keeps the prompt out of a capture with no speech, which whisper would echo.
                     fields.push(("vad", "true"));
@@ -985,6 +1020,7 @@ impl<L: Launcher> WhisperSession<L> {
                 if result.is_ok() { "ok" } else { "error" },
                 at,
                 reading,
+                reused_language,
                 Some(seconds),
             );
             let _ = sender.send(result.map_err(|failure| failure.error()));
@@ -1020,6 +1056,7 @@ impl<L: Launcher> WhisperSession<L> {
             "cancelled",
             preview.at,
             Reading::Preview,
+            false,
             Some(audio_seconds(self.previewed_frames)),
         );
         true
@@ -1038,7 +1075,7 @@ impl<L: Launcher> WhisperSession<L> {
         let ok = matches!(answer, Ok(Ok(_)));
         self.request = Request::Answered { ok };
         match answer {
-            Ok(Ok(text)) => Ok(RecognizerEvent::Final(text)),
+            Ok(Ok(transcript)) => Ok(RecognizerEvent::Final(transcript.text)),
             Ok(Err(error)) => Err(error),
             Err(_) => Err(stopped()),
         }
@@ -1088,8 +1125,18 @@ impl<L: Launcher> RecognizerSession for WhisperSession<L> {
                 () = self.finished_signal.notified() => {}
                 answer = &mut preview.reply => {
                     self.preview = None;
+                    let text = if let Ok(Ok(transcript)) = answer {
+                        if !transcript.text.is_empty()
+                            && let Some(language) = transcript.language
+                        {
+                            self.language = Some(language);
+                        }
+                        Some(transcript.text)
+                    } else {
+                        None
+                    };
                     self.start_preview();
-                    if let Ok(Ok(text)) = answer
+                    if let Some(text) = text
                         && !text.is_empty()
                         && text != self.shown
                     {
@@ -1119,6 +1166,7 @@ impl<L: Launcher> Drop for WhisperSession<L> {
                     "cancelled",
                     *at,
                     Reading::Final,
+                    self.language.is_some(),
                     None,
                 );
                 busy = true;
@@ -1481,6 +1529,7 @@ mod tests {
     /// How the fake helper answers a capture's request.
     enum Reply {
         Text(&'static str),
+        WithLanguage(&'static str, &'static str),
         Status(u16),
         Garbage,
         /// Answers once the test says so, unless its helper was killed: a dead process answers nothing.
@@ -1527,6 +1576,10 @@ mod tests {
         let ok = |text: &str| (StatusCode::OK, json!({"text": text}).to_string());
         match reply {
             Reply::Text(text) => ok(text),
+            Reply::WithLanguage(text, language) => (
+                StatusCode::OK,
+                json!({"text": text, "language": language}).to_string(),
+            ),
             Reply::Status(code) => (StatusCode::from_u16(code).unwrap(), String::new()),
             Reply::Garbage => (StatusCode::OK, "not json".to_owned()),
             Reply::Held(text) => {
@@ -1785,6 +1838,9 @@ mod tests {
                 "4242",
                 "-t",
                 "6",
+                "-bo",
+                "1",
+                "-nlp",
             ];
             expected.extend(last);
             assert_eq!(launch.arguments(), expected, "{backend:?}");
@@ -2412,16 +2468,16 @@ mod tests {
             );
             assert_eq!(seen[0].field("vad"), Some("false"), "{case}");
             assert_eq!(seen[0].field("prompt"), None, "{case}: the warm-up");
-            let mut expected = vec![
-                ("response_format".to_owned(), "json".to_owned()),
-                ("language".to_owned(), "auto".to_owned()),
-            ];
-            if let Some(prompt) = prompt {
-                expected.push(("vad".to_owned(), "true".to_owned()));
-                expected.push(("prompt".to_owned(), prompt.to_owned()));
-            }
-            for capture in &seen[1..] {
-                assert_eq!(capture.fields, expected, "{case}");
+            for (capture, format) in [(&seen[1], "verbose_json"), (&seen[2], "json")] {
+                let mut expected = vec![
+                    ("response_format".to_owned(), format.to_owned()),
+                    ("language".to_owned(), "auto".to_owned()),
+                ];
+                if let Some(prompt) = prompt {
+                    expected.push(("vad".to_owned(), "true".to_owned()));
+                    expected.push(("prompt".to_owned(), prompt.to_owned()));
+                }
+                assert_eq!(capture.fields, expected, "{case} ({format})");
             }
         }
     }
@@ -2805,11 +2861,16 @@ mod tests {
             [13, 23, 33, 43, 53, 53].map(|count| count * FRAME_SAMPLES),
             "the first preview waits for a second of audio, then one starts per 800 ms of new audio, one at a time, and the final comes last"
         );
-        for seen in &capture {
+        for (index, seen) in capture.iter().enumerate() {
+            let format = if index + 1 == capture.len() {
+                "json"
+            } else {
+                "verbose_json"
+            };
             assert_eq!(
                 seen.fields,
                 [
-                    ("response_format".to_owned(), "json".to_owned()),
+                    ("response_format".to_owned(), format.to_owned()),
                     ("language".to_owned(), "auto".to_owned())
                 ]
             );
@@ -2819,6 +2880,106 @@ mod tests {
                 "each request is the capture from its start"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn every_preview_detects_the_language_and_the_final_reuses_the_latest_one_of_its_capture()
+    {
+        let scratch = Scratch::with_files("language-latest");
+        let recorder = Recorder::in_dir(
+            RecordKinds {
+                metrics: true,
+                text: false,
+                audio: false,
+            },
+            scratch.0.join("recordings"),
+        )
+        .unwrap();
+        let fake = Fake::new([vulkan(vec![
+            Reply::WithLanguage("Hello", "english"),
+            Reply::WithLanguage("Hallo", "german"),
+            Reply::WithLanguage("", "french"),
+            Reply::WithLanguage("hm", "auto"),
+            Reply::Text("Hallo Welt."),
+            Reply::WithLanguage("", "french"),
+            Reply::Text("Zwei."),
+            Reply::WithLanguage("Hi", "english"),
+            Reply::Text("Hi."),
+        ])]);
+        let recognizer = recognizer_with(
+            &fake,
+            WhisperBackend::Vulkan,
+            &scratch,
+            FAKE_FILES,
+            recorder.metrics(),
+            &no_words(),
+        );
+        let frames = numbered(43);
+
+        let mut first = within(recognizer.connect()).await.unwrap();
+        send_all(&mut first, &frames[..13]).await;
+        send_all(&mut first, &frames[13..23]).await;
+        assert_eq!(within(first.next_event()).await.unwrap(), partial("Hello"));
+        send_all(&mut first, &frames[23..33]).await;
+        assert_eq!(within(first.next_event()).await.unwrap(), partial("Hallo"));
+        send_all(&mut first, &frames[33..43]).await;
+        assert_eq!(within(first.next_event()).await.unwrap(), partial("hm"));
+        first.finish_audio().await.unwrap();
+        assert_eq!(
+            within(first.next_event()).await.unwrap(),
+            the_final("Hallo Welt.")
+        );
+
+        let mut second = within(recognizer.connect()).await.unwrap();
+        send_all(&mut second, &frames[..13]).await;
+        fake.helper(0).seen_requests(7).await;
+        second.finish_audio().await.unwrap();
+        assert_eq!(
+            within(second.next_event()).await.unwrap(),
+            the_final("Zwei.")
+        );
+
+        let mut third = within(recognizer.connect()).await.unwrap();
+        send_all(&mut third, &frames[..13]).await;
+        assert_eq!(within(third.next_event()).await.unwrap(), partial("Hi"));
+        third.finish_audio().await.unwrap();
+        assert_eq!(within(third.next_event()).await.unwrap(), the_final("Hi."));
+        recorder.finish().await;
+
+        let seen = fake.helper(0).seen();
+        let pairs: Vec<(Option<&str>, Option<&str>)> = seen[1..]
+            .iter()
+            .map(|request| (request.field("response_format"), request.field("language")))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (Some("verbose_json"), Some("auto")),
+                (Some("verbose_json"), Some("auto")),
+                (Some("verbose_json"), Some("auto")),
+                (Some("verbose_json"), Some("auto")),
+                (Some("json"), Some("german")),
+                (Some("verbose_json"), Some("auto")),
+                (Some("json"), Some("auto")),
+                (Some("verbose_json"), Some("auto")),
+                (Some("json"), Some("english")),
+            ],
+            "previews always detect; a later language replaces an earlier one, an empty or auto answer keeps it, and the next capture starts with none"
+        );
+
+        let written =
+            std::fs::read_to_string(scratch.0.join("recordings").join("metrics.jsonl")).unwrap();
+        let reused: Vec<bool> = written
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|line| line["event"] == "desktop_local_stt" && line["preview"].is_null())
+            .map(|line| line["preview_language"].as_bool().unwrap_or(false))
+            .collect();
+        assert_eq!(
+            reused,
+            [true, false, true],
+            "a final says when it reused a preview's language"
+        );
     }
 
     #[tokio::test]
