@@ -30,6 +30,12 @@ pub use linux::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker, Session};
 /// The host for the desktop Thalvi runs on, and its status overlay's own surface and waker.
 #[cfg(target_os = "windows")]
 pub use windows::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker};
+/// Keeps the tray item registered when the desktop's tray host restarts or forgets it.
+#[cfg(target_os = "linux")]
+pub use linux::keep_tray_registered;
+/// Keeps the tray item registered when the desktop's tray host restarts or forgets it.
+#[cfg(target_os = "windows")]
+pub use windows::keep_tray_registered;
 
 /// One overlay frame: `width` × `height` pixels of premultiplied BGRA, row by row.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

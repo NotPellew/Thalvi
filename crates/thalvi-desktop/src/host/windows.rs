@@ -20,6 +20,9 @@ pub use win32::Real;
 /// A window handle as a plain number, so targets stay `Send`.
 pub type Hwnd = isize;
 
+/// Windows keeps its own tray item: the shell draws it, so nothing needs watching.
+pub fn keep_tray_registered(_id: &str) {}
+
 /// Which process owns a window. A reused handle or process ID never matches the old one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {

@@ -2,7 +2,10 @@
 
 mod layer;
 mod place;
+mod tray_watch;
 mod xwayland;
+
+pub use tray_watch::keep_registered as keep_tray_registered;
 
 use std::fmt;
 use std::path::Path;

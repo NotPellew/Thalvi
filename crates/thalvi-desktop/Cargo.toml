@@ -46,3 +46,6 @@ windows.workspace = true
 axum.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus.workspace = true

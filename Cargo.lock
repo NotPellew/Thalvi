@@ -5130,6 +5130,7 @@ dependencies = [
  "windows",
  "x11rb",
  "xkbcommon",
+ "zbus",
 ]
 
 [[package]]

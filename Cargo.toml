@@ -67,6 +67,7 @@ thalvi-asr = { path = "crates/thalvi-asr" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 webrtc-vad = "0.4"
+zbus = "5.19"
 xkbcommon = { version = "0.9", default-features = false }
 windows-registry = "0.6"
 windows = { version = "0.62", features = [
