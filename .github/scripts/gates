@@ -114,6 +114,7 @@ gate_desktop_ui() {
   node_checks crates/thalvi-app/ui
   # Fetches the headless shell playwright-core pins.
   in_dir crates/thalvi-app/ui npm exec -- playwright-core install --only-shell chromium
+  in_dir crates/thalvi-app/ui npm run layout
   in_dir crates/thalvi-app/ui npm run explore
 }
 
