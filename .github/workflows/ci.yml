@@ -377,3 +377,24 @@ jobs:
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
       - run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --verbose --log-opts=HEAD .'
+
+  # The one check of this workflow that branch protection requires. It runs even when
+  # a job it waits for failed or was cancelled, and passes only when each of them passed
+  # or was skipped by its own condition. A new job goes in `needs`, not in the protection.
+  ci-ok:
+    name: ci-ok
+    needs: [server, desktop-windows, desktop-windows-smoke, desktop-ui, speech, issues, release, formal, dependencies, secrets]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: every job it waits for passed or was skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 -c '
+          import json, os, sys
+          results = {job: need["result"] for job, need in json.loads(os.environ["NEEDS"]).items()}
+          print(results)
+          failed = sorted(job for job, result in results.items() if result not in ("success", "skipped"))
+          sys.exit(f"not passed: {failed}" if failed else 0)'

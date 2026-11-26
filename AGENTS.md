@@ -115,7 +115,12 @@ its case and pinned toolchain there and its CI job; one that ships on Windows
 also runs its gate on `windows-2025-vs2026`. npm is the package manager; lockfiles
 are committed.
 
-Two required checks are not in the script:
+The `main` ruleset requires only `ci-ok` and `commits-ok`. Each waits for every
+other job of its workflow and fails when one failed, so a new job goes in its
+workflow's `-ok` `needs`, never in the ruleset;
+`.github/scripts/required-checks.test.py` fails when one is missing.
+
+Two CI checks are not in the script:
 
 - Dependencies (`deny.toml`, cargo-deny 0.20.2): `cargo deny --workspace --locked
   check advisories licenses sources`.
