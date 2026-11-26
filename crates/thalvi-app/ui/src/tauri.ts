@@ -97,6 +97,11 @@ export function tauriBackend(): Backend {
       invoke<undefined>("download_speech_model", { name }).catch((rejection: unknown) => {
         throw downloadFailure(rejection);
       }),
+    useLighterModel: (name) =>
+      invoke<undefined>("use_lighter_model", { name }).catch((rejection: unknown) => {
+        throw downloadFailure(rejection);
+      }),
+    cancelSpeechDownload: (name) => invoke<undefined>("cancel_speech_download", { name }),
     onSpeechModelProgress: (listener) => {
       void listen<SpeechModelProgress>("thalvi://speech-model-progress", (event) => {
         listener(event.payload);

@@ -221,6 +221,8 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     onChatModelProgress: vi.fn<(listener: (progress: SpeechModelProgress) => void) => void>(),
     listSpeechModels: vi.fn<() => Promise<SpeechModelInfo[]>>(() => Promise.resolve([{ ...NEMOTRON }, { ...UNIFIED }])),
     downloadSpeechModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
+    useLighterModel: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
+    cancelSpeechDownload: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),
     onSpeechModelProgress: vi.fn((listener: (progress: SpeechModelProgress) => void) => speechListeners.push(listener)),
     speechDevice: vi.fn<(name: string) => Promise<string>>(() => Promise.resolve("Will run on the CPU: this model runs on the CPU")),
     openSpeechModelSource: vi.fn<(name: string) => Promise<void>>(() => Promise.resolve()),

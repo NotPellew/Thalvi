@@ -1282,6 +1282,15 @@ impl SpeechChoice {
             Self::Whisper(backend) => backend.title().to_owned(),
         }
     }
+
+    /// The catalog model that runs lighter on this computer, when this choice has one.
+    #[must_use]
+    pub fn lighter(&self) -> Option<CatalogSpeech> {
+        match self {
+            Self::Catalog(catalog) => catalog.lighter(),
+            Self::Folder(_) | Self::Whisper(_) => None,
+        }
+    }
 }
 
 /// Fetches the chosen model into the store and loads it.

@@ -71,6 +71,10 @@ input[type="checkbox"]:checked::after { transform: translateX(var(--check-travel
 .card legend { font: var(--weight-label) var(--fs-12) var(--mono); color: var(--neon); padding: 0 var(--legend-inset); }
 .card button { justify-self: end; align-self: end; grid-column: 2; }
 .trow[hidden] { display: none; }
+/* The offer's recovery controls: each button keeps its own width, grows for its label, and a reason takes a full line. */
+.trow.recovery { flex-wrap: wrap; align-items: flex-start; }
+:is(#settings[data-look="holo"], #settings[data-look="gunmetal"]) .trow.recovery > button { height: auto; min-height: var(--button-height); }
+.trow.recovery > .note { flex-basis: 100%; overflow-wrap: anywhere; }
 .trow.server { flex-wrap: wrap; }
 .trow.server .phrase { flex: 1 1 var(--phrase-basis); white-space: normal; overflow-wrap: anywhere; }
 .trow.server .unit { flex-basis: 100%; overflow-wrap: anywhere; }

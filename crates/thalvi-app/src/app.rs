@@ -1,5 +1,6 @@
 //! Wires the engine to the tray, the overlay, the settings window and the commands.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::process::ExitCode;
@@ -56,8 +57,8 @@ const UPDATE_EVENT: &str = "thalvi://update";
 const HISTORY_PAGE: &str = "history";
 const OPEN_PAGE_EVENT: &str = "thalvi://open-page";
 
-/// Sent when an agent changes what the open settings window shows; the window's own saves never send it.
-const CHANGED_ELSEWHERE_EVENT: &str = "thalvi://settings-elsewhere";
+/// Sent when a save outside the window changes what it shows; the window's own saves never send it.
+pub(crate) const CHANGED_ELSEWHERE_EVENT: &str = "thalvi://settings-elsewhere";
 
 /// The running config and the file it is saved to. One lock orders every save
 /// from reading the config through writing the file and applying the result.
@@ -132,9 +133,20 @@ impl SyncedConfig {
     }
 }
 
-/// Tracks command-started downloads so quitting cancels them and waits for partial files to drop.
+/// How a command download ended before it finished.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Stopped {
+    /// The app is quitting.
+    Quitting,
+    /// The user cancelled it.
+    Cancelled,
+}
+
+/// Tracks command-started downloads so quitting or a Cancel stops them and waits for partial files
+/// to drop.
 pub(crate) struct ActiveDownloads {
     quitting: watch::Sender<bool>,
+    cancels: Mutex<HashMap<String, watch::Sender<bool>>>,
     active: Mutex<usize>,
     drained: Condvar,
 }
@@ -144,18 +156,23 @@ impl ActiveDownloads {
         let (quitting, _) = watch::channel(false);
         Self {
             quitting,
+            cancels: Mutex::new(HashMap::new()),
             active: Mutex::new(0),
             drained: Condvar::new(),
         }
     }
 
-    /// Runs `download` until it completes or quitting begins; returns `None` when cancelled by quit.
-    pub(crate) async fn run<T>(&self, download: impl Future<Output = T>) -> Option<T> {
+    /// Runs `download` named `name` until it completes, quitting begins, or `cancel` names it.
+    pub(crate) async fn run<T>(
+        &self,
+        name: &str,
+        download: impl Future<Output = T>,
+    ) -> Result<T, Stopped> {
         let mut quitting = self.quitting.subscribe();
         let _guard = {
             let mut active = self.active.lock().unwrap_or_else(PoisonError::into_inner);
             if *quitting.borrow() {
-                return None;
+                return Err(Stopped::Quitting);
             }
             *active += 1;
             ActiveDownloadGuard {
@@ -163,10 +180,32 @@ impl ActiveDownloads {
                 drained: &self.drained,
             }
         };
+        let (cancel, mut cancelled) = watch::channel(false);
+        self.cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned(), cancel);
+        let _named = NamedDownloadGuard {
+            cancels: &self.cancels,
+            name,
+        };
         tokio::select! {
             biased;
-            _ = quitting.wait_for(|&quit| quit) => None,
-            result = download => Some(result),
+            _ = quitting.wait_for(|&quit| quit) => Err(Stopped::Quitting),
+            () = wait_for_cancel(&mut cancelled) => Err(Stopped::Cancelled),
+            result = download => Ok(result),
+        }
+    }
+
+    /// Asks the download called `name`, if one is running, to stop now.
+    pub(crate) fn cancel(&self, name: &str) {
+        if let Some(cancel) = self
+            .cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+        {
+            cancel.send_replace(true);
         }
     }
 
@@ -208,6 +247,32 @@ impl Drop for ActiveDownloadGuard<'_> {
         if *active == 0 {
             self.drained.notify_all();
         }
+    }
+}
+
+/// Removes a started download's cancel signal when it ends, so a later Cancel reaches only a running one.
+struct NamedDownloadGuard<'a> {
+    cancels: &'a Mutex<HashMap<String, watch::Sender<bool>>>,
+    name: &'a str,
+}
+
+impl Drop for NamedDownloadGuard<'_> {
+    fn drop(&mut self) {
+        self.cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(self.name);
+    }
+}
+
+/// Resolves when the user cancels; a replaced signal never cancels, so it waits for the download instead.
+async fn wait_for_cancel(cancelled: &mut watch::Receiver<bool>) {
+    loop {
+        let stopped = cancelled.wait_for(|&stop| stop).await.is_ok();
+        if stopped {
+            return;
+        }
+        std::future::pending::<()>().await;
     }
 }
 
@@ -707,6 +772,8 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::list_speech_models,
             commands::speech_device,
             commands::download_speech_model,
+            commands::cancel_speech_download,
+            commands::use_lighter_model,
             commands::open_speech_model_source,
             commands::check_speech_entry,
             commands::word_list_support,
@@ -1057,6 +1124,7 @@ fn follow_engine(app: &AppHandle) -> tauri::Result<()> {
                 }
                 let failed = Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: "Thalvi stopped unexpectedly. Restart it.".to_owned(),
                     headline: "Thalvi stopped — restart it".to_owned(),
                     causes: Vec::new(),
@@ -1307,6 +1375,21 @@ pub fn on_menu(app: &AppHandle, id: &str) {
             if let Err(error) = state.use_built_in_look() {
                 note_failure(&state.last_error, "Use the built-in look", error);
             }
+        }
+        tray::LIGHTER_MODEL => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                let Some(offer) = state.link.status().offer() else {
+                    return;
+                };
+                if let Err(error) =
+                    commands::switch_to_lighter_model(&app, &state, offer.name).await
+                {
+                    state.link.send(Control::OfferFailed(error.clone()));
+                    note_failure(&state.last_error, "Use the lighter model", error);
+                }
+            });
         }
         tray::SETTINGS => show_settings(app),
         tray::UPDATE => match app.state::<AppState>().updates.snapshot().tray().1 {
@@ -1962,7 +2045,7 @@ mod tests {
             let dropped = Arc::clone(&dropped);
             async move {
                 downloads
-                    .run(async move {
+                    .run("wake", async move {
                         let _flag = DropFlag(dropped);
                         let _ = entered_tx.send(());
                         std::future::pending::<()>().await;
@@ -1984,7 +2067,50 @@ mod tests {
         .expect("wait_drained returned");
 
         assert!(dropped.load(Ordering::SeqCst), "download future dropped");
-        assert!(task.await.expect("task finished").is_none());
-        assert!(downloads.run(async { 1 }).await.is_none());
+        assert_eq!(task.await.expect("task finished"), Err(Stopped::Quitting));
+        assert_eq!(
+            downloads.run("other", async { 1 }).await,
+            Err(Stopped::Quitting)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_command_download_drops_it_and_says_the_user_cancelled_it() {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let downloads = Arc::new(ActiveDownloads::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn({
+            let downloads = Arc::clone(&downloads);
+            let dropped = Arc::clone(&dropped);
+            async move {
+                downloads
+                    .run("parakeet_tdt_v3", async move {
+                        let _flag = DropFlag(dropped);
+                        let _ = entered_tx.send(());
+                        std::future::pending::<()>().await;
+                    })
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered)
+            .await
+            .expect("download entered")
+            .expect("entered sender");
+
+        downloads.cancel("nemotron_160ms");
+        downloads.cancel("parakeet_tdt_v3");
+
+        assert_eq!(
+            task.await.expect("task finished"),
+            Err(Stopped::Cancelled),
+            "the cancelled download stops without quitting"
+        );
+        assert!(dropped.load(Ordering::SeqCst), "download future dropped");
     }
 }

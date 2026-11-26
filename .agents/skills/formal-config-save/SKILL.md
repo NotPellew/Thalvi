@@ -191,6 +191,16 @@ Stopping an on-device recognition that fell 3 s behind the microphone (#455) mak
 `agent.rs` only writes that headline into the `state` reply. No writer, save lock, `settings_set` or
 `AppState::config` change, so the model and its three invariants are unchanged.
 
+The lighter-model switch (#705) is one more caller of the Settings form writer: after the model is
+downloaded, `commands::switch_to_lighter_model` builds a whole form with `settings::settings_json`
+plus the new `switched_to_lighter_model` and hands it to `commands::save`, so `Store::check` and
+`SyncedConfig::save_form` still run under the same lock with the same temporary name.
+`commands::dismiss_error` sends a runner control and writes no config, `agent.rs`'s `state` only
+reports the offer, and `app.rs`'s tray arm calls that same save path. A successful switch also
+sends the open window the settings-elsewhere event so its page shows the model it saved; that is a
+notification, not a writer. No new writer, lock or temporary file is added, so the model and its
+three invariants are unchanged.
+
 | Code | Model action and boundary |
 | --- | --- |
 | `crates/thalvi-app/src/commands.rs`: `save` (from `save_settings`, the Settings window), `settings_patch` | Writer `S` on the main thread, one at a time with other main-thread writers. Via `AppState::save_form` into `SyncedConfig::save_form`: `Lock` before `Snap`, `Unlock` after `Send`. `Snap`: `settings_patch` merges the window's patch (only what the user changed) over the config read under the lock, with `settings::merged`, which `plan_over` uses too; the Settings save sets its field (the look) and carries the others over. This abstracts any one Settings form field, including `update_channel`; that setting has no separate writer. `Store::write` runs through `AppState::take_effect`'s `write`, after any changed hold keys are watched; a desktop that refuses them ends the save before `Create`, like any refused save. |

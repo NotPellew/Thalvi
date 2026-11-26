@@ -914,6 +914,7 @@ mod tests {
             (
                 Status::Failed {
                     kind: FailureKind::Other,
+                    offer: None,
                     notice: String::new(),
                     headline: "Failed".to_owned(),
                     causes: Vec::new(),

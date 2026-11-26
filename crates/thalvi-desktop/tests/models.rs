@@ -614,7 +614,7 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
             ),
             (
                 "parakeet_tdt_v3",
-                "Parakeet TDT",
+                "Parakeet TDT v3",
                 670_576_784,
                 "CC BY 4.0",
                 25,
