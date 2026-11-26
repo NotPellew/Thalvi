@@ -19,10 +19,12 @@ AGENT = "app/notpellew-agents"
 RUNS = "actions/workflows/hold.yml/runs?per_page=100"
 PULLS = "pulls?state=open&per_page=100"
 FILES = f"{PR}/files?per_page=100"
-EVENTS = "issues/23/events?per_page=100"
+REVIEWS = f"{PR}/reviews?per_page=100"
+APPROVE = f"{PR}/reviews"
+BOT = "github-actions[bot]"
 SOURCE = {"filename": "crates/thalvi-app/src/main.rs", "status": "modified"}
 
-# The fixture also records successful rerun requests as observable effects.
+# The fixture also records successful writes (reruns, approvals, dismissals) as observable effects.
 FAKE_GH = """#!/usr/bin/env python3
 import json
 import os
@@ -44,9 +46,9 @@ if reply == "partial API error":
         sys.exit(0)
 if reply in ("API error", "partial API error"):
     sys.exit("fixture API error")
-if args[1:3] == ["--method", "POST"]:
+if args[1] == "--method":
     with Path(os.environ["HOLD_POSTS"]).open("a") as posts:
-        print(endpoint, file=posts)
+        print(args[2], endpoint, *(arg for arg in args[3:-1] if arg != "-f"), file=posts)
 elif "?per_page=100" in endpoint or "&per_page=100" in endpoint:
     if "--paginate" not in args:
         print(json.dumps(reply[0]))
@@ -68,14 +70,8 @@ def issue(title="feat(desktop): a feature", *labels):
     return {"title": title, "labels": list(map(label, labels))}
 
 
-def transition(event, actor, id_):
-    return {
-        "event": event,
-        "actor": {"login": actor},
-        "label": label("owner-ok"),
-        "created_at": "2026-11-25T10:00:00Z",
-        "id": id_,
-    }
+def review(id_, login=BOT, state="APPROVED", commit=HEAD):
+    return {"id": id_, "user": {"login": login}, "state": state, "commit_id": commit}
 
 
 def run(id_, number, status="completed", event="pull_request_target", head=HEAD, base="main"):
@@ -105,14 +101,16 @@ class HoldTest(unittest.TestCase):
             "user": {"login": AGENT},
             "body": "Closes #17",
             "draft": True,
-            "labels": [],
             "changed_files": 1,
             "head": {"sha": HEAD},
             "base": {"sha": BASE, "ref": "main"},
             "state": "open",
             "updated_at": "2026-11-25T10:00:00Z",
         }
-        self.data = {PR: [self.pr], FILES: [[[SOURCE]]], "issues/17": [issue("title", "bug")]}
+        self.data = {
+            PR: [self.pr], FILES: [[[SOURCE]]], "issues/17": [issue("title", "bug")],
+            REVIEWS: [[[]]], APPROVE: [None],
+        }
 
     def invoke(self, *args):
         state = self.directory / "fixture.json"
@@ -144,29 +142,48 @@ class HoldTest(unittest.TestCase):
         self.assertEqual(summary.splitlines()[-1], f"Policy commit: {actual_sha}")
         return result
 
-    def test_draft_source_fix_passes_by_each_accepted_label_and_title(self):
+    def writes(self):
+        return self.posts.read_text().splitlines() if self.posts.exists() else []
+
+    def approved(self, *messages):
+        self.check(0, "hold: approved", *messages)
+        self.assertEqual(self.writes(), [
+            f"POST {APPROVE} event=APPROVE commit_id={HEAD} "
+            "body=The hold policy lets this PR merge without the owner's review."
+        ])
+
+    def held(self, *messages):
+        self.check(0, "hold: left for the owner's review", "by approving it", *messages)
+        self.assertEqual(self.writes(), [])
+
+    def failed(self, *messages):
+        result = self.check(1, "hold: error", *messages)
+        self.assertEqual(self.writes(), [])
+        return result
+
+    def test_draft_source_fix_is_approved_by_each_accepted_label_and_title(self):
         for candidate in (issue("title", "bug"), issue("title", "ci-regression"),
                           issue("fix(desktop): audio"), issue("fix: audio")):
             with self.subTest(candidate=candidate):
                 self.data["issues/17"] = [candidate]
-                self.check(0, "hold: passed", "#17", "protected paths")
+                self.approved("#17", "protected paths")
 
     def test_reports_every_issue_and_path_reason(self):
         self.pr["body"] = "Closes #17, fixes #18, closes NotPellew/Thalvi#19"
         self.data["issues/18"] = [issue("feat(desktop): a feature")]
         self.data["issues/19"] = [issue("chore(ci): routine work")]
         self.data[FILES] = [[[{"filename": "Cargo.lock", "status": "modified"}]]]
-        self.check(1, "#18 is a feature", "#19", "chore", "Cargo.lock")
+        self.held("#18 is a feature", "#19", "chore", "Cargo.lock")
 
     def test_body_without_a_local_closing_reference_holds(self):
         for body in (None, "Refs #17", "Closes elsewhere/Thalvi#17", "<!-- Closes #17 -->"):
             with self.subTest(body=body):
                 self.pr["body"] = body
-                self.check(1, "closes no issue")
+                self.held("closes no issue")
 
     def test_pull_request_is_not_a_qualifying_issue(self):
         self.data["issues/17"] = [dict(issue("fix: audio", "bug"), pull_request={})]
-        self.check(1, "#17 is a pull request")
+        self.held("#17 is a pull request")
 
     # High risk: #693
     def test_policy_paths_hold_and_renames_check_both_names_across_pages(self):
@@ -185,48 +202,46 @@ class HoldTest(unittest.TestCase):
         ))
         self.pr["changed_files"] = len(files)
         self.data[FILES] = [[files[:1], files[1:]]]
-        self.check(1, *paths)
+        self.held(*paths)
 
-    def test_owner_author_passes_with_no_closing_reference(self):
+    def test_owner_author_is_approved_with_no_closing_reference(self):
         self.pr.update(user={"login": OWNER}, body=None)
-        self.check(0, "owner authored")
+        self.approved("owner authored")
 
-    # High risk: #693
-    def test_only_the_actor_who_added_the_current_owner_label_can_release(self):
-        self.pr["labels"] = [label("owner-ok")]
+    def test_its_approval_stands_on_the_head_exactly_when_the_pr_qualifies(self):
+        owners = review(1, OWNER)
+        dismissed = review(2, state="DISMISSED")
+        stale = review(3, commit="c" * 40)
+        current = review(4)
+        dismissals = [f"{APPROVE}/{id_}/dismissals" for id_ in (3, 4)]
+        self.data.update({endpoint: [None] for endpoint in dismissals})
+        self.data[REVIEWS] = [[[owners, dismissed, dict(review(5), user=None)], [stale]]]
+        self.approved()
+        self.data[REVIEWS] = [[[owners, stale], [current]]]
+        self.check(0, "hold: approved")
+        self.assertEqual(self.writes(), [])
         self.pr["body"] = None
-        added_by_owner = transition("labeled", OWNER, 10)
-        removed = transition("unlabeled", OWNER, 11)
-        added_by_agent = transition("labeled", AGENT, 12)
-        self.data[EVENTS] = [[[added_by_owner]]]
-        self.check(0, "owner approved")
-        self.data[EVENTS] = [[[added_by_agent], [removed, added_by_owner]]]
-        self.check(1, "owner-ok", AGENT, "closes no issue")
-        self.data[EVENTS] = [[[added_by_owner, removed], [added_by_agent,
-                             transition("unlabeled", AGENT, 13), transition("labeled", OWNER, 14)]]]
-        self.check(0, "owner approved")
-        self.data[EVENTS] = [[[added_by_owner, removed]]]
-        self.check(1, "owner-ok", "closes no issue")
-        del self.data[EVENTS]
-        self.pr["labels"] = []
-        self.check(1, "closes no issue")
-
-    def test_untrusted_owner_label_does_not_disable_bug_fix_rule(self):
-        self.pr["labels"] = [label("owner-ok")]
-        self.data[EVENTS] = [[[transition("labeled", AGENT, 12)]]]
-        self.check(0, "hold: passed", "owner-ok", AGENT)
+        self.check(0, "hold: left for the owner's review")
+        self.assertEqual(self.writes(), [
+            f"PUT {endpoint} message=This PR no longer qualifies to merge without the owner's review."
+            for endpoint in dismissals
+        ])
 
     def test_api_failures_fail_the_check_even_after_one_file_page(self):
-        for endpoint in (PR, "issues/17", FILES, EVENTS):
+        for endpoint in (PR, "issues/17", FILES, REVIEWS, APPROVE):
             with self.subTest(endpoint=endpoint):
                 before = copy.deepcopy(self.data)
-                if endpoint == EVENTS:
-                    self.pr["labels"] = [label("owner-ok")]
                 self.data[endpoint] = ["partial API error" if endpoint == FILES else "API error"]
-                result = self.check(1, "hold: error")
+                result = self.failed()
                 self.assertIn("fixture API error", result.stderr)
                 self.data = before
                 self.pr = self.data[PR][0]
+
+    def test_an_approval_it_cannot_withdraw_fails_the_check(self):
+        self.pr["body"] = None
+        self.data[REVIEWS] = [[[review(4)]]]
+        self.data[f"{APPROVE}/4/dismissals"] = ["API error"]
+        self.failed()
 
     def test_incomplete_file_lists_cannot_pass(self):
         for pages, count in (
@@ -236,13 +251,17 @@ class HoldTest(unittest.TestCase):
             with self.subTest(pages=pages, count=count):
                 self.pr["changed_files"] = count
                 self.data[FILES] = [pages]
-                self.check(1, "changed file list")
+                self.failed("changed file list")
 
     def test_head_or_base_change_cannot_pass_an_earlier_run(self):
         self.data[PR] = [self.pr, dict(self.pr, head={"sha": "c" * 40})]
-        self.check(1, "PR changed")
+        self.failed("PR changed")
         self.data[PR] = [dict(self.pr, base={"sha": BASE, "ref": "other"})]
-        self.check(1, "PR changed")
+        self.failed("PR changed")
+
+    def test_an_update_that_changes_no_policy_input_does_not_fail_the_check(self):
+        self.data[PR] = [self.pr, dict(self.pr, updated_at="2026-11-25T10:00:05Z", labels=[label("windows")])]
+        self.approved()
 
     def set_open_prs(self):
         def record(number, body, source_repo):
@@ -262,8 +281,9 @@ class HoldTest(unittest.TestCase):
             {"workflow_runs": [run(794, 123), run(790, 23),
                                run(799, 23, event="issues")]},
         ]]
-        expected = ["actions/runs/791/rerun", "actions/runs/794/rerun"]
-        self.data.update({endpoint: [None] for endpoint in expected})
+        reruns = ["actions/runs/791/rerun", "actions/runs/794/rerun"]
+        expected = [f"POST {endpoint}" for endpoint in reruns]
+        self.data.update({endpoint: [None] for endpoint in reruns})
         result = self.invoke("rerun", "17")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertCountEqual(self.posts.read_text().splitlines(), expected)
@@ -279,7 +299,7 @@ class HoldTest(unittest.TestCase):
         self.data["actions/runs/792/rerun"] = [None]
         result = self.invoke("rerun", "17")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.posts.read_text().splitlines(), ["actions/runs/792/rerun"])
+        self.assertEqual(self.posts.read_text().splitlines(), ["POST actions/runs/792/rerun"])
 
     def test_issue_refresh_tracks_a_revision_change_while_waiting(self):
         self.set_open_prs()
@@ -294,7 +314,7 @@ class HoldTest(unittest.TestCase):
             self.data[f"actions/runs/{id_}/rerun"] = [None]
         result = self.invoke("rerun", "17")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.posts.read_text().splitlines(), ["actions/runs/792/rerun"])
+        self.assertEqual(self.posts.read_text().splitlines(), ["POST actions/runs/792/rerun"])
 
     def test_issue_event_api_errors_fail_without_claiming_rerun_success(self):
         self.set_open_prs()

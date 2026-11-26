@@ -6,7 +6,7 @@ run-name: >-
 
 on:
   pull_request_target:
-    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+    types: [opened, edited, reopened, synchronize]
   issues:
     types: [labeled, unlabeled, edited]
 
@@ -23,6 +23,11 @@ jobs:
       group: hold-pr-${{ github.event.pull_request.number }}
       # A rerun discovered by an issue event must let a newer PR run finish.
       cancel-in-progress: ${{ github.run_attempt == 1 }}
+    # Approving needs write access. The job checks out and runs only the base branch's scripts.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -32,7 +37,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: /.github/scripts/
           sparse-checkout-cone-mode: false
-      - name: evaluate the current pull request
+      - name: approve the pull request or leave it for the owner
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
