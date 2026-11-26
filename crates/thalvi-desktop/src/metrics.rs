@@ -102,6 +102,10 @@ pub enum Event {
     /// The dictation key's capture ended; the duration is how long the key was down, or until
     /// the capture ended when a spoken ending came first.
     HoldEnd,
+    /// From a hold's release to the words it pasted, when the recognizer was still behind at the
+    /// release: `caught_up` when its final came, `bound` when 15 s ran out, `empty` when there
+    /// was nothing to paste then. The model's own latency stays in its own event.
+    ReleaseWait,
     /// One call to the desktop host; fields hold only the call's name.
     HostCall,
     /// Microphone audio was lost: `xrun` for a discontinuity the system reported, `queue_full`
@@ -152,6 +156,7 @@ impl Event {
             Self::CaptureFlow => "desktop_capture_flow",
             Self::HoldStart => "desktop_hold_start",
             Self::HoldEnd => "desktop_hold_end",
+            Self::ReleaseWait => "desktop_release_wait",
             Self::HostCall => "desktop_host_call",
             Self::AudioGap => "desktop_audio_gap",
             Self::Update => "desktop_update",

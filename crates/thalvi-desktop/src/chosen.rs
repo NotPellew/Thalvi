@@ -215,6 +215,15 @@ impl RecognizerSession for ChosenSession {
         }
     }
 
+    fn behind(&self) -> bool {
+        match self {
+            Self::Realtime(session) => session.behind(),
+            Self::OpenAi(session) => session.behind(),
+            Self::Local(session, _) => session.behind(),
+            Self::Whisper(session, _) => session.behind(),
+        }
+    }
+
     async fn finish_audio(&mut self) -> Result<(), RecognizerError> {
         match self {
             Self::OpenAi(session) => session.finish_audio().await,

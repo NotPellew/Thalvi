@@ -45,7 +45,7 @@ export const APPLIED_TEXT = "Applied.";
 export const APPLIED_LATER_TEXT = "Applied. From the next dictation.";
 
 /** While one of these runs, a change is held until the capture is over. */
-export const DURING_CAPTURE: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "transcribing", "finalPass", "merging", "cleaningUp"];
+export const DURING_CAPTURE: readonly Status["state"][] = ["starting", "capturing", "pending", "writing", "thinking", "working", "transcribing", "finishing", "finalPass", "merging", "cleaningUp"];
 
 /** The settings as the desktop holds them: pages read them and change them only through `apply`. */
 type DeepReadonly<T> = T extends (infer U)[] ? readonly DeepReadonly<U>[] : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
@@ -1369,6 +1369,8 @@ function speech(context: PageContext): SpeechRows {
         return rebuilding ? "Loads after this dictation" : "Ready";
       case "transcribing":
         return "Transcribing…";
+      case "finishing":
+        return "Finishing…";
       case "finalPass":
         return "Final pass…";
       case "merging":

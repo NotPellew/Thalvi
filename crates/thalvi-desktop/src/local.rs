@@ -61,6 +61,15 @@ impl Backlog {
             .pop_front();
     }
 
+    /// The model has frames it has not finished.
+    fn pending(&self) -> bool {
+        !self
+            .waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    }
+
     fn behind(&self) -> Option<Duration> {
         *self
             .fell_behind
@@ -344,6 +353,10 @@ fn stopped() -> RecognizerError {
 impl RecognizerSession for LocalSession {
     fn release_limit(&self) -> Duration {
         self.release_limit
+    }
+
+    fn behind(&self) -> bool {
+        self.backlog.pending()
     }
 
     fn send_frame(

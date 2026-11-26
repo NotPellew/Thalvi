@@ -1763,7 +1763,14 @@ impl<S: Rig> Runner<S> {
             ))
             .await;
             let mut ignored = engine.take_ignored();
-            let note = engine.take_merge_note().or(engine.take_cleanup_note());
+            let note = [
+                engine.take_merge_note(),
+                engine.take_cleanup_note(),
+                engine.take_release_note(),
+            ]
+            .into_iter()
+            .flatten()
+            .reduce(|said, next| format!("{said} {next}"));
             match outcome {
                 None => {
                     // The wake word closed the gate and only a capture opens it again.

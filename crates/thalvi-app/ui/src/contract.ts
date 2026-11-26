@@ -34,6 +34,7 @@ export type Status =
   | { state: "thinking"; target: string | null } // the writing model is reasoning and has written no text yet; cancellable
   | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
   | { state: "transcribing"; target: string | null; route: Route; cancellable: boolean }
+  | { state: "finishing"; target: string | null; route: Route; cancellable: boolean } // a released hold whose recognizer is catching up; cancellable
   | { state: "finalPass"; target: string | null; route: Route }
   | { state: "merging"; target: string | null; route: Route } // extra recognizers' texts are being merged with the live text; cancellable
   | { state: "cleaningUp"; target: string | null } // a dictation is being cleaned before it is pasted; cancellable

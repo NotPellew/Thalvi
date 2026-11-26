@@ -229,6 +229,17 @@ final pass's `finished` uses the same value. The tail deadline is not a modeled 
 boundary or delivery guard, and a control queued before the final empty receive still prevents
 admission, so the model actions are unchanged.
 
+Finishing a hold whose recognizer is behind (#678): after the release wait, `Step::Tail` in
+`Engine::drive` keeps a hold waiting for its final when `RecognizerSession::behind` says audio
+from before the release is unanswered, and `Live::tail` then bounds the wait at `FINISH_LIMIT`,
+15 s, before the existing non-accepted or accepted end. This is one more awaited poll in the same
+cancellation-first select, below `self.cancel.changed()`, so a control seen there ends the capture
+with no accepted result, exactly as a cancel before the ending does; `Accept` and
+`ActiveCancelled` still abstract the capture's work before the ending, and a control queued before
+the final empty receive still prevents admission. Suspending the microphone watchdog during that
+wait and the on-device session's backlog count in `local.rs` are neither a cancellation write nor a
+delivery path. The model actions are unchanged.
+
 Stopping an on-device recognition that fell 3 s behind the microphone (#455) makes
 `LocalSession::send_frame` return `RecognizerError::Behind`, which `Engine::feed` turns into the
 same `Stop::Failed` a failed frame send already produced, under the same cancellation-biased

@@ -177,11 +177,15 @@ areas your change touches. Editing rules are in
 - **Hold release flush.** At release a hold sends 800 ms of generated silence, kept out of the recording, and pastes on the next
   final or after a session-reported wait: 250 ms, or 400 ms only for a decoder whose final re-hears the end of the stretch
   (Parakeet's, measured at 235-397 ms loaded); a tentative decoding that commits frames without a token while the voice detector
-  still hears speech replays its whole stretch. Why: a streaming recognizer emits a word only after audio past it, and only that
-  final needs the longer wait; Nemotron Unified emits no final in the flush and would just wait it out. Measured headless on the
-  server recognizer, no last word lost in 336 releases (75% before when released on the word's end). Rejected: one longer wait
-  for every recognizer; a fixed 500 ms tail; an end-of-stream message through the server (11% lost at the word's end, a protocol
-  change); more left context or a global mel over the capture (both stall alike).
+  still hears speech replays its whole stretch. A session still behind at that wait (audio sent before the release not answered
+  yet: a frame the model's worker has not finished hearing) keeps a hold waiting for its final, overlay "Finishing…", up to 15 s;
+  then the hold pastes what it has and says the end may be missing. Why: a streaming recognizer emits a word only after audio past
+  it, and only that final needs the longer wait; Nemotron Unified emits no final in the flush and would just wait it out; and a
+  busy machine (Settings opening during a hold) made the recognizer fall seconds behind, so the 250 ms paste lost the end while
+  saying it worked. Measured headless on the server recognizer, no last word lost in 336 releases (75% before when released on the
+  word's end). Rejected: one longer wait for every recognizer; a fixed 500 ms tail; an end-of-stream message through the server
+  (11% lost at the word's end, a protocol change); pasting at the wait and only warning; more left context or a global mel over
+  the capture (both stall alike).
 - **Long dictation repair.** A decoding that commits 24 frames without a token while the voice detector still hears speech
   replays the whole stretch, and the final hears the last eight seconds again from a word boundary, with the silence after it;
   only a stretch up to 9.6 s is heard whole. Why: a windowed encode's frames differ from the stretch's, so the greedy search can

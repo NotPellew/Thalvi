@@ -285,6 +285,12 @@ pub trait RecognizerSession: Send {
         RELEASE_LIMIT
     }
 
+    /// Whether audio sent before the release is still waiting to be recognized. A session that
+    /// cannot tell says no, and its release keeps the limit.
+    fn behind(&self) -> bool {
+        false
+    }
+
     /// Signals that all audio for a buffered capture has arrived.
     fn finish_audio(&mut self) -> impl Future<Output = Result<(), RecognizerError>> + Send {
         std::future::ready(Ok(()))
@@ -426,6 +432,7 @@ pub struct FakeRecognizer {
     buffers: Arc<AtomicBool>,
     final_wait_ms: Arc<AtomicU64>,
     release_limit_ms: Arc<AtomicU64>,
+    behind: Arc<AtomicBool>,
     language: Arc<Mutex<Option<Language>>>,
     load: Option<watch::Receiver<Step>>,
 }
@@ -440,6 +447,7 @@ pub struct FakeControl {
     buffers: Arc<AtomicBool>,
     final_wait_ms: Arc<AtomicU64>,
     release_limit_ms: Arc<AtomicU64>,
+    behind: Arc<AtomicBool>,
     language: Arc<Mutex<Option<Language>>>,
     load: Option<watch::Sender<Step>>,
 }
@@ -452,6 +460,7 @@ pub struct FakeSession {
     buffers: Arc<AtomicBool>,
     final_wait_ms: Arc<AtomicU64>,
     release_limit_ms: Arc<AtomicU64>,
+    behind: Arc<AtomicBool>,
     language: Arc<Mutex<Option<Language>>>,
 }
 
@@ -484,6 +493,7 @@ impl FakeRecognizer {
         let release_limit_ms = Arc::new(AtomicU64::new(
             u64::try_from(RELEASE_LIMIT.as_millis()).unwrap_or(u64::MAX),
         ));
+        let behind = Arc::new(AtomicBool::new(false));
         let ready = Arc::new(Mutex::new(Some(ready_rx)));
         let events = Arc::new(Mutex::new(Some(events_rx)));
         let language = Arc::new(Mutex::new(None));
@@ -496,6 +506,7 @@ impl FakeRecognizer {
                 buffers: Arc::clone(&buffers),
                 final_wait_ms: Arc::clone(&final_wait_ms),
                 release_limit_ms: Arc::clone(&release_limit_ms),
+                behind: Arc::clone(&behind),
                 language: Arc::clone(&language),
                 load: load_rx,
             },
@@ -508,6 +519,7 @@ impl FakeRecognizer {
                 buffers,
                 final_wait_ms,
                 release_limit_ms,
+                behind,
                 language,
                 load: load_tx,
             },
@@ -538,6 +550,7 @@ impl Recognizer for FakeRecognizer {
             buffers: Arc::clone(&self.buffers),
             final_wait_ms: Arc::clone(&self.final_wait_ms),
             release_limit_ms: Arc::clone(&self.release_limit_ms),
+            behind: Arc::clone(&self.behind),
             language: Arc::clone(&self.language),
         })
     }
@@ -608,6 +621,11 @@ impl FakeControl {
         self.release_limit_ms.store(millis, Ordering::Relaxed);
     }
 
+    /// Whether the session reports that audio from before the release is still unanswered.
+    pub fn behind(&self, behind: bool) {
+        self.behind.store(behind, Ordering::Relaxed);
+    }
+
     /// Everything the session was asked to do so far.
     pub fn calls(&self) -> Vec<FakeCall> {
         self.calls
@@ -637,6 +655,10 @@ impl RecognizerSession for FakeSession {
 
     fn release_limit(&self) -> Duration {
         Duration::from_millis(self.release_limit_ms.load(Ordering::Relaxed))
+    }
+
+    fn behind(&self) -> bool {
+        self.behind.load(Ordering::Relaxed)
     }
 
     fn language(&self) -> Option<Language> {

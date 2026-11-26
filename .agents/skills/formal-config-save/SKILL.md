@@ -84,7 +84,7 @@ sends two settings requests at once reaches it without the user, because
 
 ## Covers
 
-Sync commit: `7e5f31deed648c159bfed41245116d06b5711fbb`. [source.json](source.json)
+Sync commit: `803bc91bd357c0f6995b92d9715323d2bf5e793b`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 The notes below say why each covered change since the model was written added no writer.
@@ -394,3 +394,9 @@ byte, and the request threads in `channel.rs` and `pipe.rs` then run no handler 
 A connection that sends nothing never reached `settings_set` before either, since its empty request was
 refused as "not JSON" (`agent.rs`, `answer`); no writer, lock or temporary file changes, so the model and its three
 invariants are unchanged and only the hashes moved.
+
+Finishing a hold whose recognizer is behind (#678) changes `agent.rs`'s `phase`, `overlay_word` and
+`capturing` only: the new `Status::Finishing` is reported as the transcribing phase, worded
+"finishing", and counted as capturing, so a config saved while it waits is applied at the same
+boundary as other changes during capture. `settings_set`, `plan` and `plan_over` are unchanged, and no
+writer, lock or temporary file is added, so the model and its three invariants are unchanged.

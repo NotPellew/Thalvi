@@ -89,6 +89,13 @@ pub enum Status {
         route: CaptureRoute,
         cancellable: bool,
     },
+    /// A released hold whose recognizer was still behind is finishing the words said before the
+    /// release; it can still be cancelled.
+    Finishing {
+        target: Option<String>,
+        route: CaptureRoute,
+        cancellable: bool,
+    },
     /// A dictation is being cleaned before it is pasted; it can still be cancelled.
     CleaningUp {
         target: Option<String>,
@@ -445,6 +452,11 @@ impl View {
                 route: *route,
                 cancellable: true,
             },
+            EngineState::Finishing { route } => Status::Finishing {
+                target,
+                route: *route,
+                cancellable: true,
+            },
             EngineState::CleaningUp => Status::CleaningUp { target },
             EngineState::Writing { text } => Status::Writing {
                 target,
@@ -654,6 +666,25 @@ mod tests {
                 "{route:?}",
             );
         }
+    }
+
+    #[test]
+    fn a_hold_that_is_finishing_keeps_its_delivery_route_and_cancel_state() {
+        let status = view(
+            Mode::Idle,
+            EngineState::Finishing {
+                route: CaptureRoute::Write,
+            },
+        )
+        .status();
+        assert_eq!(
+            status,
+            Status::Finishing {
+                target: Some(kitty()),
+                route: CaptureRoute::Write,
+                cancellable: true,
+            }
+        );
     }
 
     #[test]
