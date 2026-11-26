@@ -395,7 +395,7 @@ impl View {
             } => words(committed, partial.as_deref().unwrap_or_default(), true),
             Status::Pending { text, .. } => words(text, "", false),
             Status::Writing { text, .. } => words(text, "", true),
-            Status::Failed { headline, .. } => Line::Notice((*headline).to_owned()),
+            Status::Failed { headline, .. } => Line::Notice(headline.clone()),
             // The words of the status before it stay while it works.
             Status::Working { .. } => match &self.line {
                 Line::Words { .. } if !self.show_draft => Line::None,
