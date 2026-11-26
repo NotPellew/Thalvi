@@ -1091,7 +1091,7 @@ impl<B: Backend> Replayed<B> {
     }
 
     /// The encoder frames the audio heard so far holds.
-    fn heard(&self, audio: &[f32]) -> usize {
+    fn heard(audio: &[f32]) -> usize {
         audio.len().div_ceil(Self::FRAME)
     }
 
@@ -1214,7 +1214,7 @@ impl<B: Backend> Replayed<B> {
     /// Hears the last words again, from the stretch heard before the words the windowed decoding
     /// lost, and keeps the text before them.
     fn tail(&mut self, audio: &[f32]) -> Result<Option<Vec<Vec<usize>>>, RecognizerError> {
-        let end = self.heard(audio);
+        let end = Self::heard(audio);
         let Some(start) = self.tail_start(end) else {
             return Ok(None);
         };
@@ -1265,7 +1265,7 @@ impl<B: Backend> SnapshotDecoder for Replayed<B> {
     }
 
     fn finish(&mut self, audio: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
-        if self.heard(audio) > Self::WHOLE
+        if Self::heard(audio) > Self::WHOLE
             && let Some(all) = self.tail(audio)?
         {
             return Ok(all);
