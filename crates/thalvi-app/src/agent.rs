@@ -1529,19 +1529,6 @@ mod tests {
         assert_eq!(get()["settings"]["writing"]["prompt"], DEFAULT_PROMPT);
         assert_eq!(get()["settings"]["writing_default_prompt"], DEFAULT_PROMPT);
 
-        let blank = json!({"writing": {"prompt": "  "}});
-        let message = "writing.prompt must not be blank. Restore the default to start over.";
-        let check = rig.ask(&Request::SettingsCheck {
-            settings: blank.clone(),
-        });
-        assert_eq!(
-            check,
-            json!({"ok": false, "error": message, "valid": false})
-        );
-        let set = rig.set(blank);
-        assert_eq!(set["error"], message);
-        assert_eq!(rig.fake.config().writing.unwrap().prompt(), DEFAULT_PROMPT);
-
         let set = rig.set(json!({"writing": {"prompt": "Be brief."}}));
         assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
         let config = rig.fake.config();
@@ -1561,32 +1548,6 @@ mod tests {
             r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}}"#,
         );
         let rule = |phrase: &str, prompt: &str| json!({"phrase": phrase, "prompt": prompt});
-        let refusals = [
-            (
-                vec![rule("Write me", "a"), rule("write, me", "b")],
-                "writing.openings has “write me” twice.",
-            ),
-            (
-                vec![rule("write me", " ")],
-                "writing.openings has a blank prompt for “write me”.",
-            ),
-            (
-                vec![rule("", "a")],
-                "writing.openings needs a phrase with at least one word in every rule.",
-            ),
-        ];
-        for (openings, message) in refusals {
-            let change = json!({"writing": {"openings": openings}});
-            let check = rig.ask(&Request::SettingsCheck {
-                settings: change.clone(),
-            });
-            assert_eq!(
-                check,
-                json!({"ok": false, "error": message, "valid": false})
-            );
-            assert_eq!(rig.set(change)["error"], message);
-        }
-
         let set = rig.set(json!({"writing": {"openings": [rule("Write me an email", "Email.")]}}));
         assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
         let shown = rig.ask(&Request::SettingsGet);

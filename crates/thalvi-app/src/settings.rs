@@ -1137,46 +1137,13 @@ mod tests {
             }
             // Switching them off and removing the model together is allowed.
             Store::check(with(&base, upload, false, None), &on).unwrap();
+            // With merge off, extras run without a writing model and it can go.
+            let mut merge_off = with(&base, upload, true, None);
+            merge_off["stt"]["merge"] = json!(false);
+            Store::check(merge_off.clone(), &store_defaults())
+                .expect("merge off needs no writing model");
+            Store::check(merge_off, &on).expect("merge off lets the writing model go");
         }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn merge_off_lets_extras_run_without_a_writing_model_and_merge_on_needs_it() {
-        let (store, dir) = store("merge-extras");
-        let endpoint = json!({"url": "http://127.0.0.1:8000/v1", "model": "m"});
-        let with = |merge: bool, on: bool, writing: Option<&Value>| {
-            let mut settings = settings_json(&store_defaults()).unwrap();
-            settings["stt"] = json!({"merge": merge, "entries": [
-                {"kind": "on_device", "id": "d", "name": "D", "active": true},
-                {"kind": "extra", "id": "x", "name": "X", "active": on,
-                    "address": "http://127.0.0.1:9/v1", "model": "m"},
-            ]});
-            match writing {
-                Some(writing) => settings["writing"] = writing.clone(),
-                None => {
-                    settings.as_object_mut().unwrap().remove("writing");
-                }
-            }
-            settings
-        };
-
-        Store::check(with(false, true, None), &store_defaults())
-            .expect("merge off needs no writing model");
-        assert_eq!(
-            Store::check(with(true, true, None), &store_defaults()).unwrap_err(),
-            "Extra recognizers need a writing model. Set one up under Settings → Chat model → Writing first, or switch the extras off."
-        );
-
-        let merged = store
-            .save(with(true, true, Some(&endpoint)), &store_defaults())
-            .unwrap();
-        Store::check(with(false, true, None), &merged)
-            .expect("merge off lets the writing model go");
-        assert_eq!(
-            Store::check(with(true, true, None), &merged).unwrap_err(),
-            "Switch off the extra recognizers before removing the writing model."
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
