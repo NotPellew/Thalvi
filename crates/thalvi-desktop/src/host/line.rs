@@ -20,21 +20,32 @@ pub enum LineError {
 
 /// Reads up to the first newline, or to the end of the stream; `max` bytes at most.
 ///
+/// `None` is a stream that ended before any byte, which is a connection that was opened and closed
+/// rather than a line; an empty line still reads as `Some("")`.
+///
 /// # Errors
 /// [`LineError::TooLong`] when more than `max` bytes come before a newline, [`LineError::NotText`]
 /// when they are not UTF-8, and [`LineError::Io`] when reading fails or times out.
-pub fn read_line(reader: impl Read, max: usize) -> Result<String, LineError> {
+pub fn read_line(reader: impl Read, max: usize) -> Result<Option<String>, LineError> {
     let mut line = Vec::new();
+    let mut any = false;
     for byte in BufReader::new(reader.take(max as u64 + 2)).bytes() {
-        match byte.map_err(|error| LineError::Io(error.kind()))? {
-            b'\n' => break,
-            byte => line.push(byte),
+        let byte = byte.map_err(|error| LineError::Io(error.kind()))?;
+        any = true;
+        if byte == b'\n' {
+            break;
         }
+        line.push(byte);
+    }
+    if !any {
+        return Ok(None);
     }
     if line.len() > max {
         return Err(LineError::TooLong);
     }
-    String::from_utf8(line).map_err(|_| LineError::NotText)
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|_| LineError::NotText)
 }
 
 /// The reply to a request that never reached a command.
@@ -50,13 +61,15 @@ mod tests {
     #[test]
     fn a_line_is_read_up_to_its_newline_and_a_size_bound() {
         let max = 8;
-        let cases: [(&[u8], Result<String, LineError>); 6] = [
-            (b"status\n", Ok("status".to_owned())),
-            (b"status", Ok("status".to_owned())),
-            (b"two\nlines\n", Ok("two".to_owned())),
-            (b"12345678\n", Ok("12345678".to_owned())),
+        let cases: [(&[u8], _); 8] = [
+            (b"status\n", Ok(Some("status".to_owned()))),
+            (b"status", Ok(Some("status".to_owned()))),
+            (b"two\nlines\n", Ok(Some("two".to_owned()))),
+            (b"12345678\n", Ok(Some("12345678".to_owned()))),
             (b"123456789\n", Err(LineError::TooLong)),
             (b"\xff\n", Err(LineError::NotText)),
+            (b"\n", Ok(Some(String::new()))),
+            (b"", Ok(None)),
         ];
         for (input, expected) in cases {
             assert_eq!(read_line(input, max), expected, "{input:?}");

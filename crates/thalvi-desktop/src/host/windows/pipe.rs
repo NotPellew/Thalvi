@@ -308,13 +308,14 @@ fn answer(connection: &File, slot: Slot, handler: &Handler) {
         match within(connection, READ_TIMEOUT, || {
             read_line(connection, MAX_REQUEST)
         }) {
-            Ok(request) => handler(&request),
+            Ok(Some(request)) => handler(&request),
+            // A pipe that ended before any byte, or failed to read, sent nothing: no handler, no reply.
+            Ok(None) | Err(LineError::Io(_)) => String::new(),
             Err(LineError::TooLong) => {
                 too_long = true;
                 refusal("That request is too long.")
             }
             Err(LineError::NotText) => refusal("That request is not text."),
-            Err(LineError::Io(_)) => String::new(),
         }
     };
     if !reply.is_empty() {
@@ -429,16 +430,23 @@ fn ask_at(instance: &str, request: &str, timeout: Duration) -> Result<Option<Str
     within(&pipe, left, || {
         let mut writer = &pipe;
         writeln!(writer, "{request}").map_err(failed)?;
-        match read_line(&pipe, MAX_REPLY) {
-            Ok(reply) if reply.is_empty() => Err(unsupported(
+        let reply = match read_line(&pipe, MAX_REPLY) {
+            Ok(Some(reply)) => reply,
+            // A pipe that ended without an answer at all.
+            Ok(None) => String::new(),
+            Err(LineError::Io(kind)) => return Err(failed(kind.into())),
+            Err(_) => {
+                return Err(unsupported(
+                    "Thalvi answered with something that is not a reply.",
+                ));
+            }
+        };
+        if reply.is_empty() {
+            return Err(unsupported(
                 "Thalvi closed the connection without answering.",
-            )),
-            Ok(reply) => Ok(Some(reply)),
-            Err(LineError::Io(kind)) => Err(failed(kind.into())),
-            Err(_) => Err(unsupported(
-                "Thalvi answered with something that is not a reply.",
-            )),
+            ));
         }
+        Ok(Some(reply))
     })
 }
 
