@@ -1,7 +1,7 @@
 //! Owns the on-device recognizer: runs a streaming speech model on a worker thread behind the recognizer seam.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
@@ -231,6 +231,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
         let (frames_tx, frames_rx) = mpsc::channel();
         let (events_tx, events_rx) = events::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
+        let backlog = Arc::new(AtomicUsize::new(0));
         let cache = Arc::clone(&self.shared.model);
         let work = Work {
             stream: model.stream(),
@@ -238,6 +239,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
             frames: frames_rx,
             events: events_tx,
             cancelled: Arc::clone(&cancelled),
+            backlog: Arc::clone(&backlog),
             name: self.shared.name.clone(),
             metrics: self.shared.metrics.clone(),
             forget: Box::new(move || {
@@ -252,6 +254,7 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
             frames: frames_tx,
             events: events_rx,
             cancelled,
+            backlog,
             release_limit,
         })
     }
@@ -266,6 +269,8 @@ pub struct LocalSession {
     frames: mpsc::Sender<(Instant, Frame)>,
     events: events::UnboundedReceiver<Result<RecognizerEvent, RecognizerError>>,
     cancelled: Arc<AtomicBool>,
+    /// Frames sent whose model step has not finished.
+    backlog: Arc<AtomicUsize>,
     release_limit: Duration,
 }
 
@@ -278,15 +283,20 @@ impl RecognizerSession for LocalSession {
         self.release_limit
     }
 
+    fn behind(&self) -> bool {
+        self.backlog.load(Ordering::Relaxed) > 0
+    }
+
     fn send_frame(
         &mut self,
         frame: &Frame,
     ) -> impl Future<Output = Result<(), RecognizerError>> + Send {
-        std::future::ready(
-            self.frames
-                .send((Instant::now(), *frame))
-                .map_err(|_| stopped()),
-        )
+        self.backlog.fetch_add(1, Ordering::Relaxed);
+        let sent = self.frames.send((Instant::now(), *frame));
+        if sent.is_err() {
+            self.backlog.fetch_sub(1, Ordering::Relaxed);
+        }
+        std::future::ready(sent.map_err(|_| stopped()))
     }
 
     async fn next_event(&mut self) -> Result<RecognizerEvent, RecognizerError> {
@@ -309,6 +319,7 @@ struct Work<S> {
     frames: mpsc::Receiver<(Instant, Frame)>,
     events: events::UnboundedSender<Result<RecognizerEvent, RecognizerError>>,
     cancelled: Arc<AtomicBool>,
+    backlog: Arc<AtomicUsize>,
     name: String,
     metrics: Metrics,
     /// Drops the model from its recognizer; a model whose recognition failed may have lost its device.
@@ -336,6 +347,7 @@ impl<S: SpeechStream> Work<S> {
             }
             let started = Instant::now();
             let result = self.stream.accept(&frame);
+            self.backlog.fetch_sub(1, Ordering::Relaxed);
             let took = started.elapsed();
             tally.frames += 1;
             tally.model += took;

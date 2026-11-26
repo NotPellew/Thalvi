@@ -5990,6 +5990,13 @@ async fn a_hold_without_a_replaying_final_pastes_at_the_short_release_wait() {
                 rig.started(Cue::Accepted).is_empty(),
                 "no paste before the 250 ms wait"
             );
+            assert_eq!(
+                rig.state(),
+                EngineState::Finishing {
+                    route: CaptureRoute::Paste
+                },
+                "the overlay says it is finishing from the release"
+            );
             rig.at(1450).await;
             assert_eq!(
                 rig.started(Cue::Accepted),
@@ -6012,20 +6019,29 @@ async fn a_hold_released_while_the_recognizer_is_behind_waits_for_its_final_and_
             rig.server.behind(true);
             let task = hold_task(engine, frames);
             rig.hold().await;
-            rig.say(1000, Say::Partial("please bring three")).await;
+            rig.say(1000, Say::Partial("please bring all the coffee"))
+                .await;
             rig.release(1200).await;
-            rig.at(1500).await;
+            rig.feed_until(1499, Kind::Quiet).await;
             assert!(
                 rig.started(Cue::Accepted).is_empty(),
                 "a recognizer still behind at the release is not cut off at the 250 ms wait"
             );
-            rig.at(3000).await;
+            assert_eq!(
+                rig.state(),
+                EngineState::Finishing {
+                    route: CaptureRoute::Paste
+                },
+                "the overlay says the hold is finishing"
+            );
+            rig.feed_until(2999, Kind::Quiet).await;
             assert!(
                 rig.started(Cue::Accepted).is_empty(),
                 "the hold keeps waiting while the recognizer is behind"
             );
             assert!(!task.is_finished(), "the capture is still open");
-            rig.finals("please bring three bags of coffee").await;
+            rig.at(3000).await;
+            rig.finals("please bring all the coffee we have").await;
             assert_eq!(
                 rig.started(Cue::Accepted),
                 [3000],
@@ -6033,23 +6049,34 @@ async fn a_hold_released_while_the_recognizer_is_behind_waits_for_its_final_and_
             );
             assert_eq!(
                 finished(task).await,
-                accepted(CaptureRoute::Paste, "please bring three bags of coffee")
+                accepted(CaptureRoute::Paste, "please bring all the coffee we have")
             );
         })
         .await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_hold_still_behind_fifteen_seconds_after_release_pastes_what_it_has() {
+async fn a_hold_still_behind_fifteen_seconds_after_release_pastes_what_it_has_and_says_so() {
     LocalSet::new()
         .run_until(async {
-            let (mut rig, engine, frames) = Rig::new("{}");
+            let (mut rig, mut engine, mut frames) = Rig::new("{}");
             rig.server.behind(true);
-            let task = hold_task(engine, frames);
+            let task = tokio::task::spawn_local(async move {
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                let outcome = engine.capture(&mut frames, None).await;
+                let note = engine.take_release_note();
+                engine.finish().await;
+                (outcome, note)
+            });
             rig.hold().await;
-            rig.say(1000, Say::Partial("please bring three")).await;
+            rig.say(1000, Say::Partial("please bring all the coffee")).await;
             rig.release(1200).await;
-            rig.at(16_199).await;
+            rig.feed_until(1499, Kind::Quiet).await;
+            assert!(
+                rig.started(Cue::Accepted).is_empty(),
+                "the hold waits past the 250 ms limit"
+            );
+            rig.feed_until(16_199, Kind::Quiet).await;
             assert!(
                 rig.started(Cue::Accepted).is_empty(),
                 "the bound is 15 s after the release"
@@ -6062,7 +6089,14 @@ async fn a_hold_still_behind_fifteen_seconds_after_release_pastes_what_it_has() 
             );
             assert_eq!(
                 finished(task).await,
-                accepted(CaptureRoute::Paste, "please bring three")
+                (
+                    accepted(CaptureRoute::Paste, "please bring all the coffee"),
+                    Some(
+                        "The speech model was still catching up, so the end of the dictation may be missing."
+                            .to_owned()
+                    ),
+                ),
+                "the user is told the end may be missing"
             );
         })
         .await;
@@ -6078,7 +6112,7 @@ async fn cancelling_while_the_recognizer_is_still_behind_delivers_nothing() {
             rig.hold().await;
             rig.say(1000, Say::Final("hello")).await;
             rig.release(1200).await;
-            rig.at(1500).await;
+            rig.feed_until(1500, Kind::Quiet).await;
             rig.handle.cancel();
             settle().await;
             assert_eq!(

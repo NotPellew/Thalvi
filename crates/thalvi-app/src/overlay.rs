@@ -113,6 +113,7 @@ impl Visibility {
             | Status::StartingChat { .. }
             | Status::Working { .. }
             | Status::Transcribing { .. }
+            | Status::Finishing { .. }
             | Status::FinalPass { .. }
             | Status::Merging { .. }
             | Status::CleaningUp { .. }

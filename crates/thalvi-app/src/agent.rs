@@ -409,7 +409,8 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
         Status::Working {
             cancellable: true, ..
         }
-        | Status::Transcribing { .. } => "transcribing",
+        | Status::Transcribing { .. }
+        | Status::Finishing { .. } => "transcribing",
         Status::FinalPass { .. } => "finalPass",
         Status::Merging { .. } => "merging",
         Status::CleaningUp { .. } => "cleaning",
@@ -444,6 +445,7 @@ fn overlay_word(status: &Status, on: bool) -> &'static str {
         Status::Thinking { .. } => "thinking",
         Status::Working { .. } => "working",
         Status::Transcribing { .. } => "transcribing",
+        Status::Finishing { .. } => "finishing",
         Status::FinalPass { .. } => "finalPass",
         Status::Merging { .. } => "merging",
         Status::CleaningUp { .. } => "cleaning",
@@ -552,6 +554,10 @@ fn capturing(status: &Status) -> bool {
                 ..
             }
             | Status::Transcribing {
+                cancellable: true,
+                ..
+            }
+            | Status::Finishing {
                 cancellable: true,
                 ..
             }

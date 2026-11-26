@@ -82,6 +82,14 @@ const PREVIEW_WAIT: Duration = Duration::from_secs(1);
 static RELEASE_SILENCE: [Frame; RELEASE_SILENCE_FRAMES] =
     [[0i16; FRAME_SAMPLES]; RELEASE_SILENCE_FRAMES];
 
+/// How long a released hold keeps waiting while its recognizer is still hearing audio from before
+/// the release; then it pastes what it has and says the end may be missing.
+const FINISH_LIMIT: Duration = Duration::from_secs(15);
+
+/// What a hold says when [`FINISH_LIMIT`] ran out before its recognizer caught up.
+const RELEASE_BOUND_NOTE: &str =
+    "The speech model was still catching up, so the end of the dictation may be missing.";
+
 /// Frames in one wake level window, 2 s.
 const LEVEL_WINDOW: u64 = 25;
 
@@ -252,6 +260,11 @@ pub enum EngineState {
         route: CaptureRoute,
     },
     TranscribingLive {
+        route: CaptureRoute,
+    },
+    /// A released hold whose recognizer was still behind: it is finishing the words said before
+    /// the release.
+    Finishing {
         route: CaptureRoute,
     },
     /// The writing model is putting the words into proper text; `text` is what has streamed in.
@@ -589,6 +602,9 @@ pub struct Engine<R, W, C> {
     merge_note: Option<String>,
     /// What the last dictation cleanup told the user, until the caller takes it to show beside the paste.
     cleanup_note: Option<String>,
+    /// That the end of the last hold may be missing, until the caller takes it to show beside the
+    /// paste.
+    release_note: Option<String>,
     /// How the last cleanup ended (`cleaned` or `raw: <reason>`), and the words as recognized.
     cleanup_record: Option<(String, String)>,
 }
@@ -676,6 +692,8 @@ struct Live<S> {
     /// The release of the hold that opened this capture; frames queued after it are not speech
     /// of the hold.
     cutoff: Option<Cutoff>,
+    /// What the hold that opened this capture delivers; none for a wake-word capture.
+    hold_route: Option<CaptureRoute>,
     /// What the ending spotter's hits mean; none when it does not listen to this capture.
     watch: Option<Watch>,
     spot: SpotStats,
@@ -755,6 +773,8 @@ struct Heard {
     words_came: bool,
     /// The latest speech heard since the recognizer's last final result.
     last: Option<Instant>,
+    /// Whether the microphone heard any speech in this capture.
+    spoke: bool,
 }
 
 /// What the dictation key's release does to a capture.
@@ -764,6 +784,9 @@ enum Release {
     Down,
     /// The key came up at this instant; the last words may still arrive.
     Tail(Instant),
+    /// The key came up while the recognizer was still hearing the audio from before it: the final
+    /// is waited for, bounded by [`FINISH_LIMIT`].
+    Behind(Instant),
     /// Nothing more comes of the key: the capture is not a hold.
     Over,
 }
@@ -800,8 +823,31 @@ impl<S: RecognizerSession> Live<S> {
                     self.session.release_limit()
                 },
             ),
+            Release::Behind(at) => Some(at + FINISH_LIMIT),
             _ => None,
         }
+    }
+
+    /// When the hold's key came up, while its last words may still be coming.
+    fn released(&self) -> Option<Instant> {
+        match self.release {
+            Release::Tail(at) | Release::Behind(at) => Some(at),
+            _ => None,
+        }
+    }
+
+    /// What the overlay shows while a released hold waits for the recognizer to finish the words
+    /// said before the release.
+    fn waiting(&self) -> Option<EngineState> {
+        let route = self
+            .hold_route
+            .filter(|_| self.released().is_some())
+            .filter(|_| self.text.pending().is_none())?;
+        Some(if self.session.buffers_audio() {
+            EngineState::TranscribingLive { route }
+        } else {
+            EngineState::Finishing { route }
+        })
     }
 
     fn take_quiet_ending(&mut self) -> QuietEnding {
@@ -1321,6 +1367,7 @@ where
             ignored: Vec::new(),
             merge_note: None,
             cleanup_note: None,
+            release_note: None,
             cleanup_record: None,
         };
         (engine, handle)
@@ -1384,6 +1431,12 @@ where
     /// words: the delivery that follows would otherwise replace the notice on the overlay.
     pub fn take_cleanup_note(&mut self) -> Option<String> {
         self.cleanup_note.take()
+    }
+
+    /// What a hold released while its recognizer was still behind told the user, if the bound ran
+    /// out first: the delivery that follows would otherwise replace the notice on the overlay.
+    pub fn take_release_note(&mut self) -> Option<String> {
+        self.release_note.take()
     }
 
     /// How the cleanup of the capture that just ended went, and the words as recognized.
@@ -1810,6 +1863,10 @@ where
     }
 
     fn publish(&self, live: &Live<R::Session>) {
+        if let Some(state) = live.waiting() {
+            self.set_state(state);
+            return;
+        }
         self.set_state(match live.text.pending() {
             Some(pending)
                 if self.submit_confirmation == SubmitConfirmation::Settled
@@ -2035,6 +2092,7 @@ where
             release: held.map_or(Release::Over, |_| Release::Down),
             capture_end: None,
             cutoff: held.map(|held| held.release.clone()),
+            hold_route: held.map(Held::route),
             watch: Self::watch_for(&mut self.spotter, self.pauses, held.is_some()),
             spot: SpotStats::default(),
             notice: held.is_none().then(|| self.spotter_off.take()).flatten(),
@@ -2082,6 +2140,7 @@ where
                 return Some(stop.into());
             }
             live.release = Release::Tail(Instant::now());
+            self.publish(live);
         }
         None
     }
@@ -2124,10 +2183,12 @@ where
             } else {
                 MIC_TIMEOUT
             };
-            let waiting_on_live_upload =
-                live.session.buffers_audio() && matches!(live.release, Release::Tail(_));
+            // Once a hold's key is up its audio is in: a silent microphone no longer means lost
+            // words, and the wait is the recognizer's.
+            let waiting_on_recognizer = live.released().is_some()
+                && (live.session.buffers_audio() || matches!(live.release, Release::Behind(_)));
             let watchdog =
-                (!waiting_on_live_upload && live.cues.is_empty()).then(|| live.last_audio + limit);
+                (!waiting_on_recognizer && live.cues.is_empty()).then(|| live.last_audio + limit);
             let tail = live.tail();
             let preview_deadline = live.submit_preview.as_ref().and_then(LivePreview::deadline);
             let quiet_at = live.text.ready_at().filter(|_| preview_deadline.is_none());
@@ -2187,13 +2248,29 @@ where
                     live.is_hold(),
                 ))),
                 Step::TooLong => Some(Done::Failed(CaptureError::TooLong(self.limits.max()))),
-                Step::Tail => Some(if live.session.buffers_audio() {
-                    Done::Failed(CaptureError::Recognizer(RecognizerError::said(
-                        "The speech server took too long to transcribe this capture. Nothing was delivered.",
-                    )))
-                } else {
-                    self.finish_hold(live, held)
-                }),
+                Step::Tail => match live.release {
+                    Release::Tail(at)
+                        if !live.session.buffers_audio()
+                            && live.heard.spoke
+                            && live.session.behind() =>
+                    {
+                        live.release = Release::Behind(at);
+                        self.publish(live);
+                        None
+                    }
+                    _ if live.session.buffers_audio() => Some(Done::Failed(
+                        CaptureError::Recognizer(RecognizerError::said(
+                            "The speech server took too long to transcribe this capture. Nothing was delivered.",
+                        )),
+                    )),
+                    release => {
+                        let done = self.finish_hold(live, held);
+                        if let Release::Behind(at) = release {
+                            self.release_waited(live, at, &done);
+                        }
+                        Some(done)
+                    }
+                },
                 Step::Key(open) => {
                     key_open = open;
                     self.on_key(live, held, frames).await
@@ -2240,7 +2317,11 @@ where
                 }
                 let done = self.on_final(live, &text);
                 done.or_else(|| {
-                    matches!(live.release, Release::Tail(_)).then(|| {
+                    let released = live.released()?;
+                    if matches!(live.release, Release::Behind(_)) {
+                        self.release_caught_up(live, released);
+                    }
+                    Some(
                         if held.is_none()
                             && let Some(pending) = live.text.pending()
                         {
@@ -2250,8 +2331,8 @@ where
                             })
                         } else {
                             self.finish_hold(live, held)
-                        }
-                    })
+                        },
+                    )
                 })
             }
         }
@@ -2314,6 +2395,7 @@ where
             return Some(Done::from(stop));
         }
         live.release = Release::Tail(Instant::now());
+        self.publish(live);
         None
     }
 
@@ -2334,6 +2416,31 @@ where
             route: held.map_or(CaptureRoute::Paste, Held::route),
             text,
         })
+    }
+
+    /// Records a recognizer that caught up after the release, and how long that took.
+    fn release_caught_up(&self, live: &Live<R::Session>, released: Instant) {
+        self.recorder.metric(
+            Event::ReleaseWait,
+            "caught_up",
+            Some(released.elapsed()),
+            json!({"dictation": live.dictation.to_string()}),
+        );
+    }
+
+    /// Records a hold that stopped waiting for a recognizer still behind at [`FINISH_LIMIT`], and
+    /// says the end may be missing when there is text to paste.
+    fn release_waited(&mut self, live: &Live<R::Session>, released: Instant, done: &Done) {
+        let delivered = matches!(done, Done::Accepted(_));
+        self.recorder.metric(
+            Event::ReleaseWait,
+            if delivered { "bound" } else { "empty" },
+            Some(released.elapsed()),
+            json!({"dictation": live.dictation.to_string()}),
+        );
+        if delivered {
+            self.release_note = Some(RELEASE_BOUND_NOTE.to_owned());
+        }
     }
 
     /// Records how long after `since` the recognizer answered, when speech was heard since.
@@ -2510,6 +2617,7 @@ where
         }
         if live.speech {
             live.heard.last = Some(now);
+            live.heard.spoke = true;
             if !live.heard.words_came {
                 live.heard.first.get_or_insert(now);
             }
