@@ -131,6 +131,7 @@ impl Text {
                     self.finals.push(text);
                 }
             }
+            RecognizerEvent::Ended => {}
         }
     }
 

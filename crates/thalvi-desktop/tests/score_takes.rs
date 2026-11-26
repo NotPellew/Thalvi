@@ -167,6 +167,7 @@ fn word_errors_and_compute_time_on_the_takes() {
                         partial.clear();
                     }
                     RecognizerEvent::Partial(text) => partial = text,
+                    RecognizerEvent::Ended => {}
                 }
             }
         }

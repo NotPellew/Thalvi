@@ -279,7 +279,7 @@ impl<'a, M: SpeechModel> Mirror<'a, M> {
                     self.outcomes
                         .extend(self.watch.words(at).map(|done| (done, index)));
                 }
-                RecognizerEvent::Partial(_) => {}
+                RecognizerEvent::Partial(_) | RecognizerEvent::Ended => {}
                 RecognizerEvent::Final(text) => {
                     let before = self.capture.clone();
                     let step = self.capture.on_final(&text, at, speech);

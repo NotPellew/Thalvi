@@ -124,6 +124,15 @@ pub trait SpeechStream: Send + 'static {
     /// # Errors
     /// Fails when the model cannot continue; the stream is then abandoned.
     fn accept(&mut self, frame: &Frame) -> Result<Vec<RecognizerEvent>, RecognizerError>;
+
+    /// The input is complete: no more frames will come. Answers with the text the model held back
+    /// for the end of the audio, if any.
+    ///
+    /// # Errors
+    /// Fails when the model cannot continue; the stream is then abandoned.
+    fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Where a speech model comes from; loading may download it, and is retried until it works.

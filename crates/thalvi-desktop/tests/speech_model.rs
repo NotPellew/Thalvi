@@ -63,7 +63,7 @@ async fn the_clip_is_recognized_in_full_as_partials_that_grow_and_a_final() {
         .iter()
         .filter_map(|event| match event {
             RecognizerEvent::Final(text) => Some(text.as_str()),
-            RecognizerEvent::Partial(_) => None,
+            RecognizerEvent::Partial(_) | RecognizerEvent::Ended => None,
         })
         .collect();
     assert_eq!(

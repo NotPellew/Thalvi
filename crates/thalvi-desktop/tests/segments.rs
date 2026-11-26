@@ -97,7 +97,7 @@ fn finals(events: &[(usize, RecognizerEvent)]) -> Vec<(usize, &str)> {
         .iter()
         .filter_map(|(at, event)| match event {
             RecognizerEvent::Final(text) => Some((*at, text.as_str())),
-            RecognizerEvent::Partial(_) => None,
+            RecognizerEvent::Partial(_) | RecognizerEvent::Ended => None,
         })
         .collect()
 }

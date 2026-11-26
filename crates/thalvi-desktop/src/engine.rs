@@ -2302,6 +2302,7 @@ where
     ) -> Option<Done> {
         match event {
             Err(error) => Some(Done::Failed(error.into())),
+            Ok(RecognizerEvent::Ended) => None,
             Ok(RecognizerEvent::Partial(text)) => {
                 if has_words(&text) {
                     live.last_words = Instant::now();
