@@ -7480,6 +7480,9 @@ async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
             assert!(task.is_finished(), "the second final completes the hold");
             let (outcome, engine) = finished(task).await;
             assert_eq!(outcome, accepted(CaptureRoute::Paste, "second words"));
+            rig.handle.cancel();
+            settle().await;
+            engine.finish().await;
             let rows = read_lines(&dir.join("metrics.jsonl"));
             assert!(
                 rows.iter().any(|row| row["event"] == "desktop_end_cue"
@@ -7497,9 +7500,6 @@ async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
             );
             assert_eq!(cut["output_ms"], 15.0);
             assert_eq!(cut["audible_ms"], 40.0);
-            rig.handle.cancel();
-            settle().await;
-            engine.finish().await;
         })
         .await;
 }
