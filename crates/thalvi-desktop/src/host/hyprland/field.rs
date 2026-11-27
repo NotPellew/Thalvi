@@ -503,22 +503,29 @@ impl FieldProbe for Armed {
                 object,
                 window: self.window.clone(),
                 active: self.active,
+                left: false,
             }));
         }
     }
 }
 
 /// The field that received the paste, read on demand off the paste path.
+/// Once focus leaves the window, one more read returns the field as the user left it, then
+/// [`FieldEnd::FocusLeft`].
 struct FieldAt {
     object: Arc<dyn Object>,
     window: Window,
     active: fn(&Window) -> bool,
+    left: bool,
 }
 
 impl Field for FieldAt {
     fn text(&mut self) -> Result<String, FieldEnd> {
         if !(self.active)(&self.window) {
-            return Err(FieldEnd::FocusLeft);
+            if self.left {
+                return Err(FieldEnd::FocusLeft);
+            }
+            self.left = true;
         }
         if !self.object.alive() {
             return Err(FieldEnd::Closed);
@@ -851,7 +858,7 @@ mod tests {
     #[test]
     fn the_field_reports_why_its_text_cannot_be_read() {
         let now = Instant::now() + Duration::from_secs(10);
-        let cases: Vec<(&str, FakeObject, bool, FieldEnd)> = vec![
+        let cases: Vec<(&str, FakeObject, bool, Vec<Result<String, FieldEnd>>)> = vec![
             (
                 "a password field is protected",
                 FakeObject {
@@ -859,7 +866,7 @@ mod tests {
                     ..FakeObject::editable("text")
                 },
                 true,
-                FieldEnd::Protected,
+                vec![Err(FieldEnd::Protected)],
             ),
             (
                 "a vanished object is closed",
@@ -868,13 +875,13 @@ mod tests {
                     ..FakeObject::editable("text")
                 },
                 true,
-                FieldEnd::Closed,
+                vec![Err(FieldEnd::Closed)],
             ),
             (
-                "a field left behind is FocusLeft",
+                "a field left behind is read once more, then FocusLeft",
                 FakeObject::editable("text"),
                 false,
-                FieldEnd::FocusLeft,
+                vec![Ok("text".to_owned()), Err(FieldEnd::FocusLeft)],
             ),
             (
                 "a failed read is unreadable",
@@ -883,13 +890,13 @@ mod tests {
                     ..FakeObject::editable("text")
                 },
                 true,
-                FieldEnd::Unreadable,
+                vec![Err(FieldEnd::Unreadable)],
             ),
             (
                 "an overlong field is unreadable",
                 FakeObject::editable(&format!("{}text", "x".repeat(MAX_CHARS + 1))),
                 true,
-                FieldEnd::Unreadable,
+                vec![Err(FieldEnd::Unreadable)],
             ),
         ];
         for (name, object, is_active, expected) in cases {
@@ -900,7 +907,8 @@ mod tests {
             let mut field = probe
                 .field("text")
                 .unwrap_or_else(|limit| panic!("{name}: {limit:?}"));
-            assert_eq!(field.text(), Err(expected), "{name}");
+            let reads: Vec<_> = expected.iter().map(|_| field.text()).collect();
+            assert_eq!(reads, expected, "{name}");
         }
         ACTIVE.store(true, Ordering::Relaxed);
     }
