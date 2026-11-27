@@ -780,12 +780,23 @@ mod tests {
             ],
         );
         let unsqueeze = node("Unsqueeze", "r", "y", &[attribute_ints("axes", &[1])]);
+        model_onnx(&[reduce, unsqueeze], input, &[1, 1])
+    }
+
+    /// A model ONNX that answers its `[1, len]` input unchanged.
+    fn identity_onnx(len: usize) -> Vec<u8> {
+        let dims = [1, i64::try_from(len).unwrap_or_default()];
+        model_onnx(&[node("Identity", "x", "y", &[])], &dims, &dims)
+    }
+
+    fn model_onnx(nodes: &[Vec<u8>], input: &[i64], output: &[i64]) -> Vec<u8> {
         let mut graph = Vec::new();
-        bytes_field(1, &reduce, &mut graph);
-        bytes_field(1, &unsqueeze, &mut graph);
+        for node in nodes {
+            bytes_field(1, node, &mut graph);
+        }
         str_field(2, "head", &mut graph);
         bytes_field(11, &value_info("x", input), &mut graph);
-        bytes_field(12, &value_info("y", &[1, 1]), &mut graph);
+        bytes_field(12, &value_info("y", output), &mut graph);
         let mut opset = Vec::new();
         int_field(2, 7, &mut opset);
         let mut model = Vec::new();
@@ -829,6 +840,35 @@ mod tests {
                 assert!(error.contains(expected), "{capture}: {error}");
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_answer_of_the_wrong_size_or_out_of_range_is_an_inference_error() {
+        let dir = std::env::temp_dir().join(format!("thalvi-wake-answers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let session = |name: &str, model: Vec<u8>| {
+            let path = dir.join(name);
+            std::fs::write(&path, model).expect("model");
+            open(&path).expect("loads")
+        };
+        let mut head = session("head.onnx", head_onnx(&[1, 16, 96]));
+        for (value, valid) in [(0.0, true), (1.0, true), (1.5, false), (-0.5, false)] {
+            let scored = score(&mut head, &[value; HEAD_CONTEXT * EMBEDDING_DIM]);
+            assert_eq!(scored.ok(), valid.then_some(value), "a mean of {value}");
+        }
+        let mut whole = session("whole.onnx", identity_onnx(MEL_BINS));
+        assert_eq!(
+            melspectrogram(&mut whole, &[10.0; MEL_BINS]).expect("one row"),
+            [[3.0; MEL_BINS]],
+            "rescaled toward the embedding model's input"
+        );
+        let mut ragged = session("ragged.onnx", identity_onnx(MEL_BINS + 1));
+        assert!(matches!(
+            melspectrogram(&mut ragged, &[0.0; MEL_BINS + 1]),
+            Err(WakeError::Inference(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
