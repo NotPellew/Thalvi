@@ -28,17 +28,59 @@ trait Source: Send + Sync {
     fn connected(&self) -> bool;
     /// Whether the bus was tried and could not be reached.
     fn unavailable(&self) -> bool;
-    /// The newest event from `window`'s process since `since`, or none at `until`.
+    /// The oldest untaken event from `window`'s process since `since`, or none at `until`.
     fn wait(&self, since: Instant, window: u32, until: Instant) -> Option<Seen>;
+}
+
+/// The registry call that tells apps an assistive client is listening.
+trait Subscribe: Send + Sync {
+    /// Register `object:text-changed` for the listener named `bus_name`.
+    fn register(&self, bus_name: &str) -> zbus::Result<()>;
+}
+
+/// Announce the listener so apps start emitting text events to it.
+fn announce(registrar: &dyn Subscribe) -> bool {
+    registrar.register("").is_ok()
+}
+
+/// Re-announce when a new application connects to the accessibility bus.
+fn reannounce(registrar: &dyn Subscribe) {
+    let _ = announce(registrar);
 }
 
 const WAIT: Duration = Duration::from_secs(1);
 const MAX_CHARS: usize = 20_000;
 const PASSWORD_TEXT: u32 = 40;
+const MAX_RECENT: usize = 64;
 
-/// The newest source kept for one process, and one taken event with its process id.
-type Kept = (Instant, Arc<dyn Object>);
+/// One event's source: the process and the object that changed.
+type Key = (String, String);
+type Recent = (Instant, u32, Key, Arc<dyn Object>);
 type Seen = (Instant, u32, Arc<dyn Object>);
+
+/// A connection's view of the registry, used to announce the listener.
+struct Registry {
+    connection: Connection,
+}
+
+impl Subscribe for Registry {
+    fn register(&self, bus_name: &str) -> zbus::Result<()> {
+        Proxy::new(
+            &self.connection,
+            "org.a11y.atspi.Registry",
+            "/org/a11y/atspi/registry",
+            "org.a11y.atspi.Registry",
+        )?
+        .call(
+            "RegisterEvent",
+            &(
+                "object:text-changed".to_owned(),
+                Vec::<String>::new(),
+                bus_name.to_owned(),
+            ),
+        )
+    }
+}
 
 /// One AT-SPI object that changed. Holds no text until a watch asks for it.
 struct FieldObject {
@@ -98,39 +140,41 @@ fn connection_pid(connection: &Connection, sender: &str) -> Option<u32> {
     .ok()
 }
 
-/// The last event per process, and a wakeup for probes waiting on a fresh one.
+/// Recent event sources, oldest first, and a wakeup for probes waiting on a fresh one.
 struct Events {
-    latest: Mutex<HashMap<u32, Kept>>,
+    recent: Mutex<Vec<Recent>>,
     wake: Condvar,
 }
 
 impl Events {
     fn new() -> Self {
         Self {
-            latest: Mutex::new(HashMap::new()),
+            recent: Mutex::new(Vec::new()),
             wake: Condvar::new(),
         }
     }
 
-    /// Overwrites the previous source from this process; a source with no process is dropped.
-    fn record(&self, at: Instant, pid: Option<u32>, object: Arc<dyn Object>) {
+    /// Keeps one recent object per source; an event with no process is dropped.
+    fn record(&self, at: Instant, pid: Option<u32>, key: Key, object: Arc<dyn Object>) {
         let Some(pid) = pid else { return };
-        self.latest
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(pid, (at, object));
+        let mut recent = self.recent.lock().unwrap_or_else(PoisonError::into_inner);
+        recent.retain(|(_, _, kept, _)| *kept != key);
+        recent.push((at, pid, key, object));
+        if recent.len() > MAX_RECENT {
+            recent.remove(0);
+        }
         self.wake.notify_all();
     }
 
-    /// Takes the newest event from `window`'s process at or after `since`.
+    /// Takes the oldest event from `window`'s process at or after `since`.
     fn wait(&self, since: Instant, window: u32, until: Instant) -> Option<Seen> {
-        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut recent = self.recent.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
-            let selected = latest.iter().find_map(|(pid, (at, _))| {
-                (A11y::belongs(*pid, window) && *at >= since).then_some(*pid)
-            });
-            if let Some(pid) = selected {
-                let (at, object) = latest.remove(&pid)?;
+            let selected = recent
+                .iter()
+                .position(|(at, pid, _, _)| A11y::belongs(*pid, window) && *at >= since);
+            if let Some(index) = selected {
+                let (at, pid, _, object) = recent.remove(index);
                 return Some((at, pid, object));
             }
             let remaining = until.saturating_duration_since(Instant::now());
@@ -139,9 +183,9 @@ impl Events {
             }
             let (guard, _) = self
                 .wake
-                .wait_timeout(latest, remaining)
+                .wait_timeout(recent, remaining)
                 .unwrap_or_else(PoisonError::into_inner);
-            latest = guard;
+            recent = guard;
         }
     }
 
@@ -289,23 +333,12 @@ impl A11y {
         let a11y = ConnectionBuilder::address(address.as_str())
             .and_then(ConnectionBuilder::build)
             .ok()?;
-        let registry = Proxy::new(
-            &a11y,
-            "org.a11y.atspi.Registry",
-            "/org/a11y/atspi/registry",
-            "org.a11y.atspi.Registry",
-        )
-        .ok()?;
-        let registered: zbus::Result<()> = registry.call(
-            "RegisterEvent",
-            &(
-                "object:text-changed".to_owned(),
-                Vec::<String>::new(),
-                a11y.unique_name()
-                    .map_or_else(String::new, ToString::to_string),
-            ),
-        );
-        registered.ok()?;
+        let registry = Registry {
+            connection: a11y.clone(),
+        };
+        if !announce(&registry) {
+            return None;
+        }
         let messages = MessageIterator::for_match_rule(
             "type='signal',interface='org.a11y.atspi.Event.Object',member='TextChanged'",
             &a11y,
@@ -341,6 +374,12 @@ impl A11y {
         self.events.wake_all();
 
         let owner_watcher = Arc::clone(&self);
+        let registrar: Arc<dyn Subscribe> = Arc::new(Registry {
+            connection: a11y.clone(),
+        });
+        let own = a11y
+            .unique_name()
+            .map_or_else(String::new, ToString::to_string);
         std::thread::Builder::new()
             .name("thalvi-a11y-owners".to_owned())
             .spawn(move || {
@@ -349,11 +388,15 @@ impl A11y {
                         break;
                     }
                     let Ok(message) = message else { continue };
-                    let Ok((name, _, _)) = message.body().deserialize::<(String, String, String)>()
+                    let Ok((name, _, owner)) =
+                        message.body().deserialize::<(String, String, String)>()
                     else {
                         continue;
                     };
                     owner_watcher.pids.forget(&name);
+                    if !owner.is_empty() && name != own {
+                        reannounce(registrar.as_ref());
+                    }
                 }
             })
             .ok();
@@ -375,7 +418,12 @@ impl A11y {
                 sender: who.to_string(),
                 path: path.to_owned().into(),
             });
-            self.events.record(Instant::now(), Some(pid), object);
+            self.events.record(
+                Instant::now(),
+                Some(pid),
+                (who.to_string(), path.to_string()),
+                object,
+            );
         }
         self.fail(generation);
     }
@@ -576,6 +624,45 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeRegistry {
+        names: Mutex<Vec<String>>,
+    }
+
+    impl Subscribe for FakeRegistry {
+        fn register(&self, bus_name: &str) -> zbus::Result<()> {
+            self.names
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(bus_name.to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_listener_announces_itself_to_apps_that_connect_later() {
+        let cases: Vec<(&str, bool)> = vec![
+            ("the initial registration names no listener", true),
+            ("a new app connection re-announces the listener", false),
+        ];
+        for (name, initial) in cases {
+            let registry = Arc::new(FakeRegistry::default());
+            if initial {
+                assert!(announce(registry.as_ref()));
+            } else {
+                reannounce(registry.as_ref());
+            }
+            assert_eq!(
+                *registry
+                    .names
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+                vec![String::new()],
+                "{name}"
+            );
+        }
+    }
+
     static ACTIVE: AtomicBool = AtomicBool::new(true);
     fn active(_: &Window) -> bool {
         ACTIVE.load(Ordering::Relaxed)
@@ -698,46 +785,63 @@ mod tests {
 
     #[test]
     fn a_burst_of_foreign_events_keeps_the_paste_and_the_listener_alive() {
-        let events = Events::new();
-        let at = Instant::now();
-        for pid in 0..100 {
-            events.record(
-                at,
-                Some(900_000 + pid),
-                Arc::new(FakeObject::editable("other app's text")),
-            );
-        }
         let pasted = "the pasted words";
-        events.record(
-            at + Duration::from_millis(1),
-            Some(42),
-            Arc::new(FakeObject::editable(&format!("before {pasted} after"))),
-        );
-        let (_, _, found) = events
-            .wait(at, 42, at + Duration::from_secs(1))
-            .expect("the paste survives a burst of other apps' events");
-        assert!(found.text().is_ok_and(|text| text.contains(pasted)));
-
-        events.record(
-            at + Duration::from_millis(2),
-            Some(42),
-            Arc::new(FakeObject::editable("a second paste")),
-        );
-        let (_, _, found) = events
-            .wait(at, 42, at + Duration::from_secs(1))
-            .expect("the listener still takes events after a burst");
-        assert!(
-            found
-                .text()
-                .is_ok_and(|text| text.contains("a second paste"))
-        );
+        let cases: Vec<(&str, Vec<FakeObject>, &str)> = vec![
+            (
+                "the paste survives a burst of other apps' events",
+                vec![FakeObject::editable(&format!("before {pasted} after"))],
+                pasted,
+            ),
+            (
+                "a later object from the same process does not hide the paste",
+                vec![
+                    FakeObject::editable(&format!("before {pasted} after")),
+                    FakeObject::editable("an unrelated object in the same process"),
+                ],
+                pasted,
+            ),
+            (
+                "the listener still takes events after a burst",
+                vec![FakeObject::editable("a second paste")],
+                "a second paste",
+            ),
+        ];
+        for (name, objects, want) in cases {
+            let events = Events::new();
+            let at = Instant::now();
+            for pid in 0..100 {
+                events.record(
+                    at,
+                    Some(900_000 + pid),
+                    ("other".to_owned(), pid.to_string()),
+                    Arc::new(FakeObject::editable("other app's text")),
+                );
+            }
+            for (i, object) in objects.into_iter().enumerate() {
+                events.record(
+                    at + Duration::from_millis(i as u64 + 1),
+                    Some(42),
+                    ("test".to_owned(), i.to_string()),
+                    Arc::new(object),
+                );
+            }
+            let (_, _, found) = events
+                .wait(at, 42, at + Duration::from_secs(1))
+                .unwrap_or_else(|| panic!("{name}: no event was kept"));
+            assert!(found.text().is_ok_and(|text| text.contains(want)), "{name}");
+        }
     }
 
     #[test]
     fn an_event_without_a_process_id_is_not_recorded() {
         let events = Events::new();
         let at = Instant::now();
-        events.record(at, None, Arc::new(FakeObject::editable("Cyber X2")));
+        events.record(
+            at,
+            None,
+            ("test".to_owned(), "0".to_owned()),
+            Arc::new(FakeObject::editable("Cyber X2")),
+        );
         assert!(
             events.wait(at, 0, at + Duration::from_millis(20)).is_none(),
             "an unknown pid is not invented as zero"
