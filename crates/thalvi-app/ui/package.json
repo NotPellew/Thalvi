@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "explore": "node explore/settings.ts",
+    "layout": "node explore/settings-layout.ts",
     "tauri": "tauri"
   },
   "dependencies": {
