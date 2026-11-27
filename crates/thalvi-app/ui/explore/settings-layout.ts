@@ -85,7 +85,7 @@ try {
       const page = await browser.newPage({ viewport, locale: "en-US", timezoneId: "UTC" });
       page.setDefaultTimeout(5000);
       try {
-        await sweep(page, `${base}settings.html?fake&at=0&look=gunmetal`);
+        await sweep(page, `${base}settings.html?fake&at=0&look=gunmetal&suggestions`);
       } catch (error) {
         throw new Error(`Settings layout failed at ${String(viewport.width)}×${String(viewport.height)}`, { cause: error });
       } finally {

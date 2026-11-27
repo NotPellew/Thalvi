@@ -216,7 +216,9 @@ export function fakeBackend(params: URLSearchParams): Backend {
   };
   const learningListeners: ((learning: Learning) => void)[] = [];
   let learning: Learning = {
-    suggestions: params.has("suggestions") ? [{ word: "Cybrex2", heard: "Cyber X2" }] : [],
+    suggestions: params.has("suggestions")
+      ? [{ word: "Cybrex2", heard: "Cyber X2" }, { word: "HarborMark7", heard: "harbor mark seven" }, { word: "Ty", heard: "tie" }]
+      : [],
     limit: params.has("learning-limit")
       ? "Thalvi can't reach this desktop's accessibility service."
       : null,

@@ -169,9 +169,13 @@ code.line { display: block; padding: var(--code-pad-y) var(--code-pad-x); border
 .chips { display: flex; flex-wrap: wrap; gap: var(--stack-gap); }
 .chips:empty { display: none; }
 .chip { display: inline-flex; align-items: center; gap: var(--chip-gap); font: var(--fs-13) var(--mono); }
-.suggestions { align-items: stretch; }
-.suggestions .suggested { color: var(--hint-color); font-size: var(--fs-11); }
-.suggestions .suggestion { display: flex; flex-direction: column; align-items: flex-start; gap: var(--mini-gap); }
+/* One grid for all suggestions, so every name, Add and Dismiss share a column. */
+.suggestions { display: grid; grid-template-columns: repeat(3, max-content); justify-content: start; align-items: center; gap: var(--mini-gap) var(--inline-gap); }
+.suggestions > :not(.suggestion), .suggestions .unit { grid-column: 1 / -1; }
+.suggestions .suggestion, .suggestions .suggestion > .trow { display: contents; }
+.suggestions .suggested { color: var(--hint-color); font-size: var(--fs-11); margin-bottom: var(--mini-gap); }
+.suggestions .badge { justify-self: start; align-self: center; }
+.suggestions .unit { margin-bottom: var(--stack-gap); }
 #settings[data-look] main .chip > button { height: auto; padding: 0 var(--chip-right) 0 var(--chip-left); border: 0; background: none; box-shadow: none; font: var(--fs-13) var(--mono); text-transform: none; }
 #settings[data-look] main .chip > button:hover { color: var(--neon); background: none; }
 
