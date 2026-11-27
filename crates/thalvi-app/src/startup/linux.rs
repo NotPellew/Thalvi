@@ -30,9 +30,9 @@ fn unavailable_on(
 /// runs XDG autostart entries by starting systemd's `xdg-desktop-autostart.target`; that target
 /// being up is what tells an entry will be read.
 mod hyprland {
-    use std::path::PathBuf;
     use std::process::Command;
 
+    use crate::appimage;
     use crate::startup::LOGIN_ARG;
     use crate::switch::Unavailable;
 
@@ -67,9 +67,7 @@ mod hyprland {
 
     /// The `AppImage` when there is one, since the executable then sits in a temporary mount.
     fn launcher() -> Option<String> {
-        std::env::var_os("APPIMAGE")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
+        appimage::path()
             .or_else(|| std::env::current_exe().ok())
             .and_then(|path| path.to_str().map(str::to_owned))
     }

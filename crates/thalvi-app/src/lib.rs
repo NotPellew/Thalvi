@@ -2,6 +2,8 @@
 
 mod agent;
 mod app;
+#[cfg(target_os = "linux")]
+mod appimage;
 mod client;
 mod commands;
 mod control;

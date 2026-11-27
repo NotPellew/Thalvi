@@ -4,6 +4,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use super::MenuEntry;
+use crate::appimage;
 use crate::switch::Unavailable;
 
 const ICON: &[u8] = include_bytes!("../../icons/icon.png");
@@ -20,9 +21,7 @@ pub struct System {
 impl System {
     pub fn from_env() -> Self {
         Self {
-            appimage: std::env::var_os("APPIMAGE")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from),
+            appimage: appimage::path(),
             data_home: dirs::data_dir(),
         }
     }
