@@ -737,7 +737,7 @@ mod tests {
             ("five pm", "5 pm"),
             ("zero", "0"),
             ("two drives", "2 drives"),
-            ("one drive", "1 drive"),
+            ("one drive", "one drive"),
             ("text (two) and [three].", "text (2) and [3]."),
             // Kept as words: pronouns, idioms and ordinals.
             ("the other one", "the other one"),
@@ -763,6 +763,45 @@ mod tests {
             // A pronoun or determiner "one" stays a word, whatever follows it.
             ("the other one is enough", "the other one is enough"),
             ("no one knows", "no one knows"),
+            ("a different one is fine", "a different one is fine"),
+            (
+                "the thinking one, then the fast one",
+                "the thinking one, then the fast one",
+            ),
+            ("one thing I noticed", "one thing I noticed"),
+            ("this one and that one", "this one and that one"),
+            ("which one do you mean", "which one do you mean"),
+            ("One thing first.", "One thing first."),
+            ("I talked to one person", "I talked to one person"),
+            ("give one to a friend", "give one to a friend"),
+            (
+                "Use the larger one. To 2 places.",
+                "Use the larger one. To 2 places.",
+            ),
+            ("Pick two. To one friend.", "Pick 2. To one friend."),
+            (
+                "Who did you give one to? Two people.",
+                "Who did you give one to? 2 people.",
+            ),
+            (
+                "What did you add two to? One of them.",
+                "What did you add 2 to? One of them.",
+            ),
+            ("quarter to one", "quarter to one"),
+            // "one" still takes digits in a longer number, a range or before a unit.
+            ("version one point five", "version 1.5"),
+            ("about one to three billion", "about 1 to 3,000,000,000"),
+            ("meet at one thirty", "meet at 1:30"),
+            ("one percent", "1%"),
+            ("twenty one", "21"),
+            ("one to two pages", "1 to 2 pages"),
+            ("one pm", "1 pm"),
+            ("three to one odds", "3 to 1 odds"),
+            ("one or two", "one or 2"),
+            ("one to a hundred pages", "1 to 100 pages"),
+            ("one to 2 pages", "1 to 2 pages"),
+            ("two hundred to one odds", "200 to 1 odds"),
+            ("from 2 to one", "from 2 to 1"),
         ]
     }
 

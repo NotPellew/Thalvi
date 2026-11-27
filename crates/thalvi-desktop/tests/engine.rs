@@ -5602,6 +5602,15 @@ async fn a_paste_gets_number_words_as_digits_by_default_and_off_delivers_the_sam
                     Some(1),
                 ),
                 (
+                    "a lone one stays a word",
+                    "{}".to_owned(),
+                    CaptureRoute::Paste,
+                    "paste that",
+                    "a different one is fine, take two",
+                    "a different one is fine, take 2",
+                    Some(1),
+                ),
+                (
                     "off",
                     r#"{"writing": {"numbers_as_digits": false}}"#.to_owned(),
                     CaptureRoute::Paste,
