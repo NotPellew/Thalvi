@@ -268,6 +268,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     lookStyles = styles;
     applyLookStyles(root, styles.looks[displayedLook]);
     live.lookStyles(styles);
+    if (search.value !== "") applyView();
   }
 
   function load(typing: Typing | null = null): void {
@@ -427,6 +428,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   backend.onSettingsChangedElsewhere(() => {
     load(typingNow());
   });
+  backend.onThemeChanged(() => { void refreshLookStyles(); });
   backend.onStatus(showStatus);
   backend.getStatus().then(showStatus).catch((error: unknown) => {
     runtimeFailure = errorText(error);
