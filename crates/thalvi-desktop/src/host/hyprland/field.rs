@@ -1,8 +1,8 @@
 //! Hyprland's field probe: reads the text object that received a paste over AT-SPI.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, sync_channel};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use zbus::blocking::connection::Builder as ConnectionBuilder;
@@ -22,21 +22,23 @@ trait Object: Send + Sync {
     fn alive(&self) -> bool;
 }
 
-/// The seam over the accessibility bus: connect once, then wait for events.
+/// The bus seam a probe waits on. Arming a probe touches none of it.
 trait Source: Send + Sync {
-    /// Starts the connection and subscription; false when the bus cannot be reached.
-    fn connect(&self) -> bool;
-    /// Whether events can now be delivered.
+    /// Whether a listener is connected and can deliver events.
     fn connected(&self) -> bool;
-    /// Whether the connection attempt failed.
+    /// Whether the bus was tried and could not be reached.
     fn unavailable(&self) -> bool;
-    /// The next event at or after `since`, or none at `until`.
-    fn wait(&self, since: Instant, until: Instant) -> Option<(Instant, u32, Box<dyn Object>)>;
+    /// The newest event from `window`'s process since `since`, or none at `until`.
+    fn wait(&self, since: Instant, window: u32, until: Instant) -> Option<Seen>;
 }
 
 const WAIT: Duration = Duration::from_secs(1);
 const MAX_CHARS: usize = 20_000;
 const PASSWORD_TEXT: u32 = 40;
+
+/// The newest source kept for one process, and one taken event with its process id.
+type Kept = (Instant, Arc<dyn Object>);
+type Seen = (Instant, u32, Arc<dyn Object>);
 
 /// One AT-SPI object that changed. Holds no text until a watch asks for it.
 struct FieldObject {
@@ -96,20 +98,126 @@ fn connection_pid(connection: &Connection, sender: &str) -> Option<u32> {
     .ok()
 }
 
-/// The live seam: one a11y connection for the app, a bounded queue of event sources.
+/// The last event per process, and a wakeup for probes waiting on a fresh one.
+struct Events {
+    latest: Mutex<HashMap<u32, Kept>>,
+    wake: Condvar,
+}
+
+impl Events {
+    fn new() -> Self {
+        Self {
+            latest: Mutex::new(HashMap::new()),
+            wake: Condvar::new(),
+        }
+    }
+
+    /// Overwrites the previous source from this process; a source with no process is dropped.
+    fn record(&self, at: Instant, pid: Option<u32>, object: Arc<dyn Object>) {
+        let Some(pid) = pid else { return };
+        self.latest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pid, (at, object));
+        self.wake.notify_all();
+    }
+
+    /// Takes the newest event from `window`'s process at or after `since`.
+    fn wait(&self, since: Instant, window: u32, until: Instant) -> Option<Seen> {
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            let selected = latest.iter().find_map(|(pid, (at, _))| {
+                (A11y::belongs(*pid, window) && *at >= since).then_some(*pid)
+            });
+            if let Some(pid) = selected {
+                let (at, object) = latest.remove(&pid)?;
+                return Some((at, pid, object));
+            }
+            let remaining = until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let (guard, _) = self
+                .wake
+                .wait_timeout(latest, remaining)
+                .unwrap_or_else(PoisonError::into_inner);
+            latest = guard;
+        }
+    }
+
+    fn wake_all(&self) {
+        self.wake.notify_all();
+    }
+}
+
+/// Sender-to-process lookup, cached per unique bus name so a keystroke needs no round trip.
+#[derive(Default)]
+struct PidCache(Mutex<HashMap<String, u32>>);
+
+impl PidCache {
+    fn lookup(&self, connection: &Connection, sender: &str) -> Option<u32> {
+        if let Some(pid) = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(sender)
+        {
+            return Some(*pid);
+        }
+        let Some(pid) = connection_pid(connection, sender) else {
+            self.forget(sender);
+            return None;
+        };
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(sender.to_owned(), pid);
+        Some(pid)
+    }
+
+    fn forget(&self, name: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(name);
+    }
+}
+
+/// The live seam: one a11y connection for the app, held for as long as learning is on.
 struct A11y {
+    events: Events,
+    pids: PidCache,
     connected: AtomicBool,
     unavailable: AtomicBool,
-    events: Mutex<Option<Receiver<(Instant, u32, FieldObject)>>>,
+    wanted: AtomicBool,
+    generation: AtomicU64,
+    connection: Mutex<Option<Connection>>,
 }
 
 impl A11y {
     fn new() -> Self {
         Self {
+            events: Events::new(),
+            pids: PidCache::default(),
             connected: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
-            events: Mutex::new(None),
+            wanted: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            connection: Mutex::new(None),
         }
+    }
+
+    fn active(&self, generation: u64) -> bool {
+        self.generation.load(Ordering::Acquire) == generation && self.wanted.load(Ordering::Acquire)
+    }
+
+    fn fail(&self, generation: u64) {
+        if self.generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        self.unavailable.store(true, Ordering::Release);
+        self.connected.store(false, Ordering::Release);
+        self.events.wake_all();
     }
 
     /// Whether `pid` is the window's process or one of its children: Electron's a11y connection
@@ -136,36 +244,58 @@ impl A11y {
         }
         false
     }
-}
 
-impl Source for A11y {
-    fn connect(&self) -> bool {
-        let Ok(session) = Connection::session() else {
-            self.unavailable.store(true, Ordering::Relaxed);
-            return false;
-        };
-        let Ok(address): zbus::Result<String> =
-            Proxy::new(&session, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus")
-                .and_then(|bus| bus.call("GetAddress", &()))
-        else {
-            self.unavailable.store(true, Ordering::Relaxed);
-            return false;
-        };
-        let Ok(a11y) =
-            ConnectionBuilder::address(address.as_str()).and_then(ConnectionBuilder::build)
-        else {
-            self.unavailable.store(true, Ordering::Relaxed);
-            return false;
-        };
-        let Ok(registry) = Proxy::new(
+    fn start(self: &Arc<Self>) {
+        if self.wanted.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.unavailable.store(false, Ordering::Release);
+        let source = Arc::clone(self);
+        std::thread::Builder::new()
+            .name("thalvi-a11y".to_owned())
+            .spawn(move || source.connect(generation))
+            .ok();
+    }
+
+    fn stop(self: &Arc<Self>) {
+        if !self.wanted.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.connected.store(false, Ordering::Release);
+        self.events.wake_all();
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(connection) = connection {
+            std::thread::Builder::new()
+                .name("thalvi-a11y-stop".to_owned())
+                .spawn(move || {
+                    let _ = connection.close();
+                })
+                .ok();
+        }
+    }
+
+    /// Opens the a11y connection and its two subscriptions, or `None` when the bus refuses.
+    fn open() -> Option<(Connection, MessageIterator, MessageIterator)> {
+        let session = Connection::session().ok()?;
+        let address: String = Proxy::new(&session, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus")
+            .and_then(|bus| bus.call("GetAddress", &()))
+            .ok()?;
+        let a11y = ConnectionBuilder::address(address.as_str())
+            .and_then(ConnectionBuilder::build)
+            .ok()?;
+        let registry = Proxy::new(
             &a11y,
             "org.a11y.atspi.Registry",
             "/org/a11y/atspi/registry",
             "org.a11y.atspi.Registry",
-        ) else {
-            self.unavailable.store(true, Ordering::Relaxed);
-            return false;
-        };
+        )
+        .ok()?;
         let registered: zbus::Result<()> = registry.call(
             "RegisterEvent",
             &(
@@ -175,75 +305,106 @@ impl Source for A11y {
                     .map_or_else(String::new, ToString::to_string),
             ),
         );
-        if registered.is_err() {
-            self.unavailable.store(true, Ordering::Relaxed);
-            return false;
-        }
-        let Ok(messages) = MessageIterator::for_match_rule(
+        registered.ok()?;
+        let messages = MessageIterator::for_match_rule(
             "type='signal',interface='org.a11y.atspi.Event.Object',member='TextChanged'",
             &a11y,
-            Some(16),
-        ) else {
-            self.unavailable.store(true, Ordering::Relaxed);
-            return false;
+            None,
+        )
+        .ok()?;
+        let owners = MessageIterator::for_match_rule(
+            "type='signal',interface='org.freedesktop.DBus',member='NameOwnerChanged'",
+            &a11y,
+            Some(8),
+        )
+        .ok()?;
+        Some((a11y, messages, owners))
+    }
+
+    fn connect(self: Arc<Self>, generation: u64) {
+        let Some((a11y, messages, owners)) = Self::open() else {
+            self.fail(generation);
+            return;
         };
-        let (sender, receiver) = sync_channel(16);
-        *self.events.lock().unwrap_or_else(PoisonError::into_inner) = Some(receiver);
-        self.unavailable.store(false, Ordering::Relaxed);
-        self.connected.store(true, Ordering::Relaxed);
-        let reader = a11y.clone();
+        if !self.active(generation) {
+            return;
+        }
+        *self
+            .connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(a11y.clone());
+        if !self.active(generation) {
+            return;
+        }
+        self.unavailable.store(false, Ordering::Release);
+        self.connected.store(true, Ordering::Release);
+        self.events.wake_all();
+
+        let owner_watcher = Arc::clone(&self);
         std::thread::Builder::new()
-            .name("thalvi-a11y".to_owned())
+            .name("thalvi-a11y-owners".to_owned())
             .spawn(move || {
-                for message in messages {
-                    let Ok(message) = message else { continue };
-                    let header = message.header();
-                    let (Some(who), Some(path)) = (header.sender(), header.path()) else {
-                        continue;
-                    };
-                    let pid = connection_pid(&reader, who.as_str()).unwrap_or(0);
-                    let object = FieldObject {
-                        connection: reader.clone(),
-                        sender: who.to_string(),
-                        path: path.to_owned().into(),
-                    };
-                    if sender.try_send((Instant::now(), pid, object)).is_err() {
+                for message in owners {
+                    if !owner_watcher.active(generation) {
                         break;
                     }
+                    let Ok(message) = message else { continue };
+                    let Ok((name, _, _)) = message.body().deserialize::<(String, String, String)>()
+                    else {
+                        continue;
+                    };
+                    owner_watcher.pids.forget(&name);
                 }
             })
             .ok();
-        true
-    }
 
-    fn connected(&self) -> bool {
-        self.connected.load(Ordering::Relaxed)
-    }
-
-    fn unavailable(&self) -> bool {
-        self.unavailable.load(Ordering::Relaxed)
-    }
-
-    fn wait(&self, _since: Instant, until: Instant) -> Option<(Instant, u32, Box<dyn Object>)> {
-        let guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-        let receiver = guard.as_ref()?;
-        let (at, pid, object) = receiver
-            .recv_timeout(until.saturating_duration_since(Instant::now()))
-            .ok()?;
-        Some((at, pid, Box::new(object)))
+        for message in messages {
+            if !self.active(generation) {
+                break;
+            }
+            let Ok(message) = message else { continue };
+            let header = message.header();
+            let (Some(who), Some(path)) = (header.sender(), header.path()) else {
+                continue;
+            };
+            let Some(pid) = self.pids.lookup(&a11y, who.as_str()) else {
+                continue;
+            };
+            let object = Arc::new(FieldObject {
+                connection: a11y.clone(),
+                sender: who.to_string(),
+                path: path.to_owned().into(),
+            });
+            self.events.record(Instant::now(), Some(pid), object);
+        }
+        self.fail(generation);
     }
 }
 
-static SOURCE: LazyLock<Arc<dyn Source>> = LazyLock::new(|| Arc::new(A11y::new()));
-static LISTENER: LazyLock<()> = LazyLock::new(|| {
-    let source = Arc::clone(&*SOURCE);
-    std::thread::Builder::new()
-        .name("thalvi-a11y-start".to_owned())
-        .spawn(move || {
-            source.connect();
-        })
-        .ok();
-});
+impl Source for A11y {
+    fn connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
+    fn unavailable(&self) -> bool {
+        self.unavailable.load(Ordering::Acquire)
+    }
+
+    fn wait(&self, since: Instant, window: u32, until: Instant) -> Option<Seen> {
+        self.events.wait(since, window, until)
+    }
+}
+
+static SOURCE: LazyLock<Arc<A11y>> = LazyLock::new(|| Arc::new(A11y::new()));
+
+/// Starts or stops the a11y listener when learning switches; no bus work happens on the caller.
+pub fn listen(on: bool) {
+    if on {
+        SOURCE.start();
+    } else {
+        SOURCE.stop();
+    }
+}
 
 fn arm_with(
     source: &Arc<dyn Source>,
@@ -270,7 +431,7 @@ impl FieldProbe for Armed {
     fn field(self: Box<Self>, pasted: &str) -> Result<Box<dyn Field>, FieldLimit> {
         let until = self.since + WAIT;
         loop {
-            if self.source.unavailable() {
+            if self.source.unavailable() || !self.source.connected() {
                 return Err(FieldLimit::NoAccessibility);
             }
             if Instant::now() >= until {
@@ -278,11 +439,8 @@ impl FieldProbe for Armed {
                     app: self.window.class.clone(),
                 });
             }
-            if !self.source.connected() {
-                std::thread::park_timeout(Duration::from_millis(5));
-                continue;
-            }
-            let Some((at, pid, object)) = self.source.wait(self.since, until) else {
+            let Some((at, pid, object)) = self.source.wait(self.since, self.window.pid, until)
+            else {
                 return Err(FieldLimit::NotShared {
                     app: self.window.class.clone(),
                 });
@@ -304,7 +462,7 @@ impl FieldProbe for Armed {
 
 /// The field that received the paste, read on demand off the paste path.
 struct FieldAt {
-    object: Box<dyn Object>,
+    object: Arc<dyn Object>,
     window: Window,
     active: fn(&Window) -> bool,
 }
@@ -328,10 +486,11 @@ impl Field for FieldAt {
     }
 }
 
-/// Arms a watch of the focused field in `window`.
+/// Arms a watch of the focused field in `window`, without touching the bus.
 pub fn probe(window: &Window, active: fn(&Window) -> bool) -> Box<dyn FieldProbe> {
-    LazyLock::force(&LISTENER);
-    arm_with(&SOURCE, window, active)
+    let live: Arc<A11y> = Arc::clone(&*SOURCE);
+    let source: Arc<dyn Source> = live;
+    arm_with(&source, window, active)
 }
 
 #[cfg(test)]
@@ -384,43 +543,36 @@ mod tests {
     }
 
     struct FakeSource {
-        touched: Arc<AtomicBool>,
+        waits: Arc<AtomicUsize>,
         events: Vec<(Instant, u32, FakeObject)>,
-        next: AtomicUsize,
         unavailable: bool,
+        listener: bool,
     }
 
     impl FakeSource {
-        fn new(events: Vec<(Instant, u32, FakeObject)>, touched: Arc<AtomicBool>) -> Self {
+        fn new(events: Vec<(Instant, u32, FakeObject)>, waits: Arc<AtomicUsize>) -> Self {
             Self {
-                touched,
+                waits,
                 events,
-                next: AtomicUsize::new(0),
                 unavailable: false,
+                listener: true,
             }
         }
     }
 
     impl Source for FakeSource {
-        fn connect(&self) -> bool {
-            self.touched.store(true, Ordering::Relaxed);
-            !self.unavailable
-        }
         fn connected(&self) -> bool {
-            !self.unavailable
+            self.listener && !self.unavailable
         }
         fn unavailable(&self) -> bool {
             self.unavailable
         }
-        fn wait(&self, since: Instant, until: Instant) -> Option<(Instant, u32, Box<dyn Object>)> {
+        fn wait(&self, since: Instant, window: u32, until: Instant) -> Option<Seen> {
             assert_eq!(until - since, WAIT, "the probe waits at most one second");
-            let at = self.next.fetch_add(1, Ordering::Relaxed);
+            let at = self.waits.fetch_add(1, Ordering::Relaxed);
             let event = self.events.get(at)?;
-            Some((
-                event.0,
-                event.1,
-                Box::new(event.2.clone()) as Box<dyn Object>,
-            ))
+            let _ = window;
+            Some((event.0, event.1, Arc::new(event.2.clone())))
         }
     }
 
@@ -480,12 +632,13 @@ mod tests {
             ),
         ];
         for (name, events, expected) in cases {
-            let touched = Arc::new(AtomicBool::new(false));
-            let source: Arc<dyn Source> = Arc::new(FakeSource::new(events, Arc::clone(&touched)));
+            let waits = Arc::new(AtomicUsize::new(0));
+            let source: Arc<dyn Source> = Arc::new(FakeSource::new(events, Arc::clone(&waits)));
             let probe = arm(&source);
-            assert!(
-                !touched.load(Ordering::Relaxed),
-                "{name}: arming must not touch the bus"
+            assert_eq!(
+                waits.load(Ordering::Relaxed),
+                0,
+                "{name}: arming touched the bus"
             );
             match (probe.field(pasted), expected) {
                 (Ok(mut field), Some(want)) => {
@@ -511,8 +664,8 @@ mod tests {
 
     #[test]
     fn the_probe_reports_no_accessibility_when_the_bus_is_unreachable() {
-        let touched = Arc::new(AtomicBool::new(false));
-        let mut fake = FakeSource::new(vec![], touched);
+        let waits = Arc::new(AtomicUsize::new(0));
+        let mut fake = FakeSource::new(vec![], waits);
         fake.unavailable = true;
         let source: Arc<dyn Source> = Arc::new(fake);
         let probe = arm(&source);
@@ -520,6 +673,75 @@ mod tests {
             probe.field("text"),
             Err(FieldLimit::NoAccessibility)
         ));
+    }
+
+    #[test]
+    fn a_probe_without_a_listener_reports_no_accessibility_without_waiting() {
+        let waits = Arc::new(AtomicUsize::new(0));
+        let mut fake = FakeSource::new(
+            vec![(Instant::now(), 42, FakeObject::editable("some text"))],
+            Arc::clone(&waits),
+        );
+        fake.listener = false;
+        let source: Arc<dyn Source> = Arc::new(fake);
+        let probe = arm(&source);
+        assert!(
+            matches!(probe.field("text"), Err(FieldLimit::NoAccessibility)),
+            "no listener means the bus was never reached"
+        );
+        assert_eq!(
+            waits.load(Ordering::Relaxed),
+            0,
+            "the probe never waited on the bus"
+        );
+    }
+
+    #[test]
+    fn a_burst_of_foreign_events_keeps_the_paste_and_the_listener_alive() {
+        let events = Events::new();
+        let at = Instant::now();
+        for pid in 0..100 {
+            events.record(
+                at,
+                Some(900_000 + pid),
+                Arc::new(FakeObject::editable("other app's text")),
+            );
+        }
+        let pasted = "the pasted words";
+        events.record(
+            at + Duration::from_millis(1),
+            Some(42),
+            Arc::new(FakeObject::editable(&format!("before {pasted} after"))),
+        );
+        let (_, _, found) = events
+            .wait(at, 42, at + Duration::from_secs(1))
+            .expect("the paste survives a burst of other apps' events");
+        assert!(found.text().is_ok_and(|text| text.contains(pasted)));
+
+        events.record(
+            at + Duration::from_millis(2),
+            Some(42),
+            Arc::new(FakeObject::editable("a second paste")),
+        );
+        let (_, _, found) = events
+            .wait(at, 42, at + Duration::from_secs(1))
+            .expect("the listener still takes events after a burst");
+        assert!(
+            found
+                .text()
+                .is_ok_and(|text| text.contains("a second paste"))
+        );
+    }
+
+    #[test]
+    fn an_event_without_a_process_id_is_not_recorded() {
+        let events = Events::new();
+        let at = Instant::now();
+        events.record(at, None, Arc::new(FakeObject::editable("Cyber X2")));
+        assert!(
+            events.wait(at, 0, at + Duration::from_millis(20)).is_none(),
+            "an unknown pid is not invented as zero"
+        );
     }
 
     #[test]
@@ -568,9 +790,8 @@ mod tests {
         ];
         for (name, object, is_active, expected) in cases {
             ACTIVE.store(is_active, Ordering::Relaxed);
-            let touched = Arc::new(AtomicBool::new(false));
-            let source: Arc<dyn Source> =
-                Arc::new(FakeSource::new(vec![(now, 42, object)], touched));
+            let waits = Arc::new(AtomicUsize::new(0));
+            let source: Arc<dyn Source> = Arc::new(FakeSource::new(vec![(now, 42, object)], waits));
             let probe = arm(&source);
             let mut field = probe
                 .field("text")

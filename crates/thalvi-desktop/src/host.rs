@@ -332,6 +332,15 @@ pub trait Host: Send + Sync {
     /// Why this desktop cannot read that app's field.
     fn watch_field(&self, target: &Self::Target) -> Result<Box<dyn FieldProbe>, FieldLimit>;
 
+    /// Starts the field listener when learning turns on, and stops it when learning turns off.
+    /// Call whenever the switch changes and once at start with its current value. Do no I/O on
+    /// the caller: a listener that cannot connect reports [`FieldLimit::NoAccessibility`] at the
+    /// next probe, which shows it on the switch.
+    ///
+    /// # Errors
+    /// Why this desktop cannot watch fields at all.
+    fn learn_fields(&self, on: bool) -> Result<(), FieldLimit>;
+
     /// Binds the focused window.
     ///
     /// # Errors

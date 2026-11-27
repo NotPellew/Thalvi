@@ -288,6 +288,12 @@ impl<A: Win32> Host for Windows<A> {
         ))
     }
 
+    fn learn_fields(&self, _on: bool) -> Result<(), FieldLimit> {
+        Err(FieldLimit::Desktop(
+            "Learning from corrections isn't available on this desktop yet.",
+        ))
+    }
+
     fn capture_target(&self) -> Result<Target, HostError> {
         let window = self.api.foreground().ok_or_else(|| {
             nothing_typed("No window is in front, so Thalvi has nowhere to paste.")

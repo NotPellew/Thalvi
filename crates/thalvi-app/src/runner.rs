@@ -49,6 +49,9 @@ use crate::update::Stop;
 /// How long a quit waits for the engine to close the microphone and the recognizer.
 pub(crate) const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Starts or stops the field listener when the learning switch changes.
+pub(crate) type LearnFields = Arc<dyn Fn(bool) -> Result<(), FieldLimit> + Send + Sync>;
+
 /// What the app asks of the engine.
 #[derive(Debug)]
 pub enum Control {
@@ -155,12 +158,14 @@ impl EngineLink {
         devices: Arc<SpeechDevices>,
         paused: bool,
         whisper_helpers: PathBuf,
+        learn_fields: LearnFields,
     ) -> Result<Self, String> {
         let (link, ends, stopped) = Self::wire_with(
             &config,
             paused,
             status_announcer(),
             Arc::clone(&stores.learning),
+            learn_fields,
         );
         let (ready_tx, ready) = std_mpsc::channel();
         std::thread::Builder::new()
@@ -198,7 +203,13 @@ impl EngineLink {
 
     #[cfg(test)]
     fn wire(config: &DesktopConfig, paused: bool) -> (Self, RunnerEnds, std_mpsc::Sender<()>) {
-        Self::wire_with(config, paused, None, Arc::new(Learning::default()))
+        Self::wire_with(
+            config,
+            paused,
+            None,
+            Arc::new(Learning::default()),
+            Arc::new(|_| Ok(())),
+        )
     }
 
     fn wire_with(
@@ -206,6 +217,7 @@ impl EngineLink {
         paused: bool,
         announcer: Option<Arc<dyn StatusAnnouncer>>,
         learning: Arc<Learning>,
+        learn_fields: LearnFields,
     ) -> (Self, RunnerEnds, std_mpsc::Sender<()>) {
         let last_writing_window = Arc::new(Mutex::new(None));
         let (control, control_rx) = mpsc::unbounded_channel();
@@ -251,6 +263,7 @@ impl EngineLink {
             learning,
             watch_enabled,
             watch_enabled_rx,
+            learn_fields,
         };
         (link, ends, stopped_tx)
     }
@@ -363,6 +376,7 @@ struct RunnerEnds {
     learning: Arc<Learning>,
     watch_enabled: watch::Sender<bool>,
     watch_enabled_rx: watch::Receiver<bool>,
+    learn_fields: LearnFields,
 }
 
 impl RunnerEnds {
@@ -394,6 +408,7 @@ impl RunnerEnds {
                 last_writing_window: self.last_writing_window,
                 learning: self.learning,
                 watch_enabled: self.watch_enabled,
+                learn_fields: self.learn_fields,
             },
         )
         .run()
@@ -1071,6 +1086,7 @@ struct Shared<S: Rig> {
     paused: bool,
     learning: Arc<Learning>,
     watch_enabled: watch::Sender<bool>,
+    learn_fields: LearnFields,
 }
 
 struct Runner<S: Rig> {
@@ -1108,6 +1124,10 @@ struct Runner<S: Rig> {
     quitting: watch::Receiver<bool>,
     learning: Arc<Learning>,
     watch_enabled: watch::Sender<bool>,
+    /// Starts and stops the field listener as the switch changes.
+    learn_fields: LearnFields,
+    /// The listener's last requested state, so an unchanged setting does not restart it.
+    field_listening: Option<bool>,
     /// Stops the field watch of the previous delivery when a newer one arrives.
     watch_cancel: Option<oneshot::Sender<()>>,
 }
@@ -1148,12 +1168,15 @@ impl<S: Rig> Runner<S> {
             quitting: shared.quitting,
             learning: shared.learning,
             watch_enabled: shared.watch_enabled,
+            learn_fields: shared.learn_fields,
+            field_listening: None,
             watch_cancel: None,
         }
     }
 
     async fn run(mut self) {
         let config = self.config.clone();
+        self.set_learning(config.stt.learn_from_corrections());
         self.start(config).await;
         while let Flow::Continue = Box::pin(self.step()).await {}
         stop_watch(&mut self.watch_cancel);
@@ -1651,12 +1674,19 @@ impl<S: Rig> Runner<S> {
         }
     }
 
-    /// Turns the field watch off at once when the switch goes off.
+    /// Turns the field watch off at once when the switch goes off, and starts or stops the
+    /// listener when the switch actually changes.
     fn set_learning(&mut self, on: bool) {
         if !on {
             stop_watch(&mut self.watch_cancel);
         }
         self.watch_enabled.send_replace(on);
+        if self.field_listening != Some(on) {
+            self.field_listening = Some(on);
+            if let Err(limit) = (self.learn_fields)(on) {
+                self.learning.limit(limit);
+            }
+        }
     }
 
     fn pause(&mut self) {
@@ -3739,6 +3769,15 @@ mod tests {
             false
         }
 
+        fn learn_fields(&self, on: bool) -> Result<(), thalvi_desktop::learn::FieldLimit> {
+            self.called(if on {
+                "learn_fields:true"
+            } else {
+                "learn_fields:false"
+            });
+            Ok(())
+        }
+
         fn watch_field(
             &self,
             _: &String,
@@ -3972,6 +4011,53 @@ mod tests {
         assert_eq!(draft.text, "Cybrex2");
         assert_eq!(draft.corrected.as_deref(), Some("Cybrex2"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn turning_the_learning_switch_on_and_off_starts_then_stops_the_field_listener() {
+        LocalSet::new()
+            .run_until(async {
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                let recorder = Arc::clone(&calls);
+                let script = FedRun::configured(
+                    false,
+                    false,
+                    FedOptions {
+                        learn_fields: Arc::new(move |on| {
+                            recorder.lock().unwrap().push(on);
+                            Ok(())
+                        }),
+                        ..FedOptions::default()
+                    },
+                );
+                let mut on = feed_config();
+                on.stt.learn_from_corrections = true;
+                script.link.send(Control::Apply(Box::new(on)));
+                tokio::time::timeout(WAIT, async {
+                    loop {
+                        if calls.lock().unwrap().as_slice() == [false, true] {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the switch on did not start the listener");
+
+                script.link.send(Control::Apply(Box::new(feed_config())));
+                tokio::time::timeout(WAIT, async {
+                    loop {
+                        if calls.lock().unwrap().as_slice() == [false, true, false] {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the switch off did not stop the listener");
+                script.stop().await;
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -4434,6 +4520,7 @@ mod tests {
                 last_writing_window: ends.last_writing_window,
                 learning: ends.learning,
                 watch_enabled: ends.watch_enabled,
+                learn_fields: ends.learn_fields,
             },
         );
         for show in [true, false] {
@@ -5022,6 +5109,7 @@ mod tests {
         cancel_on_audio_error: bool,
         first_open: Option<oneshot::Receiver<()>>,
         announcer: Option<Arc<dyn StatusAnnouncer>>,
+        learn_fields: LearnFields,
     }
 
     impl Default for FedOptions {
@@ -5035,6 +5123,7 @@ mod tests {
                 cancel_on_audio_error: false,
                 first_open: None,
                 announcer: None,
+                learn_fields: Arc::new(|_| Ok(())),
             }
         }
     }
@@ -5068,6 +5157,7 @@ mod tests {
                 paused,
                 options.announcer,
                 Arc::new(Learning::default()),
+                options.learn_fields,
             );
             let lab = MicLab {
                 opens: Rc::clone(&opens),

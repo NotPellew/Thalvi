@@ -99,6 +99,12 @@ impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
         ))
     }
 
+    fn learn_fields(&self, _on: bool) -> Result<(), FieldLimit> {
+        Err(FieldLimit::Desktop(
+            "Learning from corrections isn't available on this desktop yet.",
+        ))
+    }
+
     fn writing_target(&self, _target: &Clipboard) -> Result<WindowApp, AppMatchLimit> {
         Err(AppMatchLimit::Gnome)
     }

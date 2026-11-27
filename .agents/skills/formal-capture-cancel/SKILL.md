@@ -17,6 +17,11 @@ after the user cancels or pauses.
 
 The sync commit and its source hashes are recorded in `source.json`. The notes below say why each covered change since the model was written left its actions unchanged.
 
+The listener repair for #776 calls a `LearnFields` callback from `Runner::run` at start and from
+`Runner::set_learning` when the switch changes. The callback only tells the desktop to open or close
+its a11y connection; it adds no await, control receive, queue step or write to `Requests::ended`
+before the final empty receive, so the mapped actions and both bounds are unchanged.
+
 Covers: crates/thalvi-app/src/runner.rs crates/thalvi-desktop/src/engine.rs crates/thalvi-desktop/src/engine/submit_preview.rs crates/thalvi-desktop/src/recognizer.rs crates/thalvi-desktop/src/delivery.rs crates/thalvi-desktop/src/realtime.rs crates/thalvi-desktop/src/openai_live.rs crates/thalvi-desktop/src/local.rs '.agents/skills/formal-capture-cancel/**'
 They include buffered live recognition,
 deferred reload after download, and waiting for an on-device load. Their mapped actions remain below. Microphone

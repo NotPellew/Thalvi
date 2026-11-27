@@ -403,6 +403,11 @@ impl<R: CommandRunner> Host for Hyprland<R> {
         }))
     }
 
+    fn learn_fields(&self, on: bool) -> Result<(), FieldLimit> {
+        field::listen(on);
+        Ok(())
+    }
+
     fn writing_target(&self, target: &Window) -> Result<WindowApp, AppMatchLimit> {
         Ok(WindowApp::new(target.class.clone(), target.title.clone()))
     }

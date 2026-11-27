@@ -320,6 +320,15 @@ impl Host for Desktop {
         }
     }
 
+    fn learn_fields(&self, on: bool) -> Result<(), FieldLimit> {
+        match self {
+            Self::Hyprland(host) => host.learn_fields(on),
+            Self::Gnome(_) => Err(FieldLimit::Desktop(
+                "Learning from corrections isn't available on this desktop yet.",
+            )),
+        }
+    }
+
     fn writing_target(&self, target: &Target) -> Result<WindowApp, AppMatchLimit> {
         match (self, target) {
             (Self::Hyprland(host), Target::Window(window)) => host.writing_target(window),

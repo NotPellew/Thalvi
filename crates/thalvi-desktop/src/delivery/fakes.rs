@@ -203,6 +203,11 @@ impl Host for FakeHost {
         self.terminal
     }
 
+    fn learn_fields(&self, on: bool) -> Result<(), FieldLimit> {
+        self.record("learn_fields", format!("learn_fields:{on}"))
+            .map_err(|_| FieldLimit::Desktop("The fake host refused the field listener."))
+    }
+
     fn watch_field(&self, _target: &FakeWindow) -> Result<Box<dyn FieldProbe>, FieldLimit> {
         self.record("watch_field", "watch_field".to_owned())
             .map_err(|_| FieldLimit::Desktop("The fake host refused the field probe."))?;

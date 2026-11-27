@@ -351,6 +351,7 @@ impl AppState {
         ));
         let history = Arc::new(history::Store::per_user());
         let drafts = Arc::new(Drafts::default());
+        let host = Arc::new(Desktop::detect().map_err(|error| error.to_string())?);
         let delivery = Arc::new(Delivery::new(
             Desktop::detect().map_err(|error| error.to_string())?,
         ));
@@ -369,6 +370,10 @@ impl AppState {
             // An update restarts the app as it was: a paused microphone stays closed.
             marker.as_ref().is_some_and(|marker| marker.paused),
             whisper_helpers,
+            {
+                let fields = Arc::clone(&host);
+                Arc::new(move |on| fields.learn_fields(on))
+            },
         )?;
         let mut held = watch_hold_keys(&config, &link, false);
         if let Some(notice) = held.refusal.take() {
@@ -388,7 +393,7 @@ impl AppState {
             delivery,
             last_error: LastError::default(),
             tray: OnceLock::new(),
-            host: Arc::new(Desktop::detect().map_err(|error| error.to_string())?),
+            host: Arc::clone(&host),
             overlay_shown: AtomicBool::new(config.overlay.show),
             dark: AtomicBool::new(true),
             login_problem: Mutex::new(None),
