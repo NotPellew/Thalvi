@@ -79,9 +79,9 @@ impl PromptSource {
 /// not letters or digits one space, trimmed. The same function reads a phrase and what was said.
 #[must_use]
 pub fn normalize(text: &str) -> String {
-    text.split(|c: char| !c.is_alphanumeric())
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join(" ")
 }
