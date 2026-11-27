@@ -131,8 +131,10 @@ gate_speech() {
 # Needs pipx, git, perl and python3.
 gate_issue_sync() {
   step "${SHELLCHECK[@]}" .github/scripts/gates .github/scripts/whisper-helper .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh \
-    .github/scripts/changed .github/scripts/changed.test.sh .github/scripts/rust-layout.test.sh
+    .github/scripts/changed .github/scripts/changed.test.sh .github/scripts/rust-layout.test.sh \
+    .github/scripts/break-it .github/scripts/break-it.test.sh
   step .github/scripts/issue-refs.test.sh
+  step .github/scripts/break-it.test.sh
   step .github/scripts/changed.test.sh
   step python3 .github/scripts/required-checks.test.py
 }

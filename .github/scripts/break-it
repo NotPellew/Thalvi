@@ -1,0 +1,618 @@
+#!/usr/bin/env bash
+# Tries to break Thalvi for a few hours before a release: long property tests, every fuzz target,
+# and optionally mutants over the whole workspace. `inside` runs the stages in this Linux checkout;
+# `cloud` runs `inside` on a rented Docker cloud sandbox and copies the report back. Started by hand
+# only: CI never calls paid services.
+set -uo pipefail
+
+REPO_URL=${BREAK_IT_REPO:-https://github.com/NotPellew/Thalvi.git}
+MAX_HOURS=8
+# Docker Sandboxes bill about $0.07 per vCPU-hour (xl, 16 vCPU: $1.12/h).
+PRICE_PER_CPU_HOUR=0.07
+CARGO_FUZZ=cargo-fuzz@0.13.2
+CARGO_MUTANTS=cargo-mutants@27.1.0
+APT_PACKAGES=(build-essential pkg-config curl xz-utils ca-certificates git libasound2-dev
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxkbcommon-dev)
+
+usage() {
+  cat <<'EOF'
+usage:
+  break-it inside --hours H [--mutants] [--out DIR] [--no-install]
+  break-it cloud --ref REF [--hours H] [--size xl|large|medium] [--mutants] [--out DIR] [--yes]
+
+inside  Runs the stages in this checkout and writes the report to DIR (default break-it-report/).
+        H covers everything after setup: about 15 % property tests, the rest fuzzing, or the rest
+        split 50/50 between fuzzing and mutants with --mutants. Installs missing apt packages (sudo),
+        the pinned toolchains, cargo-fuzz and cargo-mutants; --no-install installs nothing, so a
+        missing tool breaks the stage that needs it (for testing this script).
+        Exit 0: nothing found. 1: a stage found something. 2: the run itself broke.
+cloud   Runs `inside` on a Docker cloud sandbox cloned at REF, a branch or tag pushed to GitHub,
+        copies the report to DIR (default ~/thalvi-break-it/<date>-<ref>-<short sha>/) and deletes
+        the sandbox on every exit path. Defaults: --size xl, --hours 3; at most 8 hours.
+        Asks before spending money unless --yes. Exits with the code of `inside`, or 2.
+EOF
+}
+
+die() {
+  echo "break-it: $*" >&2
+  exit 2
+}
+
+hours_valid() {
+  [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v h="$1" -v max="$MAX_HOURS" 'BEGIN { exit !(h > 0 && h <= max) }'
+}
+
+seconds_of() {
+  awk -v h="$1" 'BEGIN { printf "%d", h * 3600 }'
+}
+
+duration() {
+  local s=$1
+  if ((s >= 3600)); then
+    printf '%dh %02dm' $((s / 3600)) $((s % 3600 / 60))
+  elif ((s >= 60)); then
+    printf '%dm %02ds' $((s / 60)) $((s % 60))
+  else
+    printf '%ds' "$s"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------- inside
+
+declare -A RESULT DETAIL ELAPSED
+STAGES=(setup proptest fuzz mutants)
+declare -A TITLE=([setup]=setup [proptest]="property tests" [fuzz]=fuzzing [mutants]=mutants)
+
+passed() { RESULT[$1]=passed DETAIL[$1]=${2:-}; }
+found() { RESULT[$1]="FAILED ($2 finding$([[ $2 == 1 ]] || echo s))" DETAIL[$1]=${3:-}; }
+broke() { RESULT[$1]=BROKEN DETAIL[$1]=$2; }
+skipped() { RESULT[$1]=skipped DETAIL[$1]=$2; }
+
+# Runs a setup command, its output in setup.log; on failure, the stage named first breaks.
+prepare() {
+  local stage=$1 what=$2
+  shift 2
+  echo "==> $what" | tee -a "$OUT/setup.log"
+  if ! "$@" > "$WORK/step.log" 2>&1; then
+    cat "$WORK/step.log" >> "$OUT/setup.log"
+    broke "$stage" "$what failed: $(grep -v '^\s*$' "$WORK/step.log" | tail -1 | tr '|' '/'); see setup.log"
+    return 1
+  fi
+  cat "$WORK/step.log" >> "$OUT/setup.log"
+}
+
+missing_packages() {
+  local package
+  for package in "${APT_PACKAGES[@]}"; do
+    dpkg-query -W -f='${Status}' "$package" 2> /dev/null | grep -q 'install ok installed' || echo "$package"
+  done
+}
+
+toolchain_of() {
+  sed -n 's/^channel = "\(.*\)"$/\1/p' "$1/rust-toolchain.toml"
+}
+
+ensure_toolchain() {
+  local dir=$1 channel
+  channel=$(toolchain_of "$dir")
+  if rustup run "$channel" rustc --version > /dev/null 2>&1; then return 0; fi
+  if [[ $INSTALL == false ]]; then
+    echo "the $channel toolchain is not installed" >&2
+    return 1
+  fi
+  (cd "$dir" && rustup toolchain install)
+}
+
+ensure_cargo_tool() {
+  local tool=$1 command=${1%@*}
+  if command -v "$command" > /dev/null; then return 0; fi
+  if [[ $INSTALL == false ]]; then
+    echo "$command is not installed" >&2
+    return 1
+  fi
+  cargo install --locked "$tool"
+}
+
+ensure_node() {
+  local want arch base file
+  want=$(< .node-version)
+  if [[ $(node --version 2> /dev/null) == v"$want".* ]]; then return 0; fi
+  if [[ $INSTALL == false ]]; then
+    echo "Node $want is not installed" >&2
+    return 1
+  fi
+  case $(uname -m) in
+    x86_64) arch=x64 ;;
+    aarch64) arch=arm64 ;;
+    *) echo "no Node build for $(uname -m)" >&2; return 1 ;;
+  esac
+  base=https://nodejs.org/dist/latest-v$want.x
+  curl -fsSL "$base/SHASUMS256.txt" -o "$WORK/node.sums" || return 1
+  file=$(awk -v a="linux-$arch.tar.xz" '$2 ~ a"$" { print $2 }' "$WORK/node.sums")
+  curl -fsSL "$base/$file" -o "$WORK/$file" || return 1
+  (cd "$WORK" && grep " $file\$" node.sums | sha256sum -c -) || return 1
+  mkdir -p "$HOME/.local/break-it-node"
+  tar -xJf "$WORK/$file" -C "$HOME/.local/break-it-node" --strip-components=1
+}
+
+ensure_rustup() {
+  if command -v rustup > /dev/null; then return 0; fi
+  if [[ $INSTALL == false ]]; then
+    echo "rustup is not installed" >&2
+    return 1
+  fi
+  curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+}
+
+ensure_packages() {
+  local missing
+  mapfile -t missing < <(missing_packages)
+  if ((${#missing[@]} == 0)); then return 0; fi
+  if [[ $INSTALL == false ]]; then
+    echo "missing apt packages: ${missing[*]}" >&2
+    return 1
+  fi
+  sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+}
+
+# Prints `package<TAB>target<TAB>test` for every test inside a `proptest!` block.
+proptest_tests() {
+  git ls-files 'crates/*.rs' | xargs grep -l 'proptest!' | python3 -c '
+import re, sys
+for path in sys.stdin.read().split():
+    parts = path.split("/")
+    target = "--lib" if parts[2] == "src" else "--test=" + parts[3].removesuffix(".rs")
+    text = open(path).read()
+    for block in re.finditer(r"proptest!\s*\{", text):
+        depth, end = 0, block.end() - 1
+        for end in range(block.end() - 1, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[end], 0)
+            if depth == 0:
+                break
+        for name in re.findall(r"#\[test\]\s*fn\s+(\w+)", text[block.end():end]):
+            print(parts[1], target, name, sep="\t")
+'
+}
+
+# Groups the discovered tests by test binary: `package<TAB>target<TAB>name name ...`.
+proptest_binaries() {
+  proptest_tests | awk -F'\t' '{ key = $1 "\t" $2; names[key] = names[key] " " $3 } END { for (k in names) print k "\t" substr(names[k], 2) }' | sort
+}
+
+stage_proptest() {
+  local seconds=$1 seed log status=0 failed=0 timed_out=0 package target names line
+  seed=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+  log=$OUT/proptest.log
+  {
+    echo "PROPTEST_CASES=1000000 PROPTEST_RNG_SEED=$seed (time limit $(duration "$seconds"))"
+    echo "replay one test: PROPTEST_CASES=1000000 PROPTEST_RNG_SEED=$seed cargo test --locked -p PACKAGE TARGET -- NAME"
+  } > "$log"
+  local pids=() logs=()
+  while IFS=$'\t' read -r package target names; do
+    line=$WORK/proptest-$package-${target//[^a-z]/}.log
+    logs+=("$line")
+    # shellcheck disable=SC2086 # test names
+    PROPTEST_CASES=1000000 PROPTEST_RNG_SEED=$seed PROPTEST_DISABLE_FAILURE_PERSISTENCE=true \
+      timeout -s INT --kill-after=30 "$seconds" cargo test --locked -p "$package" "$target" -- $names > "$line" 2>&1 &
+    pids+=($!)
+  done < <(proptest_binaries)
+  if ((${#pids[@]} == 0)); then
+    broke proptest "found no tests inside proptest! blocks"
+    return
+  fi
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}"
+    status=$?
+    { echo; echo "===== ${logs[$i]##*/proptest-}"; cat "${logs[$i]}"; } >> "$log"
+    if grep -q '^test result: FAILED' "${logs[$i]}"; then
+      failed=$((failed + $(grep -c '^---- .* stdout ----$' "${logs[$i]}")))
+    elif ((status == 124 || status == 137)); then
+      timed_out=1
+    elif ((status != 0)); then
+      broke proptest "cargo test exited with $status without a failing test; see proptest.log"
+      return
+    fi
+  done
+  local note="seed $seed, 1,000,000 cases"
+  ((timed_out)) && note+=", stopped at its time limit"
+  if ((failed > 0)); then found proptest "$failed" "$note"; else passed proptest "$note"; fi
+  PROPTEST_SEED=$seed
+}
+
+fuzz_host() {
+  (cd fuzz && rustc -vV | sed -n 's/^host: //p')
+}
+
+fuzz_bin() {
+  echo "$FUZZ_TARGET_DIR/$(fuzz_host)/release/$1"
+}
+
+# Where an input made the target fail: the panic location, the sanitizer error, or the kind of failure.
+crash_site() {
+  case ${1##*/} in
+    timeout-*) echo timeout ;;
+    oom-*) echo "out of memory" ;;
+    *) grep -m1 -oE 'panicked at [^ ]+|ERROR: [A-Za-z]+Sanitizer: [a-z-]+' "$1.txt" || echo "crash without a panic" ;;
+  esac
+}
+
+stage_fuzz() {
+  local seconds=$1 targets forks pids=() target status dir artifact count=0 broken=()
+  mapfile -t targets < <(cd fuzz && cargo fuzz list)
+  if ((${#targets[@]} == 0)); then
+    broke fuzz "cargo fuzz list found no targets"
+    return
+  fi
+  forks=$(($(nproc) / ${#targets[@]}))
+  ((forks < 1)) && forks=1
+  for target in "${targets[@]}"; do
+    dir=$OUT/fuzz/$target
+    mkdir -p "$dir" "$WORK/corpus/$target"
+    ASAN_OPTIONS=detect_odr_violation=0 timeout --kill-after=60 $((seconds + 120)) "$(fuzz_bin "$target")" \
+      -fork="$forks" -ignore_crashes=1 -ignore_timeouts=1 -ignore_ooms=1 -timeout=30 \
+      -max_total_time="$seconds" -artifact_prefix="$dir/" \
+      "$WORK/corpus/$target" "fuzz/corpus/$target" > "$WORK/fuzz-$target.log" 2>&1 &
+    pids+=($!)
+  done
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}"
+    status=$?
+    target=${targets[$i]}
+    dir=$OUT/fuzz/$target
+    grep -E '^#[0-9]+' "$WORK/fuzz-$target.log" | tail -1 > "$dir/stats.txt"
+    local artifacts=() found_here=0
+    for artifact in "$dir"/crash-* "$dir"/timeout-* "$dir"/oom-* "$dir"/leak-*; do
+      [[ -f $artifact ]] && artifacts+=("$artifact")
+    done
+    if ((${#artifacts[@]} > 0)); then
+      # Replays each input for its crash site, keeps three inputs per site, and replays those for a stack trace.
+      # shellcheck disable=SC2016 # expanded by the inner bash
+      printf '%s\0' "${artifacts[@]}" | BIN=$(fuzz_bin "$target") xargs -0 -P "$(nproc)" -I{} bash -c \
+        'ASAN_OPTIONS=detect_odr_violation=0 timeout 120 "$BIN" "$1" > "$1.txt" 2>&1' _ {}
+      for artifact in "${artifacts[@]}"; do
+        printf '%s\t%s\n' "$(crash_site "$artifact")" "$artifact"
+      done | sort > "$dir/inputs.tsv"
+      awk -F'\t' '{ n[$1]++ } n[$1] > 3 { print $2; print $2 ".txt" }' "$dir/inputs.tsv" | xargs -r -d '\n' rm -f
+      awk -F'\t' '{ n[$1]++; if (!($1 in first)) first[$1] = $2 } END { for (s in n) print s "\t" n[s] "\t" first[s] }' \
+        "$dir/inputs.tsv" | sort > "$dir/findings.tsv"
+      for artifact in "$dir"/crash-* "$dir"/timeout-* "$dir"/oom-* "$dir"/leak-*; do
+        [[ -f $artifact && $artifact != *.txt ]] || continue
+        ASAN_OPTIONS=detect_odr_violation=0 RUST_BACKTRACE=1 timeout 120 "$(fuzz_bin "$target")" "$artifact" > "$artifact.txt" 2>&1
+      done
+      rm -f "$dir/inputs.tsv"
+      found_here=$(wc -l < "$dir/findings.tsv")
+    fi
+    count=$((count + found_here))
+    if ((found_here == 0 && status != 0)) && ! grep -q 'Done [0-9]* runs\|fuzzed for' "$WORK/fuzz-$target.log"; then
+      broken+=("$target (exit $status)")
+      cp "$WORK/fuzz-$target.log" "$dir/fuzz.log"
+    fi
+  done
+  local note="${#targets[@]} targets, -fork=$forks each"
+  if ((${#broken[@]} > 0)); then
+    broke fuzz "did not run: ${broken[*]}; see fuzz/<target>/fuzz.log"
+  elif ((count > 0)); then
+    found fuzz "$count" "$note"
+  else
+    passed fuzz "$note"
+  fi
+}
+
+stage_mutants() {
+  local seconds=$1 jobs status=0 config tested missed timeouts
+  jobs=$(($(nproc) / 8))
+  ((jobs < 1)) && jobs=1
+  # The whole workspace: the recorded exclusions, without the examine_globs limit.
+  config=$WORK/mutants.toml
+  awk '/^examine_globs = \[/ { skip = 1 } !skip { print } skip && /^\]/ { skip = 0 }' .cargo/mutants.toml > "$config"
+  (
+    ulimit -c 0
+    # As in Heavy: bound mutants that allocate forever. Each copy builds into its own target directory.
+    ulimit -v 4194304
+    unset CARGO_TARGET_DIR
+    timeout -s INT --kill-after=120 "$seconds" cargo mutants --config "$config" --jobs "$jobs" --timeout 600 \
+      --gitignore false --colors never --output "$OUT"
+  ) > "$WORK/mutants.log" 2>&1
+  status=$?
+  cp "$WORK/mutants.log" "$OUT/mutants.log"
+  outcomes() { cat "$OUT/mutants.out/$1.txt" 2> /dev/null | wc -l; }
+  missed=$(outcomes missed)
+  timeouts=$(outcomes timeout)
+  tested=$((missed + timeouts + $(outcomes caught) + $(outcomes unviable)))
+  local note="$tested mutants tested, --jobs $jobs"
+  ((status == 124)) && note+=", stopped at its time limit"
+  if ((tested == 0)); then
+    broke mutants "no mutant was tested (cargo mutants exit $status); see mutants.log"
+  elif ((missed + timeouts > 0)); then
+    found mutants $((missed + timeouts)) "$note: $missed missed, $timeouts timed out"
+  elif ((status == 0 || status == 124)); then
+    passed mutants "$note"
+  else
+    broke mutants "cargo mutants exited with $status; see mutants.log"
+  fi
+}
+
+escaped() {
+  python3 -c 'import sys; d = open(sys.argv[1], "rb").read(); print(repr(d[:300])[1:] + (" …" if len(d) > 300 else ""))' "$1"
+}
+
+write_summary() {
+  local stage finished status=0
+  finished=$(date -u +%FT%TZ)
+  for stage in "${STAGES[@]}"; do
+    case ${RESULT[$stage]:-} in
+      BROKEN) status=2 ;;
+      FAILED*) ((status == 0)) && status=1 ;;
+    esac
+  done
+  {
+    echo "# break-it report"
+    echo
+    echo "- ref: $REF_NAME"
+    echo "- commit: $COMMIT"
+    echo "- hours: $HOURS"
+    echo "- cost estimate: ${BREAK_IT_COST:-none, local run}"
+    echo "- started $STARTED, finished $finished"
+    echo "- exit: $status"
+    echo
+    echo "| stage | result | time | notes |"
+    echo "|---|---|---|---|"
+    for stage in "${STAGES[@]}"; do
+      local time=
+      [[ -n ${ELAPSED[$stage]:-} ]] && time=$(duration "${ELAPSED[$stage]}")
+      echo "| ${TITLE[$stage]} | ${RESULT[$stage]:-not run} | $time | ${DETAIL[$stage]:-} |"
+    done
+    if [[ ${RESULT[proptest]:-} == FAILED* ]]; then
+      echo
+      echo "## Property tests"
+      echo
+      echo "Seed $PROPTEST_SEED. Replay with \`PROPTEST_CASES=1000000 PROPTEST_RNG_SEED=$PROPTEST_SEED cargo test --locked -p PACKAGE TARGET -- NAME\`; the full output is in proptest.log."
+      echo
+      echo '```text'
+      # Each failing test with its last panic, the minimal input proptest shrank to and its case count.
+      awk '/^---- .* stdout ----$/ { print; next }
+        /panicked at/ { panic = $0; next }
+        /^Test failed/ { print panic; block = 1 }
+        block { print }
+        block && /^[[:space:]]successes:/ { block = 0 }' "$WORK"/proptest-*.log
+      echo '```'
+    fi
+    if [[ ${RESULT[fuzz]:-} == FAILED* ]]; then
+      echo
+      echo "## Fuzzing"
+      local findings site inputs artifact
+      for findings in "$OUT"/fuzz/*/findings.tsv; do
+        [[ -f $findings ]] || continue
+        while IFS=$'\t' read -r site inputs artifact; do
+          echo
+          echo "### ${findings%/findings.tsv}: $site" | sed "s|$OUT/fuzz/||"
+          echo
+          echo "- inputs that hit it: $inputs (up to 3 kept)"
+          echo "- input: \`$(escaped "$artifact" | tr '`' "'")\`"
+          echo "- error: \`$(grep -m1 -A1 -E 'panicked at|ERROR: ' "$artifact.txt" | sed 's/^thread .* panicked at/panicked at/' | paste -sd ' ' | tr '`' "'")\`"
+          echo "- stack trace: ${artifact#"$OUT"/}.txt"
+        done < "$findings"
+      done
+    fi
+    if [[ ${RESULT[mutants]:-} == FAILED* ]]; then
+      echo
+      echo "## Mutants"
+      echo
+      echo '```text'
+      cat "$OUT"/mutants.out/missed.txt "$OUT"/mutants.out/timeout.txt 2> /dev/null | head -50
+      echo '```'
+    fi
+  } > "$OUT/summary.md"
+  echo "break-it: report in $OUT/summary.md" >&2
+  cat "$OUT/summary.md" >&2
+  return "$status"
+}
+
+interrupted() {
+  trap - INT TERM
+  local pids
+  pids=$(jobs -p)
+  # shellcheck disable=SC2086 # one pid per word
+  [[ -n $pids ]] && kill $pids 2> /dev/null
+  for stage in "${STAGES[@]}"; do
+    [[ -z ${RESULT[$stage]:-} ]] && broke "$stage" "interrupted"
+  done
+  write_summary
+  exit 2
+}
+
+# Runs stage function $2 with its time limit $3 and records how long it took.
+timed() {
+  local stage=$1 began=$SECONDS
+  shift
+  echo "==> ${TITLE[$stage]} for up to $(duration "$2"), until $(date -d "+$2 seconds" "+%H:%M %Z")"
+  "$@"
+  ELAPSED[$stage]=$((SECONDS - began))
+  echo "==> ${TITLE[$stage]}: ${RESULT[$stage]} after $(duration "${ELAPSED[$stage]}")"
+}
+
+inside() {
+  HOURS='' OUT=break-it-report INSTALL=true
+  local mutants=false
+  while (($#)); do
+    case $1 in
+      --hours) HOURS=${2:-}; shift 2 ;;
+      --mutants) mutants=true; shift ;;
+      --out) OUT=${2:-}; shift 2 ;;
+      --no-install) INSTALL=false; shift ;;
+      *) usage >&2; exit 2 ;;
+    esac
+  done
+  hours_valid "$HOURS" || die "--hours must be a number above 0 and at most $MAX_HOURS"
+  [[ $OUT == /* ]] || OUT=$PWD/$OUT
+  cd "$(git rev-parse --show-toplevel)" || die "not inside a git checkout"
+  [[ -e $OUT ]] && die "$OUT exists; move it away or pass another --out"
+  mkdir -p "$OUT" && OUT=$(cd "$OUT" && pwd)
+  WORK=$(mktemp -d)
+  # shellcheck disable=SC2064 # expand WORK now
+  trap "rm -rf '$WORK'" EXIT
+  trap interrupted INT TERM
+  STARTED=$(date -u +%FT%TZ)
+  COMMIT=$(git rev-parse HEAD)
+  REF_NAME=$(git describe --tags --exact-match 2> /dev/null || git rev-parse --abbrev-ref HEAD)
+  FUZZ_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}/fuzz
+  export PATH="$HOME/.local/break-it-node/bin:$HOME/.cargo/bin:$PATH"
+
+  local began=$SECONDS
+  prepare setup "apt packages" ensure_packages &&
+    prepare setup "rustup" ensure_rustup &&
+    prepare setup "the $(toolchain_of .) toolchain" ensure_toolchain . &&
+    prepare setup "Node $(< .node-version)" ensure_node &&
+    prepare setup "the Settings UI build" bash -c 'npm ci --prefix crates/thalvi-app/ui && npm run build --prefix crates/thalvi-app/ui' &&
+    passed setup
+  if [[ ${RESULT[setup]} == passed ]]; then
+    local package target names
+    while IFS=$'\t' read -r package target names; do
+      prepare proptest "property test build ($package $target)" cargo test --locked -p "$package" "$target" --no-run || break
+    done < <(proptest_binaries)
+    prepare fuzz "the $(toolchain_of fuzz) toolchain" ensure_toolchain fuzz &&
+      prepare fuzz "$CARGO_FUZZ" ensure_cargo_tool "$CARGO_FUZZ" &&
+      prepare fuzz "fuzz target build" bash -c "cd fuzz && cargo fuzz build --target '$(fuzz_host)' --target-dir '$FUZZ_TARGET_DIR'"
+    if [[ $mutants == true ]]; then
+      prepare mutants "$CARGO_MUTANTS" ensure_cargo_tool "$CARGO_MUTANTS"
+    else
+      skipped mutants "without --mutants"
+    fi
+  else
+    for stage in proptest fuzz mutants; do skipped "$stage" "setup broke"; done
+  fi
+  ELAPSED[setup]=$((SECONDS - began))
+
+  local budget end proptest_seconds
+  budget=$(seconds_of "$HOURS")
+  end=$((SECONDS + budget))
+  proptest_seconds=$((budget * 15 / 100))
+  ((proptest_seconds < 30)) && proptest_seconds=30
+  [[ -z ${RESULT[proptest]:-} ]] && timed proptest stage_proptest "$proptest_seconds"
+  if [[ -z ${RESULT[fuzz]:-} ]]; then
+    local left=$((end - SECONDS))
+    [[ -z ${RESULT[mutants]:-} ]] && left=$((left / 2))
+    ((left < 30)) && left=30
+    timed fuzz stage_fuzz "$left"
+  fi
+  if [[ -z ${RESULT[mutants]:-} ]]; then
+    local left=$((end - SECONDS))
+    ((left < 60)) && left=60
+    timed mutants stage_mutants "$left"
+  fi
+  write_summary
+}
+
+# ----------------------------------------------------------------------------------------------- cloud
+
+cloud() {
+  local ref='' hours=3 size=xl mutants=() out='' yes=false
+  while (($#)); do
+    case $1 in
+      --ref) ref=${2:-}; shift 2 ;;
+      --hours) hours=${2:-}; shift 2 ;;
+      --size) size=${2:-}; shift 2 ;;
+      --mutants) mutants=(--mutants); shift ;;
+      --out) out=${2:-}; shift 2 ;;
+      --yes) yes=true; shift ;;
+      *) usage >&2; exit 2 ;;
+    esac
+  done
+  [[ -n $ref ]] || die "--ref is required: a branch or tag pushed to GitHub"
+  hours_valid "$hours" || die "--hours must be a number above 0 and at most $MAX_HOURS"
+  local cpus memory
+  case $size in
+    xl) cpus=16 memory=32g ;;
+    large) cpus=8 memory=16g ;;
+    medium) cpus=4 memory=8g ;;
+    *) die "--size must be xl, large or medium" ;;
+  esac
+
+  local remote sha
+  remote=$(git ls-remote "$REPO_URL" "refs/heads/$ref" "refs/tags/$ref^{}" "refs/tags/$ref") ||
+    die "could not read $REPO_URL"
+  sha=$(awk '$2 ~ /\^\{\}$/ { print $1; exit }' <<< "$remote")
+  [[ -n $sha ]] || sha=$(awk 'NR == 1 { print $1 }' <<< "$remote")
+  [[ -n $sha ]] || die "$ref is not a branch or tag on GitHub; the sandbox clones GitHub, so push it first"
+  local local_sha
+  if local_sha=$(git rev-parse -q --verify "refs/heads/$ref^{commit}" || git rev-parse -q --verify "refs/tags/$ref^{commit}") &&
+    [[ $local_sha != "$sha" ]]; then
+    git merge-base --is-ancestor "$local_sha" "$sha" 2> /dev/null ||
+      die "local $ref (${local_sha:0:7}) has commits GitHub's ${sha:0:7} lacks; the sandbox clones GitHub, so push it first"
+    echo "break-it: local $ref is behind GitHub; testing GitHub's ${sha:0:7}"
+  fi
+
+  local ttl_minutes cost_now cost_max
+  ttl_minutes=$(awk -v h="$hours" 'BEGIN { printf "%d", h * 60 + 60 }')
+  # Setup (packages, toolchains, builds) took about 6 minutes on xl before the stages started.
+  cost_now=$(awk -v h="$hours" -v c="$cpus" -v p="$PRICE_PER_CPU_HOUR" 'BEGIN { printf "%.2f", (h + 0.15) * c * p }')
+  cost_max=$(awk -v m="$ttl_minutes" -v c="$cpus" -v p="$PRICE_PER_CPU_HOUR" 'BEGIN { printf "%.2f", m / 60 * c * p }')
+  out=${out:-$HOME/thalvi-break-it/$(date +%F)-${ref//\//-}-${sha:0:7}}
+  [[ -e $out ]] && die "$out exists; move it away or pass another --out"
+  echo "break-it: $ref (${sha:0:7}) on a $size sandbox ($cpus vCPU, $memory) for $hours h${mutants:+ with mutants}"
+  echo "break-it: estimated cost about \$$cost_now, at most \$$cost_max if it runs to its ${ttl_minutes} min TTL"
+  if [[ $yes == false ]]; then
+    [[ -t 0 ]] || die "pass --yes to start without a terminal to confirm on"
+    local answer
+    read -r -p "Start it? [y/N] " answer
+    [[ $answer == [yY]* ]] || die "not started"
+  fi
+
+  SANDBOX=break-it-$(date -u +%Y%m%d-%H%M%S)
+  trap cloud_cleanup EXIT
+  trap 'exit 130' INT TERM
+  echo "break-it: creating $SANDBOX"
+  sbx --cloud create --name "$SANDBOX" --cpus "$cpus" --memory "$memory" --platform linux/amd64 \
+    --ttl "${ttl_minutes}m" --on-timeout delete --no-progress --no-input shell ||
+    die "could not create the sandbox"
+  sbx --cloud exec "$SANDBOX" git clone --quiet --depth 1 --branch "$ref" "$REPO_URL" /home/agent/thalvi ||
+    die "could not clone $ref in the sandbox"
+  local started
+  started=$(sbx --cloud exec "$SANDBOX" git -C /home/agent/thalvi rev-parse HEAD)
+  [[ $started == "$sha" ]] || echo "break-it: $ref moved to ${started:0:7} since the check; testing that"
+  # Detached, so a dropped exec connection doesn't end the run; the poll below follows its log.
+  sbx --cloud exec -e "BREAK_IT_COST=about \$$cost_now on $size" "$SANDBOX" bash -c \
+    "cd /home/agent/thalvi && setsid -f bash -c '.github/scripts/break-it inside --hours $hours ${mutants[*]} --out /home/agent/report > /home/agent/break-it.log 2>&1; echo \$? > /home/agent/break-it.exit' < /dev/null > /dev/null 2>&1" ||
+    die "could not start the run in the sandbox"
+
+  local shown=0 deadline=$((SECONDS + ttl_minutes * 60)) poll code=
+  while ((SECONDS < deadline)); do
+    sleep 30
+    poll=$(sbx --cloud exec "$SANDBOX" bash -c \
+      "total=\$(wc -l < /home/agent/break-it.log); echo \"lines \$total\"; tail -n +$((shown + 1)) /home/agent/break-it.log | head -n \$((total - $shown)); cat /home/agent/break-it.exit 2> /dev/null | sed 's/^/exit /'") ||
+      continue
+    local total
+    total=$(sed -n '1s/^lines //p' <<< "$poll")
+    [[ $total =~ ^[0-9]+$ ]] || continue
+    sed -e '1d' -e '/^exit [0-9]*$/d' <<< "$poll"
+    shown=$total
+    code=$(sed -n 's/^exit \([0-9]*\)$/\1/p' <<< "$poll" | tail -1)
+    [[ -n $code ]] && break
+  done
+  [[ -n $code ]] || die "the run did not finish before the sandbox's TTL"
+
+  local download
+  download=$(mktemp -d)
+  sbx --cloud cp "$SANDBOX:/home/agent/report" "$download" || die "could not copy the report back"
+  mkdir -p "$(dirname "$out")" && mv "$download/report" "$out" && rmdir "$download"
+  echo "break-it: report in $out/summary.md"
+  exit "$code"
+}
+
+cloud_cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [[ -n ${SANDBOX:-} ]]; then
+    echo "break-it: deleting $SANDBOX" >&2
+    sbx --cloud rm --force "$SANDBOX" > /dev/null 2>&1 ||
+      echo "break-it: could not delete $SANDBOX; delete it with: sbx --cloud rm --force $SANDBOX" >&2
+  fi
+  exit "$status"
+}
+
+case ${1:-} in
+  inside) shift; inside "$@" ;;
+  cloud) shift; cloud "$@" ;;
+  -h | --help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
