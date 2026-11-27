@@ -16,6 +16,7 @@ const WAKE_FAULT = "fail=wake-download&slow=wake-download";
 const KEYS = ["Tab", "Shift+Tab", "Enter", "Space", "Escape", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"] as const;
 
 type Key = (typeof KEYS)[number];
+type WakeStatus = "Downloading…" | "Ready";
 
 /** One step. A generated click picks the n-th visible control; a regression click names its control. */
 type Action =
@@ -30,7 +31,7 @@ type Action =
 type Step = Action & {
   expect?: {
     downloadFocused?: true;
-    wakeStatus?: "Downloading…" | "Ready";
+    wake?: { model: string; status: WakeStatus };
     refusal?: string;
   };
 };
@@ -48,6 +49,7 @@ interface Observation {
   silent: string[];
   unnamed: string[];
   wake: {
+    model: string;
     badge: string;
     option: string;
     canDownload: boolean;
@@ -142,11 +144,14 @@ function observe(): Observation {
   const wakeRow = doc.querySelector('[data-label="wake model (dictation)"]');
   let wake: Observation["wake"] = null;
   if (wakeRow !== null && visible(wakeRow)) {
+    const picker = wakeRow.querySelector("select");
+    const badge = wakeRow.querySelector(".trow.pick .badge");
     const download = wakeRow.querySelector(".trow.pick button");
     const canDownload = download !== null && visible(download) && !download.matches(':disabled, [aria-disabled="true"]');
     wake = {
-      badge: textOf(wakeRow.querySelector(".trow.pick .badge")),
-      option: textOf(wakeRow.querySelector("select option:checked")),
+      model: picker?.value ?? "",
+      badge: badge?.checkVisibility({ visibilityProperty: true, opacityProperty: true }) === true ? textOf(badge) : "",
+      option: textOf(picker?.selectedOptions.item(0) ?? null),
       canDownload,
       downloadFocused: canDownload && active === download,
     };
@@ -272,11 +277,14 @@ async function gotoSettings(page: Page, base: string, query: string): Promise<vo
   await settle(page);
 }
 
-function checkWakeStatus(wake: Observation["wake"], expected: "Downloading…" | "Ready"): void {
-  const property = expected === "Ready" ? "progressEnds" : "wakeDownloadStatus";
+function checkWakeStatus(wake: Observation["wake"], status: WakeStatus, model?: string): void {
+  const property = status === "Ready" ? "progressEnds" : "wakeDownloadStatus";
   if (wake === null) throw new Violation(`${property}: the wake model row is hidden`);
-  if (wake.badge !== expected || !wake.option.endsWith(` — ${expected}`) || wake.canDownload) {
-    throw new Violation(`${property}: expected ${expected} with Download unavailable, saw badge "${wake.badge}", option "${wake.option}", Download ${wake.canDownload ? "enabled" : "unavailable"}`);
+  if (model !== undefined && wake.model !== model) {
+    throw new Violation(`${property}: expected ${model} selected, saw "${wake.option}"`);
+  }
+  if (wake.badge !== status || !wake.option.endsWith(` — ${status}`) || wake.canDownload) {
+    throw new Violation(`${property}: expected ${status} with Download unavailable, saw badge "${wake.badge}", option "${wake.option}", Download ${wake.canDownload ? "enabled" : "unavailable"}`);
   }
 }
 
@@ -329,7 +337,8 @@ async function play(session: Session, steps: readonly Step[], query: string, log
       progressSince = after.progress.length > 0 ? (progressSince ?? after.now) : null;
       if (progressSince !== null && after.now - progressSince > 20_000) throw new Violation(`progressEnds: ${after.progress.join(" | ")}`);
       const wake = after.wake;
-      if (step.expect?.wakeStatus !== undefined) checkWakeStatus(wake, step.expect.wakeStatus);
+      const expectedWake = step.expect?.wake;
+      if (expectedWake !== undefined) checkWakeStatus(wake, expectedWake.status, expectedWake.model);
       else if (wake?.badge === "Downloading…" || wake?.option.endsWith(" — Downloading…")) checkWakeStatus(wake, "Downloading…");
       if (after.silent.length > 0) throw new Violation(`refusalsSayWhy: ${after.silent.join(", ")}`);
       const refusal = step.expect?.refusal;
@@ -344,9 +353,11 @@ async function play(session: Session, steps: readonly Step[], query: string, log
   }
 }
 
+const WAKE_DOWNLOADING = { model: "hey_mycroft", status: "Downloading…" } as const;
+const WAKE_READY = { ...WAKE_DOWNLOADING, status: "Ready" } as const;
 const WAKE_START: readonly Step[] = [
   { kind: "click", name: "Listening" },
-  { kind: "selectWake", model: "hey_mycroft", expect: { wakeStatus: "Downloading…" } },
+  { kind: "selectWake", model: WAKE_DOWNLOADING.model, expect: { wake: WAKE_DOWNLOADING } },
 ];
 
 /** Named regressions for fixed bugs. Most pin the unrelated capture status. */
@@ -454,8 +465,8 @@ const REGRESSIONS: { issue: number; title: string; query?: string; steps: Step[]
     query: `${PINNED}&slow=wake-download`,
     steps: [
       ...WAKE_START,
-      { kind: "wait", ms: 1000, expect: { wakeStatus: "Downloading…" } },
-      { kind: "wait", ms: 1200, expect: { wakeStatus: "Ready" } },
+      { kind: "wait", ms: 1000, expect: { wake: WAKE_DOWNLOADING } },
+      { kind: "wait", ms: 1200, expect: { wake: WAKE_READY } },
     ],
   },
   {
@@ -467,7 +478,7 @@ const REGRESSIONS: { issue: number; title: string; query?: string; steps: Step[]
       { kind: "wait", ms: 2200 },
       { kind: "focus", name: WAKE_LABEL },
       { kind: "key", key: "Tab", expect: { downloadFocused: true } },
-      { kind: "key", key: "Enter", expect: { wakeStatus: "Downloading…" } },
+      { kind: "key", key: "Enter", expect: { wake: WAKE_DOWNLOADING } },
       { kind: "wait", ms: 2200, expect: { downloadFocused: true, refusal: "Could not download the wake model: the connection timed out." } },
     ],
   },
