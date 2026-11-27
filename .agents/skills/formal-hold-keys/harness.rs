@@ -1,13 +1,28 @@
-//! Every bounded sequence of the two hold keys' events, in order and with overtaken taps, against
-//! the real `HoldInput` and `Presses`; and every bounded sequence of events of an AltGr hold key
-//! that waits to be told from a chord, beside a plain write key.
+//! Every bounded sequence of two key rows' events, in order and with overtaken taps, against the
+//! real `HoldInput` and `Presses`, for each of the four modes; and every bounded sequence of events
+//! of an AltGr key that waits to be told from a chord, beside a plain Hold key.
 
-use thalvi_desktop::hold::{HoldChange, HoldInput, HoldKind, Presses};
+use thalvi_desktop::hold::{Action, HoldChange, HoldInput, KeyBind, KeyMode, KeyName, Presses};
 
 /// Longest physical sequence looked at after every arrival, as the engine's `scan` does.
 const EAGER_EVENTS: usize = 8;
 /// Longest physical sequence looked at after any subset of arrivals.
 const LATE_EVENTS: usize = 7;
+/// The modes a row can work in, each checked with the same event bounds.
+const MODES: [KeyMode; 4] = [
+    KeyMode::Hold,
+    KeyMode::Toggle,
+    KeyMode::Start,
+    KeyMode::Stop,
+];
+
+/// The two rows every family drives: the dictate row in `mode`, and a plain Hold write row.
+fn binds(mode: KeyMode) -> [KeyBind; 2] {
+    [
+        KeyBind::new(Action::Dictate, mode, KeyName::f9()),
+        KeyBind::new(Action::Write, KeyMode::Hold, KeyName::f10()),
+    ]
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Key {
@@ -15,17 +30,17 @@ enum Key {
     Write,
 }
 
+fn key_of(action: Action) -> Key {
+    match action {
+        Action::Dictate => Key::Hold,
+        Action::Write => Key::Write,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Event {
     key: Key,
     down: bool,
-}
-
-fn key_of(kind: HoldKind) -> Key {
-    match kind {
-        HoldKind::Dictate => Key::Hold,
-        HoldKind::Write => Key::Write,
-    }
 }
 
 /// Every physical history of up to `events` key changes, both keys starting up.
@@ -69,27 +84,31 @@ fn arrivals(history: &[Event]) -> Vec<Vec<usize>> {
         .collect()
 }
 
-fn describe(history: &[Event], order: &[usize], looks: u32, upto: usize) -> String {
-    order[..=upto]
-        .iter()
-        .enumerate()
-        .map(|(step, &at)| {
-            let event = history[at];
-            let key = match event.key {
-                Key::Hold => "hold key",
-                Key::Write => "write key",
-            };
-            let moved = if event.down { "down" } else { "up" };
-            let late = if !event.down && at != step { " (overtook its press)" } else { "" };
-            let look = if looks >> step & 1 == 1 { ", then the engine looks" } else { "" };
-            format!("{}. {key} {moved}{late}{look}", step + 1)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn describe(history: &[Event], order: &[usize], looks: u32, upto: usize, mode: KeyMode) -> String {
+    let mut text = format!("the dictate row is {mode:?}");
+    for (step, &at) in order[..=upto].iter().enumerate() {
+        let event = history[at];
+        let key = match event.key {
+            Key::Hold => "dictate key",
+            Key::Write => "write key",
+        };
+        let moved = if event.down { "down" } else { "up" };
+        let late = if !event.down && at != step { " (overtook its press)" } else { "" };
+        let look = if looks >> step & 1 == 1 { ", then the engine looks" } else { "" };
+        text.push_str(&format!("\n{}. {key} {moved}{late}{look}", step + 1));
+    }
+    text
 }
 
 /// Plays one arrival order, looking where `looks` says; the first broken property and its step.
-fn play(history: &[Event], order: &[usize], looks: u32, eager: bool) -> Option<(&'static str, usize, String)> {
+fn play(
+    mode: KeyMode,
+    history: &[Event],
+    order: &[usize],
+    looks: u32,
+    eager: bool,
+) -> Option<(&'static str, usize, String)> {
+    let rows = binds(mode);
     let (input, state) = HoldInput::new();
     let counted = state.clone();
     let mut presses = Presses::new(state);
@@ -98,10 +117,8 @@ fn play(history: &[Event], order: &[usize], looks: u32, eager: bool) -> Option<(
     let mut hold: Option<(Key, u64)> = None;
     for (step, &at) in order.iter().enumerate() {
         let event = history[at];
-        match event.key {
-            Key::Hold => input.set(event.down),
-            Key::Write => input.set_write(event.down),
-        }
+        let row = event.key as usize;
+        input.key(row, &rows[row], event.down);
         happened = happened.max(at + 1);
         let down = |key: Key| {
             history[..happened].iter().rev().find(|e| e.key == key).is_some_and(|e| e.down)
@@ -120,9 +137,13 @@ fn play(history: &[Event], order: &[usize], looks: u32, eager: bool) -> Option<(
             }
         }
         let free = hold.is_none();
-        let press = presses.take();
+        let mut waiting = Vec::new();
+        while let Some(press) = presses.take() {
+            taken += 1;
+            waiting.push(press);
+        }
+        let press = waiting.into_iter().next();
         let refused = presses.take_lost();
-        taken += u64::from(press.is_some());
         lost += refused;
         let total = counted.borrow().presses;
         if taken + lost != total {
@@ -133,26 +154,35 @@ fn play(history: &[Event], order: &[usize], looks: u32, eager: bool) -> Option<(
             ));
         }
         if let Some(press) = &press {
-            let key = key_of(press.kind);
-            if eager && !down(key) {
-                return Some(("HoldFollowsItsKey", step, "a hold started while its key was up".to_owned()));
+            if press.mode == KeyMode::Hold {
+                let key = key_of(press.action);
+                if eager && !down(key) {
+                    return Some(("HoldFollowsItsKey", step, "a hold started while its key was up".to_owned()));
+                }
+                if !free {
+                    return Some(("HoldFollowsItsKey", step, "a second hold started during a hold".to_owned()));
+                }
+                hold = Some((key, press.number));
             }
-            if !free {
-                return Some(("HoldFollowsItsKey", step, "a second hold started during a hold".to_owned()));
-            }
-            hold = Some((key, press.number));
         }
+        let mode_of = |key: Key| if key == Key::Hold { mode } else { KeyMode::Hold };
         let other = match event.key {
             Key::Hold => Key::Write,
             Key::Write => Key::Hold,
         };
-        if eager && event.down && at == step && free && !down(other) {
-            let started = press.as_ref().map(|press| key_of(press.kind));
-            if started != Some(event.key) {
+        if eager && event.down && at == step {
+            // A Hold row waits for the other Hold key to be up; every other mode reports each press
+            // even during a hold, since a press of it ends the capture running.
+            let wanted = match mode_of(event.key) {
+                KeyMode::Hold => free && !down(other),
+                KeyMode::Toggle | KeyMode::Start | KeyMode::Stop => true,
+            };
+            let started = press.as_ref().map(|press| key_of(press.action));
+            if wanted && started != Some(event.key) {
                 return Some((
-                    "FreeKeyStartsHold",
+                    "FreeKeyStartsCapture",
                     step,
-                    format!("the key went down with no hold open, and the engine got {started:?} and {refused} refused"),
+                    format!("the key went down and the engine got {started:?} and {refused} refused"),
                 ));
             }
         }
@@ -205,8 +235,8 @@ impl Model {
         }
     }
 
-    /// Whether the step makes AltGr's hold start: its wait ran out with the key alone.
-    fn starts_hold(&self, step: Step) -> bool {
+    /// Whether the step makes AltGr's capture start: its wait ran out with the key alone.
+    fn starts(&self, step: Step) -> bool {
         step == Step::Confirm && self.down && !self.chord_sent
     }
 
@@ -218,7 +248,7 @@ impl Model {
             }
             Step::Chord => self.chord_sent = true,
             Step::Confirm => {
-                self.confirmed |= self.starts_hold(step);
+                self.confirmed |= self.starts(step);
                 self.current = false;
             }
             Step::ConfirmOld => self.old -= 1,
@@ -231,6 +261,7 @@ impl Model {
         }
     }
 
+    /// Whether a Hold row is down and its wait ran out.
     fn holding(&self) -> bool {
         self.down && self.confirmed
     }
@@ -262,29 +293,33 @@ fn step_histories(events: usize) -> Vec<Vec<Step>> {
     all
 }
 
-fn describe_steps(history: &[Step], looks: u32, upto: usize) -> String {
-    history[..=upto]
-        .iter()
-        .enumerate()
-        .map(|(step, event)| {
-            let what = match event {
-                Step::Press => "AltGr down alone, the hook reports Maybe",
-                Step::Chord => "another key joins AltGr, the hook reports Chord",
-                Step::Confirm => "the wait of the latest press runs out",
-                Step::ConfirmOld => "the wait of an earlier press runs out",
-                Step::Release => "AltGr up",
-                Step::WriteDown => "write key down",
-                Step::WriteUp => "write key up",
-            };
-            let look = if looks >> step & 1 == 1 { ", then the engine looks" } else { "" };
-            format!("{}. {what}{look}", step + 1)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn describe_steps(history: &[Step], looks: u32, upto: usize, mode: KeyMode) -> String {
+    let mut text = format!("the dictate row is {mode:?}");
+    for (step, event) in history[..=upto].iter().enumerate() {
+        let what = match event {
+            Step::Press => "AltGr down alone, the hook reports Maybe",
+            Step::Chord => "another key joins AltGr, the hook reports Chord",
+            Step::Confirm => "the wait of the latest press runs out",
+            Step::ConfirmOld => "the wait of an earlier press runs out",
+            Step::Release => "AltGr up",
+            Step::WriteDown => "write key down",
+            Step::WriteUp => "write key up",
+        };
+        let look = if looks >> step & 1 == 1 { ", then the engine looks" } else { "" };
+        text.push_str(&format!("\n{}. {what}{look}", step + 1));
+    }
+    text
 }
 
 /// Plays one sequence of the AltGr family; the first broken property and its step.
-fn play_alone(history: &[Step], looks: u32, eager: bool) -> Option<(&'static str, usize, String)> {
+fn play_alone(
+    mode: KeyMode,
+    history: &[Step],
+    looks: u32,
+    eager: bool,
+) -> Option<(&'static str, usize, String)> {
+    let rows = binds(mode);
+    let altgr = &rows[0];
     let (input, state) = HoldInput::new();
     let counted = state.clone();
     let mut presses = Presses::new(state);
@@ -292,43 +327,43 @@ fn play_alone(history: &[Step], looks: u32, eager: bool) -> Option<(&'static str
     let mut waits: Vec<u64> = Vec::new();
     let mut unfired: Vec<u64> = Vec::new();
     let (mut taken, mut lost) = (0u64, 0u64);
-    let mut hold: Option<(HoldKind, u64)> = None;
+    let mut hold: Option<(Key, u64)> = None;
     for (step, &event) in history.iter().enumerate() {
-        let starts = model.starts_hold(event);
+        let starts = model.starts(event);
         let write_before = model.write;
         match event {
             Step::Press => {
-                let wait = input.press_alone(HoldKind::Dictate);
+                let wait = input.press_alone(0);
                 waits.push(wait);
                 unfired.push(wait);
             }
-            Step::Chord => input.apply(HoldKind::Dictate, HoldChange::Chord),
+            Step::Chord => input.apply(0, altgr, HoldChange::Chord),
             Step::Confirm => {
                 let wait = *waits.last().expect("a press came first");
                 unfired.retain(|known| *known != wait);
-                input.confirm_alone(HoldKind::Dictate, wait);
+                input.confirm_alone(0, altgr, wait);
             }
             Step::ConfirmOld => {
                 let latest = *waits.last().expect("a press came first");
                 let wait = *unfired.iter().find(|known| **known != latest).expect("an old wait is left");
                 unfired.retain(|known| *known != wait);
-                input.confirm_alone(HoldKind::Dictate, wait);
+                input.confirm_alone(0, altgr, wait);
             }
-            Step::Release => input.apply(HoldKind::Dictate, HoldChange::Up),
-            Step::WriteDown => input.set_write(true),
-            Step::WriteUp => input.set_write(false),
+            Step::Release => input.apply(0, altgr, HoldChange::Up),
+            Step::WriteDown => input.key(1, &rows[1], true),
+            Step::WriteUp => input.key(1, &rows[1], false),
         }
         model.apply(event);
         if looks >> step & 1 == 0 {
             continue;
         }
-        let expected_open = |kind: HoldKind| match kind {
-            HoldKind::Dictate => model.holding(),
-            HoldKind::Write => model.write,
+        let expected_open = |key: Key| match key {
+            Key::Hold => mode == KeyMode::Hold && model.holding(),
+            Key::Write => model.write,
         };
-        if let Some((kind, number)) = hold {
+        if let Some((key, number)) = hold {
             let over = presses.is_over(number);
-            if eager && over == expected_open(kind) {
+            if eager && over == expected_open(key) {
                 let what = if over { "the hold ended while its key was still down" } else { "the hold stayed open after its key came up" };
                 return Some(("HoldFollowsItsKey", step, what.to_owned()));
             }
@@ -337,36 +372,44 @@ fn play_alone(history: &[Step], looks: u32, eager: bool) -> Option<(&'static str
             }
         }
         let free = hold.is_none();
-        let press = presses.take();
+        let mut waiting = Vec::new();
+        while let Some(press) = presses.take() {
+            taken += 1;
+            waiting.push(press);
+        }
+        let press = waiting.into_iter().next();
         let refused = presses.take_lost();
-        taken += u64::from(press.is_some());
         lost += refused;
         let total = counted.borrow().presses;
         if taken + lost != total {
             return Some(("EachPressCountedOnce", step, format!("{total} presses, but {taken} taken and {lost} refused")));
         }
-        if let Some(press) = &press {
-            if eager && !expected_open(press.kind) {
-                let property = if press.kind == HoldKind::Dictate { "ChordNeverHolds" } else { "HoldFollowsItsKey" };
+        if let Some(press) = &press
+            && press.mode == KeyMode::Hold
+        {
+            let key = key_of(press.action);
+            if eager && !expected_open(key) {
+                let property = if key == Key::Hold { "ChordNeverHolds" } else { "HoldFollowsItsKey" };
                 return Some((property, step, "a hold started while its key was not held alone".to_owned()));
             }
             if !free {
                 return Some(("HoldFollowsItsKey", step, "a second hold started during a hold".to_owned()));
             }
-            hold = Some((press.kind, press.number));
+            hold = Some((key, press.number));
         }
-        if eager && free {
-            let started = press.as_ref().map(|press| press.kind);
-            if starts && !write_before && started != Some(HoldKind::Dictate) {
+        if eager {
+            let started = press.as_ref().map(|press| (key_of(press.action), press.mode));
+            let wanted = starts && (mode != KeyMode::Hold || !write_before);
+            if wanted && started != Some((Key::Hold, mode)) {
                 return Some((
-                    "FreeKeyStartsHold",
+                    "FreeKeyStartsCapture",
                     step,
                     format!("AltGr stayed alone until its wait ran out with no hold open, and the engine got {started:?} and {refused} refused"),
                 ));
             }
-            if event == Step::WriteDown && !model.holding() && started != Some(HoldKind::Write) {
+            if event == Step::WriteDown && !model.holding() && started != Some((Key::Write, KeyMode::Hold)) {
                 return Some((
-                    "FreeKeyStartsHold",
+                    "FreeKeyStartsCapture",
                     step,
                     format!("the write key went down with no hold open, and the engine got {started:?} and {refused} refused"),
                 ));
@@ -380,51 +423,53 @@ fn play_alone(history: &[Step], looks: u32, eager: bool) -> Option<(&'static str
 fn hold_keys_keep_their_promises_for_every_bounded_sequence() {
     let mut found: Vec<(&'static str, String)> = Vec::new();
     let mut scenarios = 0u64;
-    let record = |found: &mut Vec<(&'static str, String)>, history: &[Event], order: &[usize], looks: u32, eager: bool| {
-        if let Some((property, step, what)) = play(history, order, looks, eager)
-            && !found.iter().any(|(known, _)| *known == property)
-        {
-            found.push((property, format!("{}\n=> {what}", describe(history, order, looks, step))));
-        }
-    };
-    for history in histories(EAGER_EVENTS) {
-        for order in arrivals(&history) {
-            scenarios += 1;
-            record(&mut found, &history, &order, u32::MAX, true);
-        }
-    }
-    for history in histories(LATE_EVENTS) {
-        for order in arrivals(&history) {
-            for looks in 0..(1u32 << history.len()) {
-                scenarios += 1;
-                record(&mut found, &history, &order, looks, false);
-            }
-        }
-    }
-    for history in step_histories(EAGER_EVENTS) {
-        scenarios += 1;
-        if let Some((property, step, what)) = play_alone(&history, u32::MAX, true)
-            && !found.iter().any(|(known, _)| *known == property)
-        {
-            found.push((property, format!("{}\n=> {what}", describe_steps(&history, u32::MAX, step))));
-        }
-    }
-    for history in step_histories(LATE_EVENTS) {
-        for looks in 0..(1u32 << history.len()) {
-            scenarios += 1;
-            if let Some((property, step, what)) = play_alone(&history, looks, false)
+    for mode in MODES {
+        let record = |found: &mut Vec<(&'static str, String)>, history: &[Event], order: &[usize], looks: u32, eager: bool| {
+            if let Some((property, step, what)) = play(mode, history, order, looks, eager)
                 && !found.iter().any(|(known, _)| *known == property)
             {
-                found.push((property, format!("{}\n=> {what}", describe_steps(&history, looks, step))));
+                found.push((property, format!("{}\n=> {what}", describe(history, order, looks, step, mode))));
+            }
+        };
+        for history in histories(EAGER_EVENTS) {
+            for order in arrivals(&history) {
+                scenarios += 1;
+                record(&mut found, &history, &order, u32::MAX, true);
+            }
+        }
+        for history in histories(LATE_EVENTS) {
+            for order in arrivals(&history) {
+                for looks in 0..(1u32 << history.len()) {
+                    scenarios += 1;
+                    record(&mut found, &history, &order, looks, false);
+                }
+            }
+        }
+        for history in step_histories(EAGER_EVENTS) {
+            scenarios += 1;
+            if let Some((property, step, what)) = play_alone(mode, &history, u32::MAX, true)
+                && !found.iter().any(|(known, _)| *known == property)
+            {
+                found.push((property, format!("{}\n=> {what}", describe_steps(&history, u32::MAX, step, mode))));
+            }
+        }
+        for history in step_histories(LATE_EVENTS) {
+            for looks in 0..(1u32 << history.len()) {
+                scenarios += 1;
+                if let Some((property, step, what)) = play_alone(mode, &history, looks, false)
+                    && !found.iter().any(|(known, _)| *known == property)
+                {
+                    found.push((property, format!("{}\n=> {what}", describe_steps(&history, looks, step, mode))));
+                }
             }
         }
     }
     println!("SCENARIOS {scenarios}");
-    for property in ["EachPressCountedOnce", "HoldFollowsItsKey", "FreeKeyStartsHold", "ChordNeverHolds"] {
+    for property in ["EachPressCountedOnce", "HoldFollowsItsKey", "FreeKeyStartsCapture", "ChordNeverHolds"] {
         match found.iter().find(|(known, _)| *known == property) {
             Some((_, trace)) => println!("COUNTEREXAMPLE {property}\n{trace}"),
             None => println!("HOLDS {property}"),
         }
     }
-    assert!(found.is_empty(), "a hold key property is broken; see the counterexamples above");
+    assert!(found.is_empty(), "a key property is broken; see the counterexamples above");
 }

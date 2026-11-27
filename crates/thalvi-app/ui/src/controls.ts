@@ -233,7 +233,7 @@ export function createControls(confirmation: (atOnce?: boolean) => string) {
     value: T,
     set: (value: T) => void,
     label?: string,
-  ): Field {
+  ): Field & { field: HTMLSelectElement } {
     const input = el("select", { id: uid("f") });
     if (label) input.setAttribute("aria-label", label);
     for (const [optionValue, optionLabel] of options) {

@@ -14,7 +14,7 @@ use super::{
     App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, MAYBE_PASTED, Modifier,
     PasteText, Shortcut, WebUrl, WindowApp,
 };
-use crate::hold::{HoldChange, HoldKey, HoldKind};
+use crate::hold::{HoldChange, KeyBind, KeyName};
 use hold_binds::{Events, Installed};
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
@@ -52,15 +52,15 @@ impl Hyprland {
     /// The keys a config without hold keys gets: the hold key, then the write key. Hyprland takes
     /// no modifier on them.
     #[must_use]
-    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
-        (HoldKey::f9(), HoldKey::f10())
+    pub fn default_hold_keys() -> (KeyName, KeyName) {
+        (KeyName::f9(), KeyName::f10())
     }
 
     /// Refuses the keys Hyprland cannot bind without binding anything.
     ///
     /// # Errors
     /// [`HostError::Unsupported`] when a key has a modifier.
-    pub fn check_hold_keys(keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+    pub fn check_hold_keys(keys: &[KeyBind]) -> Result<(), HostError> {
         hold_binds::check(keys)
     }
 
@@ -74,8 +74,8 @@ impl Hyprland {
     /// # Errors
     /// [`HostError::Unsupported`] when a key is not F1 to F12 alone or the program path cannot be bound.
     pub fn watch_hold_keys(
-        keys: &[(HoldKind, HoldKey)],
-        _on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
+        keys: &[KeyBind],
+        _on_change: impl Fn(usize, HoldChange) + Send + 'static,
         on_problem: impl Fn(HoldReport) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         /// Shared by every watch, since a key change has two at once.
@@ -519,9 +519,17 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 
 #[cfg(test)]
 mod tests {
+    use crate::hold::{Action, KeyMode, KeyName};
+
     #[test]
     fn a_modifier_is_refused_before_anything_is_bound() {
-        let key = |name: &str| (HoldKind::Dictate, HoldKey::parse(name).unwrap());
+        let key = |name: &str| {
+            KeyBind::new(
+                Action::Dictate,
+                KeyMode::Hold,
+                KeyName::parse(name).unwrap(),
+            )
+        };
         assert!(Hyprland::check_hold_keys(&[key("F9")]).is_ok());
         assert!(matches!(
             Hyprland::check_hold_keys(&[key("F9"), key("Alt+KeyZ")]),

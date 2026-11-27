@@ -184,7 +184,7 @@ describe("pages", () => {
           Device: ["microphone"],
           "Wake words": ["wake words"],
           "Dictation wake word": ["wake model (dictation)", "threshold (dictation)"],
-          "Hold keys": ["dictate key", "write key"],
+          Keys: ["key 1", "key 2", "add a keybind"],
           "Capture limits": ["stop after silence", "stop after"],
         },
       },
@@ -739,8 +739,8 @@ describe("the wake word picker", () => {
     return stub;
   }
   const WITH_WAKE = "Listening for the wake words and the hold keys.";
-  const KEYBOARD = "Listening for the hold keys only.";
-  const PAUSED = "Paused: neither the hold keys nor the wake words start anything.";
+  const KEYBOARD = "Listening for keybinds only.";
+  const PAUSED = "Paused: neither keybinds nor wake words start a capture.";
 
   // (saved switch, paused, clicked, the desktop refuses with, switch after, sent, status text, notice)
   const switches: [boolean, boolean, boolean, string | null, boolean, boolean | null, string, string][] = [
@@ -3113,151 +3113,181 @@ describe("live controls", () => {
     );
   });
 
-  it("says why there is no hold key where the desktop gives the app no way to see it, and shows no row elsewhere", async () => {
+  it("says why there are no keys where the desktop gives the app no way to see them", async () => {
     const stub = stubBackend();
     stub.backend.getHoldKeyUnavailable.mockResolvedValue("GNOME Wayland does not tell Thalvi when a key is let go.");
     mountSettings(root, stub.backend);
     await settle();
-    const hold = rowOf("Dictate key");
-    expect(hold.querySelector("button")).toBeNull();
-    expect(hold.textContent).toContain("GNOME Wayland does not tell Thalvi when a key is let go.");
-    expect(hold.closest("section")?.dataset["page"]).toBe("listening");
-    const write = rowOf("Write key");
-    expect(write.querySelector("button")).toBeNull();
-    expect(write.textContent).toContain("GNOME Wayland does not tell Thalvi when a key is let go.");
+    const keys = rowOf("Keys");
+    expect(keys.querySelector("button")).toBeNull();
+    expect(keys.textContent).toContain("GNOME Wayland does not tell Thalvi when a key is let go.");
+    expect(keys.closest("section")?.dataset["page"]).toBe("listening");
+    expect(() => rowOf("Key 1")).toThrow("no row Key 1");
   });
 
-  describe("hold keys", () => {
+  describe("keys", () => {
     function press(code: string, modifiers: { ctrlKey?: boolean; shiftKey?: boolean; altKey?: boolean; metaKey?: boolean } = {}): void {
       window.dispatchEvent(new KeyboardEvent("keydown", { code, bubbles: true, cancelable: true, ...modifiers }));
     }
 
-    const SAME = "The write key must differ from the dictate key.";
     const BOUND = "F8 is already bound in Hyprland. Pick another key or remove that bind. The keys that were set before still work.";
-    const KEPT = "The keys that were set before still work.";
-    const MODIFIER = `Hyprland can bind only F1 to F12 without a modifier for the hold keys, not Alt+KeyQ. ${KEPT}`;
-    const NEEDS = 'The key "KeyY" needs a modifier, or typing it would start a capture.';
-    const UNKNOWN = 'The key "Tab" is not a key name such as Alt+KeyZ: modifiers Ctrl, Shift, Alt or Win, then a key such as KeyZ, Digit1, F9 or Space, joined by +.';
+    const TAB = "Tab can't be used as a key. Use a letter, a digit, Space or F1 to F12, alone or with Ctrl, Shift, Alt or Win.";
+    const DICTATE = { action: "dictate", mode: "hold", key: "Alt+KeyZ" };
+    const WRITE = { action: "write", mode: "hold", key: "Alt+KeyX" };
 
-    const TAB = "Tab can't be used as a hold key. Use a letter, a digit, Space or F1 to F12, alone or with Ctrl, Shift, Alt or Win.";
-
-    // (row, keys pressed, what the desktop refuses with, key sent, key shown, restore disabled, notice shown under the row,
-    // whether the other row was refused first, which must leave nothing under it once this row records)
-    const cases: [string, string[][], string | null, string | null, string, boolean, string, boolean][] = [
-      ["Dictate key", [["KeyY", "ctrl", "shift"]], null, "Ctrl+Shift+KeyY", "Ctrl+Shift+Y", false, "", false],
-      ["Write key", [["F8"]], null, "F8", "F8", false, "", false],
-      ["Dictate key", [["AltLeft", "alt"], ["Digit1", "alt"]], null, "Alt+Digit1", "Alt+1", false, "", false],
-      ["Dictate key", [["Escape"], ["KeyY", "ctrl"]], null, null, "Alt+Z", true, "", false],
-      ["Dictate key", [["F8"]], BOUND, "F8", "Alt+Z", true, BOUND, false],
-      ["Write key", [["KeyZ", "alt"]], SAME, "Alt+KeyZ", "Alt+X", true, SAME, false],
-      ["Dictate key", [["KeyQ", "alt"]], MODIFIER, "Alt+KeyQ", "Alt+Z", true, MODIFIER.replace("Alt+KeyQ", "Alt+Q"), false],
-      ["Dictate key", [["KeyY"]], NEEDS, "KeyY", "Alt+Z", true, NEEDS.replace("KeyY", "Y"), false],
-      ["Write key", [["Tab"]], UNKNOWN, "Tab", "Alt+X", true, TAB, false],
-      ["Write key", [["Tab"]], UNKNOWN, "Tab", "Alt+X", true, TAB, true],
-      ["Write key", [["F8"]], null, "F8", "F8", false, "", true],
-      // AltGr alone: Windows sends the left Ctrl it adds first, and both flags with the right Alt.
-      ["Dictate key", [["ControlLeft", "ctrl"], ["AltRight", "ctrl", "alt"]], null, "AltRight", "AltGr", false, "", false],
-      ["Write key", [["AltRight", "alt"]], null, "AltRight", "AltGr", false, "", false],
-      ["Write key", [["ControlLeft", "ctrl"], ["Escape"], ["AltRight", "ctrl", "alt"]], null, null, "Alt+X", true, "", false],
-      ["Dictate key", [["AltRight", "alt"]], MODIFIER.replace("Alt+KeyQ", "AltRight"), "AltRight", "Alt+Z", true, MODIFIER.replace("Alt+KeyQ", "AltGr"), false],
-    ];
-
-    it.each(cases)("%s: keys %j, desktop says %j: sends %j, shows %j", async (label, keys, backendSays, sent, shown, restoreDisabled, notice, otherRefused) => {
+    it("records a key into its row and sends the whole list with it", async () => {
       const stub = await open();
       goTo("listening");
-      const other = rowOf(label === "Dictate key" ? "Write key" : "Dictate key");
-      if (otherRefused) {
-        stub.backend.saveSettings.mockRejectedValueOnce(BOUND);
-        within(other, "Change…").click();
-        press("F6");
-        await settle();
-        expect(other.querySelector(".note")?.textContent).toBe(BOUND);
-      }
-      if (backendSays !== null) stub.backend.saveSettings.mockRejectedValue(backendSays);
-      const row = rowOf(label);
+      const row = rowOf("Key 1");
+      expect(row.querySelector("kbd")?.textContent).toBe("Alt+Z");
       within(row, "Change…").click();
       expect(row.querySelector("kbd")?.textContent).toBe("Press the new key. Escape cancels.");
-      expect(within(row, "Restore default").disabled).toBe(true);
-      expect(other.querySelector(".note")?.textContent).toBe("");
-      for (const [code, ...held] of keys) {
-        press(code ?? "", { ctrlKey: held.includes("ctrl"), shiftKey: held.includes("shift"), altKey: held.includes("alt") });
-        await settle();
-      }
+      press("KeyY", { ctrlKey: true, shiftKey: true });
+      await settle();
 
-      const field = label === "Dictate key" ? "hold_key" : "write_key";
-      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch).slice(otherRefused ? 1 : 0)).toEqual(sent === null ? [] : [{ [field]: sent }]);
-      expect(row.querySelector("kbd")?.textContent).toBe(shown);
-      expect(within(row, "Restore default").disabled).toBe(restoreDisabled);
-      expect(within(row, "Change…").disabled).toBe(false);
-      expect(document.activeElement).toBe(within(row, "Change…"));
-      expect(row.querySelector(".note")?.textContent ?? "").toBe(notice);
-      expect(other.querySelector(".note")?.textContent).toBe("");
-      expect(row.querySelector(".applied")?.textContent).toBe(notice === "" && sent !== null ? APPLIED_TEXT : "");
+      const recorded = "Ctrl+Shift+KeyY";
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([
+        { keys: [{ ...DICTATE, key: recorded }, WRITE] },
+      ]);
+      expect(row.querySelector("kbd")?.textContent).toBe("Ctrl+Shift+Y");
+      expect(row.querySelector(".keybind-applied")?.textContent).toBe(APPLIED_TEXT);
+      expect(row.querySelector(".keybind-note")?.textContent ?? "").toBe("");
     });
 
-    it.each([
-      ["Dictate key", "search box", "Alt+Z"],
-      ["Write key", "search box", "Alt+X"],
-      ["Dictate key", "Escape", "Alt+Z"],
-      ["Write key", "Escape", "Alt+X"],
-    ])("%s: recording keeps focus on Change…, announces the prompt, and leaving it by %s keeps %s", async (label, leave, kept) => {
+    it("records AltGr alone as its own key, and ignores the Ctrl Windows adds to it", async () => {
       const stub = await open();
       goTo("listening");
-      const row = rowOf(label);
-      const change = within(row, "Change…");
-      change.click();
-      expect(document.activeElement).toBe(change);
-      expect(change.disabled).toBe(false);
-      expect(change.getAttribute("aria-disabled")).toBe("true");
-      const prompt = Array.from(row.querySelectorAll("*")).find((node) => node.textContent === "Press the new key. Escape cancels.");
-      expect(prompt?.closest('[aria-live="polite"], [role="status"]')).not.toBeNull();
-      change.click();
-      expect(change.getAttribute("aria-disabled")).toBe("true");
-
-      if (leave === "search box") {
-        const search = root.querySelector<HTMLInputElement>('input[aria-label="Search settings"]') as HTMLInputElement;
-        search.focus();
-        const heard: KeyboardEvent[] = [];
-        search.addEventListener("keydown", (event) => heard.push(event));
-        const typed = new KeyboardEvent("keydown", { code: "KeyQ", key: "q", bubbles: true, cancelable: true });
-        search.dispatchEvent(typed);
-        expect(heard).toEqual([typed]);
-        expect(typed.defaultPrevented).toBe(false);
-        expect(document.activeElement).toBe(search);
-      } else {
-        press("Escape");
-        expect(document.activeElement).toBe(change);
-      }
-      await settle();
-
+      const row = rowOf("Key 2");
+      within(row, "Change…").click();
+      press("ControlLeft", { ctrlKey: true });
       expect(stub.backend.saveSettings).not.toHaveBeenCalled();
-      expect(row.querySelector("kbd")?.textContent).toBe(kept);
-      expect(change.hasAttribute("aria-disabled")).toBe(false);
-      expect(within(row, "Restore default").disabled).toBe(true);
+      press("AltRight", { ctrlKey: true, altKey: true });
+      await settle();
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([
+        { keys: [DICTATE, { ...WRITE, key: "AltRight" }] },
+      ]);
+      expect(row.querySelector("kbd")?.textContent).toBe("AltGr");
     });
 
-    // (row, field, desktop refuses with, key shown after, focus after)
-    it.each([
-      ["Dictate key", "hold_key", null, "Alt+Z", "Change…"],
-      ["Write key", "write_key", null, "Alt+X", "Change…"],
-      ["Dictate key", "hold_key", BOUND, "Ctrl+F9", "Restore default"],
-      ["Write key", "write_key", BOUND, "Ctrl+F9", "Restore default"],
-    ] as const)("%s (%s): Restore default from Ctrl+F9, desktop says %j: shows %s, focus on %s", async (label, field, backendSays, shown, focused) => {
-      const stub = await open({ ...SETTINGS, [field]: "Ctrl+F9" });
+    it("keeps the key and shows why when the desktop refuses it", async () => {
+      const stub = await open();
       goTo("listening");
-      if (backendSays !== null) stub.backend.saveSettings.mockRejectedValue(backendSays);
-      const row = rowOf(label);
-      expect(row.querySelector("kbd")?.textContent).toBe("Ctrl+F9");
-      const restore = within(row, "Restore default");
-      restore.focus();
-      restore.click();
+      stub.backend.saveSettings.mockRejectedValue(BOUND);
+      const row = rowOf("Key 1");
+      within(row, "Change…").click();
+      press("F8");
       await settle();
 
-      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([{ [field]: SETTINGS[field] }]);
-      expect(row.querySelector("kbd")?.textContent).toBe(shown);
-      expect(restore.disabled).toBe(backendSays === null);
-      expect(document.activeElement).toBe(within(row, focused));
-      expect(row.querySelector(".note")?.textContent ?? "").toBe(backendSays ?? "");
+      expect(row.querySelector("kbd")?.textContent).toBe("Alt+Z");
+      expect(row.querySelector(".keybind-note")?.textContent).toBe(BOUND);
+      expect(row.querySelector(".keybind-applied")?.textContent).toBe("");
+    });
+
+    it("keeps the key and shows why when the key has no name it can use", async () => {
+      const stub = await open();
+      goTo("listening");
+      stub.backend.saveSettings.mockRejectedValue(
+        'The key "Tab" is not a key name such as Alt+KeyZ: modifiers Ctrl, Shift, Alt or Win, then a key such as KeyZ, Digit1, F9 or Space, joined by +.',
+      );
+      const row = rowOf("Key 2");
+      within(row, "Change…").click();
+      press("Tab");
+      await settle();
+
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([
+        { keys: [DICTATE, { ...WRITE, key: "Tab" }] },
+      ]);
+      expect(row.querySelector("kbd")?.textContent).toBe("Alt+X");
+      expect(row.querySelector(".keybind-note")?.textContent).toBe(TAB);
+    });
+
+    it("cancels a recording with Escape or by leaving the button, changing nothing", async () => {
+      const stub = await open();
+      goTo("listening");
+      const row = rowOf("Key 1");
+      const change = within(row, "Change…");
+      change.click();
+      expect(change.getAttribute("aria-disabled")).toBe("true");
+      press("Escape");
+      await settle();
+      expect(change.hasAttribute("aria-disabled")).toBe(false);
+      expect(row.querySelector("kbd")?.textContent).toBe("Alt+Z");
+
+      change.click();
+      const search = root.querySelector<HTMLInputElement>('input[aria-label="Search settings"]') as HTMLInputElement;
+      search.focus();
+      await settle();
+      expect(stub.backend.saveSettings).not.toHaveBeenCalled();
+      expect(row.querySelector("kbd")?.textContent).toBe("Alt+Z");
+      expect(change.hasAttribute("aria-disabled")).toBe(false);
+    });
+
+    it("adds a row with the key recorded and the action and mode it starts with", async () => {
+      const stub = await open();
+      goTo("listening");
+      const add = button("+ Add keybind");
+      const recording = "Press the new key. Escape cancels.";
+      add.click();
+      expect(add.closest(".row")?.textContent).toContain(recording);
+      press("Escape");
+      expect(add.closest(".row")?.textContent).not.toContain(recording);
+      add.click();
+      press("F8");
+      await settle();
+
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([
+        { keys: [DICTATE, WRITE, { action: "dictate", mode: "hold", key: "F8" }] },
+      ]);
+      expect(rowOf("Key 3").querySelector("kbd")?.textContent).toBe("F8");
+      expect(add.closest(".row")?.textContent).not.toContain(recording);
+    });
+
+    it("changes a row's action and mode", async () => {
+      const stub = await open();
+      goTo("listening");
+      const row = rowOf("Key 1");
+      const [action, mode] = Array.from(row.querySelectorAll("select"));
+      const missingEnd = "The Dictate keys can start a capture but none can end it.";
+      stub.backend.saveSettings.mockRejectedValueOnce(new Error(missingEnd));
+      choose(mode as HTMLSelectElement, "start");
+      await settle();
+      expect(mode?.value).toBe("hold");
+      expect(row.textContent).toContain(missingEnd);
+      choose(action as HTMLSelectElement, "write");
+      await settle();
+      choose(rowOf("Key 1").querySelectorAll("select")[1] as HTMLSelectElement, "toggle");
+      await settle();
+
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([
+        { keys: [{ ...DICTATE, mode: "start" }, WRITE] },
+        { keys: [{ ...DICTATE, action: "write" }, WRITE] },
+        { keys: [{ ...DICTATE, action: "write", mode: "toggle" }, WRITE] },
+      ]);
+      expect(rowOf("Key 1").textContent).toContain("Press to start, press again to stop and paste.");
+      expect(Array.from(row.querySelectorAll('[role="alert"]:not([hidden])'), (alert) => alert.textContent)).not.toContain(missingEnd);
+      expect(mode?.value).toBe("toggle");
+    });
+
+    it("removes a row and sends the rows that are left", async () => {
+      const stub = await open();
+      goTo("listening");
+      within(rowOf("Key 1"), "Remove").click();
+      await settle();
+
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([{ keys: [WRITE] }]);
+      expect(() => rowOf("Key 2")).toThrow("no row Key 2");
+      expect(rowOf("Key 1").querySelector("kbd")?.textContent).toBe("Alt+X");
+    });
+
+    it("restores the desktop's default rows", async () => {
+      const stub = await open({ ...SETTINGS, keys: [{ action: "dictate", mode: "toggle", key: "F7" }] });
+      goTo("listening");
+      button("Restore defaults").click();
+      await settle();
+
+      expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([{ keys: [DICTATE, WRITE] }]);
+      expect(rowOf("Key 1").querySelector("kbd")?.textContent).toBe("Alt+Z");
+      expect(rowOf("Key 2").querySelector("kbd")?.textContent).toBe("Alt+X");
     });
   });
 

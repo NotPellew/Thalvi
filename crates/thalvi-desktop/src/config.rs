@@ -9,8 +9,8 @@ use crate::capture::{CaptureLimits, EndingPauses, Endings};
 use crate::cues::Cues;
 use crate::entries::{Entries, EntryError, RawStt};
 use crate::history::HistoryConfig;
-use crate::hold::HoldKey;
-use crate::host::{App, Desktop, Modifier, Shortcut, WebUrl};
+use crate::hold::{Action, KeyBind, KeyMode, KeyName};
+use crate::host::{App, Desktop, HostError, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::phrases::WordList;
 use crate::recognizer::SpeechSource;
@@ -36,6 +36,12 @@ pub enum ConfigError {
         path: PathBuf,
         #[source]
         source: serde_json::Error,
+    },
+    #[error("The desktop config at {path} cannot use these keys: {source}")]
+    UnbindableKeys {
+        path: PathBuf,
+        #[source]
+        source: HostError,
     },
 }
 
@@ -71,11 +77,9 @@ pub struct DesktopConfig {
     /// Whether the user wants Thalvi in the app menu. The app rewrites the `AppImage`'s menu
     /// entry from this on start, because the `AppImage` may have moved.
     pub show_in_menu: bool,
-    /// The key held to dictate, as in effect: the desktop's default unless the config names another.
-    pub hold_key: HoldKey,
-    /// The key held to dictate and have the words written out as proper text, as in effect like
-    /// `hold_key`.
-    pub write_key: HoldKey,
+    /// The keys Settings → Keys lists, in order: each an action, how its key works, and the key.
+    /// The desktop's default rows unless the config names others.
+    pub keys: Vec<KeyBind>,
     /// The chat endpoint that writes dictation out; without one, asking for it says where to set it up.
     pub writing: Option<Writing>,
 }
@@ -121,12 +125,27 @@ struct RawDesktopConfig {
     start_at_login: bool,
     #[serde(default)]
     show_in_menu: bool,
+    /// Read only to migrate a config written before keybinds held modes.
+    #[serde(default, deserialize_with = "legacy_key")]
+    hold_key: LegacyKey,
+    #[serde(default, deserialize_with = "legacy_key")]
+    write_key: LegacyKey,
+    /// Read as written, validated in `build`.
     #[serde(default)]
-    hold_key: Option<HoldKey>,
-    #[serde(default)]
-    write_key: Option<HoldKey>,
+    keys: Option<Vec<KeyBind>>,
     #[serde(default)]
     writing: Option<Writing>,
+}
+
+#[derive(Default)]
+enum LegacyKey {
+    #[default]
+    Absent,
+    Present(Option<KeyName>),
+}
+
+fn legacy_key<'de, D: Deserializer<'de>>(input: D) -> Result<LegacyKey, D::Error> {
+    Option::deserialize(input).map(LegacyKey::Present)
 }
 
 impl DesktopConfig {
@@ -214,23 +233,63 @@ impl Default for OverlayConfig {
 }
 
 /// The hold and write keys the running desktop starts with.
-type KeyDefaults = (HoldKey, HoldKey);
+type KeyDefaults = (KeyName, KeyName);
+
+/// The key rows a desktop starts with: its hold key and write key, both in Hold mode.
+fn default_keys((hold, write): &KeyDefaults) -> Vec<KeyBind> {
+    vec![
+        KeyBind::new(Action::Dictate, KeyMode::Hold, hold.clone()),
+        KeyBind::new(Action::Write, KeyMode::Hold, write.clone()),
+    ]
+}
+
+/// The rows to store: none when they are the desktop's default, which a config then follows if it
+/// changes.
+fn stored_keys<'a>(keys: &'a [KeyBind], defaults: &KeyDefaults) -> Option<&'a [KeyBind]> {
+    (keys != default_keys(defaults)).then_some(keys)
+}
+
+/// Why key rows cannot be used, in the words Settings shows: each key only once, and each action
+/// with a row that can start it and one that can end it.
+fn validate_keys(keys: &[KeyBind]) -> Result<(), String> {
+    let mut known: Vec<&KeyName> = Vec::new();
+    for bind in keys {
+        if known.contains(&&bind.key) {
+            return Err(format!(
+                "The key {} is bound more than once. Give each keybind its own key.",
+                bind.key
+            ));
+        }
+        known.push(&bind.key);
+    }
+    for action in Action::ALL {
+        let rows: Vec<&KeyBind> = keys.iter().filter(|bind| bind.action == action).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        if !rows.iter().any(|bind| bind.mode.starts()) {
+            return Err(format!(
+                "The {} keys can end a capture but none can start one. Give a row Hold or Toggle mode, or add a Start key.",
+                action.label()
+            ));
+        }
+        if !rows.iter().any(|bind| bind.mode.ends()) {
+            return Err(format!(
+                "The {} keys can start a capture but none can end it. Give a row Hold or Toggle mode, or add a Stop key.",
+                action.label()
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// The key in effect for a stored one: the default when none is stored, or when it is the value
 /// every config stored before defaults were set per desktop.
-fn in_effect(
-    stored: Option<HoldKey>,
-    formerly_always_stored: &HoldKey,
-    default: &HoldKey,
-) -> HoldKey {
-    stored
-        .filter(|key| key != formerly_always_stored)
-        .unwrap_or_else(|| default.clone())
-}
-
-/// The key to store: none when it is the default, which a config then follows if it changes.
-fn to_store<'a>(key: &'a HoldKey, default: &HoldKey) -> Option<&'a HoldKey> {
-    (key != default).then_some(key)
+fn in_effect(stored: LegacyKey, formerly_always_stored: &KeyName, default: &KeyName) -> KeyName {
+    match stored {
+        LegacyKey::Present(Some(key)) if &key != formerly_always_stored => key,
+        LegacyKey::Absent | LegacyKey::Present(_) => default.clone(),
+    }
 }
 
 impl TryFrom<RawDesktopConfig> for DesktopConfig {
@@ -245,8 +304,22 @@ fn build(
     raw: RawDesktopConfig,
     (hold_default, write_default): &KeyDefaults,
 ) -> Result<DesktopConfig, String> {
-    let hold_key = in_effect(raw.hold_key, &HoldKey::alt_z(), hold_default);
-    let write_key = in_effect(raw.write_key, &HoldKey::alt_x(), write_default);
+    let keys = match raw.keys {
+        Some(keys) => keys,
+        None => vec![
+            KeyBind::new(
+                Action::Dictate,
+                KeyMode::Hold,
+                in_effect(raw.hold_key, &KeyName::alt_z(), hold_default),
+            ),
+            KeyBind::new(
+                Action::Write,
+                KeyMode::Hold,
+                in_effect(raw.write_key, &KeyName::alt_x(), write_default),
+            ),
+        ],
+    };
+    validate_keys(&keys)?;
     let apps = raw
         .apps
         .into_iter()
@@ -264,9 +337,6 @@ fn build(
         .microphone
         .map(|name| nonempty(&name, "microphone"))
         .transpose()?;
-    if write_key == hold_key {
-        return Err("The write key must differ from the dictate key.".to_owned());
-    }
     let (entries, phrases) = raw
         .stt
         .entries(raw.server)
@@ -292,8 +362,7 @@ fn build(
         history: raw.history,
         start_at_login: raw.start_at_login,
         show_in_menu: raw.show_in_menu,
-        hold_key,
-        write_key,
+        keys,
         // Numbers as digits with no endpoint is the default, so it is not kept.
         writing: raw
             .writing
@@ -522,9 +591,7 @@ struct FileForm<'a> {
     start_at_login: bool,
     show_in_menu: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    hold_key: Option<&'a HoldKey>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    write_key: Option<&'a HoldKey>,
+    keys: Option<&'a [KeyBind]>,
     writing: &'a Option<Writing>,
 }
 
@@ -628,8 +695,7 @@ impl DesktopConfig {
             history: self.history,
             start_at_login: self.start_at_login,
             show_in_menu: self.show_in_menu,
-            hold_key: to_store(&self.hold_key, hold_default),
-            write_key: to_store(&self.write_key, write_default),
+            keys: stored_keys(&self.keys, &(hold_default.clone(), write_default.clone())),
             writing: &self.writing,
         }
         .serialize(serializer)
@@ -642,14 +708,32 @@ impl DesktopConfig {
     /// # Errors
     /// Fails when the file cannot be read or a setting is unknown or out of range.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        Self::load_with_legacy_keys(path).map(|(config, _)| config)
+    }
+
+    /// Loads the config and reports whether it contained the old key fields.
+    ///
+    /// # Errors
+    /// Fails when the file cannot be read, is invalid or names a key the desktop cannot bind.
+    pub fn load_with_legacy_keys(path: &Path) -> Result<(Self, bool), ConfigError> {
         let json = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_owned(),
             source,
         })?;
-        serde_json::from_str(&json).map_err(|source| ConfigError::InvalidFile {
+        let invalid = |source| ConfigError::InvalidFile {
             path: path.to_owned(),
             source,
-        })
+        };
+        let raw: RawDesktopConfig = serde_json::from_str(&json).map_err(invalid)?;
+        let had_legacy_keys = matches!(raw.hold_key, LegacyKey::Present(_))
+            || matches!(raw.write_key, LegacyKey::Present(_));
+        let config =
+            Self::try_from(raw).map_err(|message| invalid(serde::de::Error::custom(message)))?;
+        Desktop::check_hold_keys(&config.keys).map_err(|source| ConfigError::UnbindableKeys {
+            path: path.to_owned(),
+            source,
+        })?;
+        Ok((config, had_legacy_keys))
     }
 
     /// Validates config `json`.
@@ -729,15 +813,12 @@ mod tests {
         assert_eq!(config.endings, Endings::default());
         assert!(!config.start_at_login);
         assert!(!config.show_in_menu);
-        assert_eq!(
-            (config.hold_key, config.write_key),
-            Desktop::default_hold_keys()
-        );
+        assert_eq!(config.keys, default_keys(&Desktop::default_hold_keys()));
         assert_eq!(config.writing, None);
     }
 
-    const WINDOWS: fn() -> KeyDefaults = || (HoldKey::alt_z(), HoldKey::alt_x());
-    const HYPRLAND: fn() -> KeyDefaults = || (HoldKey::f9(), HoldKey::f10());
+    const WINDOWS: fn() -> KeyDefaults = || (KeyName::alt_z(), KeyName::alt_x());
+    const HYPRLAND: fn() -> KeyDefaults = || (KeyName::f9(), KeyName::f10());
 
     /// The config `json` as a desktop with `defaults` loads it.
     fn loaded(json: &str, defaults: &KeyDefaults) -> Result<DesktopConfig, String> {
@@ -773,121 +854,186 @@ mod tests {
         assert!(DesktopConfig::from_json_str(r#"{"wake": {"enabled": "no"}}"#).is_err());
     }
 
-    #[test]
-    fn the_hold_and_write_keys_are_checked_once_and_must_differ() {
-        let hold_key =
-            |json: &str| loaded(json, &WINDOWS()).map(|config| config.hold_key.to_string());
-        assert_eq!(
-            hold_key(r#"{"hold_key": "Ctrl+KeyY"}"#).unwrap(),
-            "Ctrl+KeyY"
-        );
-        let error = hold_key(r#"{"hold_key": "KeyZ"}"#).unwrap_err();
-        assert!(error.contains("needs a modifier"), "{error}");
-        let error = hold_key(r#"{"hold_key": "Alt+Hyper"}"#).unwrap_err();
-        assert!(error.contains("not a key name"), "{error}");
-        let key = |json: &str| loaded(json, &WINDOWS()).map(|config| config.write_key.to_string());
-        assert_eq!(key(r#"{"write_key": "Ctrl+KeyY"}"#).unwrap(), "Ctrl+KeyY");
-        let error = key(r#"{"write_key": "KeyX"}"#).unwrap_err();
-        assert!(error.contains("needs a modifier"), "{error}");
-        for json in [
-            r#"{"write_key": "Alt+KeyZ"}"#,
-            r#"{"hold_key": "Alt+KeyX"}"#,
-            r#"{"hold_key": "F9", "write_key": "F9"}"#,
-        ] {
-            let error = key(json).unwrap_err();
-            assert!(
-                error.contains("must differ from the dictate key"),
-                "{json}: {error}"
-            );
-        }
-        assert_eq!(
-            key(r#"{"hold_key": "Alt+KeyX", "write_key": "Alt+KeyZ"}"#).unwrap(),
-            "Alt+KeyZ",
-            "the keys may swap places"
-        );
-        let error = loaded(r#"{"hold_key": "F10"}"#, &HYPRLAND()).unwrap_err();
-        assert!(
-            error.contains("must differ from the dictate key"),
-            "{error}"
-        );
+    /// The rows `config` lists, as `"action mode key"`.
+    fn rows(config: &DesktopConfig) -> Vec<String> {
+        config
+            .keys
+            .iter()
+            .map(|bind| format!("{} {} {}", bind.action.name(), bind.mode.name(), bind.key))
+            .collect()
     }
 
     #[test]
-    fn the_hold_keys_are_the_desktops_defaults_and_are_stored_only_when_they_differ() {
-        // (desktop, stored in the file, in effect, stored again)
+    fn the_keys_are_the_desktops_defaults_and_are_stored_only_when_they_differ() {
+        // (desktop, stored in the file, rows in effect, stored again)
         type Case = (
             fn() -> KeyDefaults,
             &'static str,
-            (&'static str, &'static str),
-            (Option<&'static str>, Option<&'static str>),
+            &'static [&'static str],
+            bool,
         );
         let cases: [Case; 9] = [
-            (HYPRLAND, "{}", ("F9", "F10"), (None, None)),
-            (WINDOWS, "{}", ("Alt+KeyZ", "Alt+KeyX"), (None, None)),
             (
                 HYPRLAND,
-                r#"{"hold_key": "Alt+KeyZ", "write_key": "Alt+KeyX"}"#,
-                ("F9", "F10"),
-                (None, None),
+                "{}",
+                &["dictate hold F9", "write hold F10"],
+                false,
             ),
             (
                 WINDOWS,
-                r#"{"hold_key": "Alt+KeyZ", "write_key": "Alt+KeyX"}"#,
-                ("Alt+KeyZ", "Alt+KeyX"),
-                (None, None),
+                "{}",
+                &["dictate hold Alt+KeyZ", "write hold Alt+KeyX"],
+                false,
             ),
             (
                 HYPRLAND,
-                r#"{"hold_key": "F9", "write_key": "F10"}"#,
-                ("F9", "F10"),
-                (None, None),
+                r#"{"hold_key": "Alt+KeyZ", "write_key": "Alt+KeyX"}"#,
+                &["dictate hold F9", "write hold F10"],
+                false,
             ),
             (
                 HYPRLAND,
                 r#"{"hold_key": "F8"}"#,
-                ("F8", "F10"),
-                (Some("F8"), None),
+                &["dictate hold F8", "write hold F10"],
+                true,
             ),
             (
                 WINDOWS,
                 r#"{"write_key": "F10"}"#,
-                ("Alt+KeyZ", "F10"),
-                (None, Some("F10")),
+                &["dictate hold Alt+KeyZ", "write hold F10"],
+                true,
             ),
             (
                 WINDOWS,
                 r#"{"hold_key": "F9", "write_key": "Ctrl+F10"}"#,
-                ("F9", "Ctrl+F10"),
-                (Some("F9"), Some("Ctrl+F10")),
+                &["dictate hold F9", "write hold Ctrl+F10"],
+                true,
             ),
             (
                 HYPRLAND,
                 r#"{"hold_key": null, "write_key": "F11"}"#,
-                ("F9", "F11"),
-                (None, Some("F11")),
+                &["dictate hold F9", "write hold F11"],
+                true,
+            ),
+            (
+                HYPRLAND,
+                r#"{"keys": [{"action": "dictate", "mode": "toggle", "key": "F7"}]}"#,
+                &["dictate toggle F7"],
+                true,
+            ),
+            (
+                HYPRLAND,
+                r#"{"keys": [
+                    {"action": "dictate", "mode": "hold", "key": "F9"},
+                    {"action": "write", "mode": "hold", "key": "F10"}
+                ]}"#,
+                &["dictate hold F9", "write hold F10"],
+                false,
             ),
         ];
         for (desktop, json, in_effect, stored) in cases {
             let defaults = desktop();
             let config = loaded(json, &defaults).unwrap();
-            assert_eq!(
-                (config.hold_key.to_string(), config.write_key.to_string()),
-                (in_effect.0.to_owned(), in_effect.1.to_owned()),
-                "{json}"
-            );
+            assert_eq!(rows(&config), in_effect, "{json}");
             let written = config
                 .serialize_for(serde_json::value::Serializer, &defaults)
                 .unwrap();
-            assert_eq!(
-                (
-                    written.get("hold_key").and_then(|key| key.as_str()),
-                    written.get("write_key").and_then(|key| key.as_str())
-                ),
-                stored,
-                "{json}"
-            );
+            assert_eq!(written.get("keys").is_some(), stored, "{json}");
+            for legacy in ["hold_key", "write_key"] {
+                assert!(written.get(legacy).is_none(), "{json}: {legacy} is gone");
+            }
             assert_eq!(loaded(&written.to_string(), &defaults).unwrap(), config);
         }
+    }
+
+    #[test]
+    fn a_legacy_key_that_is_no_key_or_names_one_twice_is_refused() {
+        let error = loaded(r#"{"write_key": "KeyX"}"#, &WINDOWS()).unwrap_err();
+        assert!(error.contains("needs a modifier"), "{error}");
+        let error = loaded(r#"{"hold_key": "Alt+Hyper"}"#, &WINDOWS()).unwrap_err();
+        assert!(error.contains("not a key name"), "{error}");
+        let error = loaded(
+            r#"{"hold_key": "Alt+KeyX", "write_key": "Alt+KeyX"}"#,
+            &WINDOWS(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Alt+KeyX is bound more than once"),
+            "{error}"
+        );
+        assert_eq!(
+            rows(
+                &loaded(
+                    r#"{"hold_key": "Alt+KeyX", "write_key": "Alt+KeyZ"}"#,
+                    &WINDOWS()
+                )
+                .unwrap()
+            ),
+            ["dictate hold Alt+KeyX", "write hold Alt+KeyZ"],
+            "the legacy keys may swap places"
+        );
+    }
+
+    #[test]
+    fn every_action_needs_a_key_that_starts_it_and_one_that_ends_it() {
+        let keys = |json: &str| loaded(json, &HYPRLAND());
+        for (json, expected) in [
+            (
+                r#"{"keys": [{"action": "dictate", "mode": "stop", "key": "F7"}]}"#,
+                "The Dictate keys can end a capture but none can start one. Give a row Hold or Toggle mode, or add a Start key.",
+            ),
+            (
+                r#"{"keys": [{"action": "write", "mode": "start", "key": "F7"}]}"#,
+                "The Write keys can start a capture but none can end it. Give a row Hold or Toggle mode, or add a Stop key.",
+            ),
+        ] {
+            let error = keys(json).unwrap_err();
+            assert!(error.contains(expected), "{json}: {error}");
+        }
+        for good in [
+            r#"{"keys": [{"action": "dictate", "mode": "start", "key": "F7"},
+                         {"action": "dictate", "mode": "stop", "key": "F8"}]}"#,
+            r#"{"keys": [{"action": "dictate", "mode": "toggle", "key": "F7"}]}"#,
+            r#"{"keys": []}"#,
+        ] {
+            let config = keys(good).unwrap_or_else(|error| panic!("{good}: {error}"));
+            assert_eq!(
+                loaded(&serde_json::to_string(&config).unwrap(), &HYPRLAND()).unwrap(),
+                config
+            );
+        }
+    }
+
+    #[test]
+    fn key_rows_refuse_a_key_twice_and_a_mode_that_is_no_mode() {
+        let error = loaded(
+            r#"{"keys": [{"action": "dictate", "mode": "hold", "key": "F7"},
+                         {"action": "write", "mode": "toggle", "key": "F7"}]}"#,
+            &HYPRLAND(),
+        )
+        .unwrap_err();
+        assert!(error.contains("F7 is bound more than once"), "{error}");
+        let error = loaded(
+            r#"{"keys": [{"action": "dictate", "mode": "strt", "key": "F7"}]}"#,
+            &HYPRLAND(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("mode must be hold, toggle, start or stop"),
+            "{error}"
+        );
+        let error = loaded(
+            r#"{"keys": [{"action": "listen", "mode": "hold", "key": "F7"}]}"#,
+            &HYPRLAND(),
+        )
+        .unwrap_err();
+        assert!(error.contains("unknown variant `listen`"), "{error}");
+        let error = loaded(
+            r#"{"keys": [{"action": "dictate", "mode": "hold", "key": "KeyZ"}]}"#,
+            &HYPRLAND(),
+        )
+        .unwrap_err();
+        assert!(error.contains("needs a modifier"), "{error}");
     }
 
     #[test]

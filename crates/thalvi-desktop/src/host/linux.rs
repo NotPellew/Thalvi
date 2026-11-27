@@ -16,7 +16,7 @@ use super::{
     App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, OverlayEvent,
     OverlayFrame, PasteText, RequestServer, WebUrl, WindowApp, channel,
 };
-use crate::hold::{HoldChange, HoldKey, HoldKind};
+use crate::hold::{HoldChange, KeyBind, KeyName};
 pub use announce::status_announcer;
 
 /// The desktop session Thalvi runs in.
@@ -208,7 +208,7 @@ impl Desktop {
     /// The keys a config without hold keys gets on this desktop: the hold key, then the write key.
     /// GNOME offers no hold key, so these are Hyprland's.
     #[must_use]
-    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
+    pub fn default_hold_keys() -> (KeyName, KeyName) {
         Hyprland::default_hold_keys()
     }
 
@@ -217,7 +217,7 @@ impl Desktop {
     ///
     /// # Errors
     /// [`HostError::Unsupported`] saying why a key cannot be used.
-    pub fn check_hold_keys(keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+    pub fn check_hold_keys(keys: &[KeyBind]) -> Result<(), HostError> {
         match Session::detect() {
             Ok(Session::Hyprland) => Hyprland::check_hold_keys(keys),
             Ok(Session::Gnome) | Err(_) => Ok(()),
@@ -231,8 +231,8 @@ impl Desktop {
     /// [`HostError::Unsupported`] when this desktop cannot detect a key's release, or is none
     /// Thalvi supports.
     pub fn watch_hold_keys(
-        keys: &[(HoldKind, HoldKey)],
-        on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
+        keys: &[KeyBind],
+        on_change: impl Fn(usize, HoldChange) + Send + 'static,
         on_problem: impl Fn(HoldReport) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         match Session::detect()? {

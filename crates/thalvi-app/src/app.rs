@@ -19,7 +19,7 @@ use thalvi_desktop::device::Adapters;
 use thalvi_desktop::draft::Drafts;
 use thalvi_desktop::feed::{Clip, FeedEnd};
 use thalvi_desktop::history;
-use thalvi_desktop::hold::HoldKind;
+use thalvi_desktop::hold::Action;
 use thalvi_desktop::host::{
     Desktop, HoldSource, HoldWatch, Host, HostError, RequestServer, refusal,
 };
@@ -449,8 +449,7 @@ impl AppState {
         config: &DesktopConfig,
         write: &dyn Fn() -> Result<(), String>,
     ) -> Result<(), String> {
-        let keys_changed =
-            (&current.hold_key, &current.write_key) != (&config.hold_key, &config.write_key);
+        let keys_changed = current.keys != config.keys;
         let mut watch = self
             .hold_watch
             .lock()
@@ -615,14 +614,15 @@ fn save_keys<T>(
 /// the rest of the app goes on. `keeping` says that the keys in use stay when the desktop refuses.
 fn watch_hold_keys(config: &DesktopConfig, link: &EngineLink, keeping: bool) -> Held {
     let input = link.hold_input();
-    let keys = [
-        (HoldKind::Dictate, config.hold_key.clone()),
-        (HoldKind::Write, config.write_key.clone()),
-    ];
+    let binds = config.keys.clone();
     held(
         Desktop::watch_hold_keys(
-            &keys,
-            move |kind, change| input.apply(kind, change),
+            &config.keys,
+            move |row, change| {
+                if let Some(bind) = binds.get(row) {
+                    input.apply(row, bind, change);
+                }
+            },
             link.hold_problems(),
         ),
         keeping,
@@ -762,7 +762,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::get_hold_key_unavailable,
             commands::get_app_styles_unavailable,
             commands::get_current_app,
-            commands::get_hold_key_defaults,
+            commands::get_key_defaults,
             commands::get_start_at_login,
             commands::set_start_at_login,
             commands::copy_login_line,
@@ -1249,12 +1249,25 @@ impl Running for Live {
         self.0.state::<AppState>().link.send(control);
     }
 
-    fn hold(&self, kind: HoldKind, down: bool) {
+    fn hold(&self, kind: Action, down: bool) {
         let input = self.0.state::<AppState>().link.hold_input();
         match kind {
-            HoldKind::Dictate => input.set(down),
-            HoldKind::Write => input.set_write(down),
+            Action::Dictate => input.set(down),
+            Action::Write => input.set_write(down),
         }
+    }
+
+    fn key(&self, row: usize, down: bool) -> Result<thalvi_desktop::hold::KeyMode, String> {
+        let state = self.0.state::<AppState>();
+        let config = state.config();
+        let Some(bind) = config.keys.get(row) else {
+            return Err(format!(
+                "There is no key row {row}; Settings → Keys has {} rows, numbered from 0.",
+                config.keys.len()
+            ));
+        };
+        state.link.hold_input().key(row, bind, down);
+        Ok(bind.mode)
     }
 
     fn show_settings(&self, page: Option<&str>) {

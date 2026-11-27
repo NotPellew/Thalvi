@@ -13,7 +13,7 @@ use super::{
     App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, MAYBE_PASTED, Modifier,
     PasteText, RequestServer, StatusAnnouncer, WebUrl, WindowApp,
 };
-use crate::hold::{HoldChange, HoldKey, HoldKind};
+use crate::hold::{HoldChange, KeyBind, KeyName};
 pub use overlay::{OverlayPlan, OverlaySurface, OverlayWaker};
 pub use win32::Real;
 
@@ -124,8 +124,8 @@ impl Windows {
 
     /// The keys a config without hold keys gets on this desktop: the hold key, then the write key.
     #[must_use]
-    pub fn default_hold_keys() -> (HoldKey, HoldKey) {
-        (HoldKey::alt_z(), HoldKey::alt_x())
+    pub fn default_hold_keys() -> (KeyName, KeyName) {
+        (KeyName::alt_z(), KeyName::alt_x())
     }
 
     /// Refuses the keys this desktop can never bind, without binding anything; Windows takes
@@ -137,7 +137,7 @@ impl Windows {
         clippy::unnecessary_wraps,
         reason = "the same signature as the other hosts, which refuse keys they can't bind"
     )]
-    pub fn check_hold_keys(_keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+    pub fn check_hold_keys(_keys: &[KeyBind]) -> Result<(), HostError> {
         Ok(())
     }
 
@@ -147,8 +147,8 @@ impl Windows {
     /// # Errors
     /// [`HostError::Unsupported`] when Windows refuses the keyboard hook.
     pub fn watch_hold_keys(
-        keys: &[(HoldKind, HoldKey)],
-        on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
+        keys: &[KeyBind],
+        on_change: impl Fn(usize, HoldChange) + Send + 'static,
         _on_problem: impl Fn(HoldReport) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         win32::watch_hold_keys(keys.to_vec(), Box::new(on_change)).map(HoldSource::Watching)
