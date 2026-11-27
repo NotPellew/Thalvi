@@ -276,22 +276,32 @@ async fn a_failed_download_says_which_step_failed_and_keeps_the_causes_without_t
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_download_that_stalls_times_out_instead_of_hanging() {
+async fn a_download_that_stalls_times_out_instead_of_hanging_after_a_wait_that_grows_with_its_size()
+{
     let (address, _server) = serve().await;
     let url = format!("http://{address}/stalls.onnx");
     let sha = sha256(GOOD);
 
-    let error = ModelStore::in_dir(dir("timeout"))
-        .fetch(&asset(&url, &sha))
-        .await
-        .expect_err("times out");
+    // Two minutes, and a second for every 500 kB.
+    for (size, wait) in [(GOOD.len() as u64, 120), (60_000_000, 240)] {
+        let started = tokio::time::Instant::now();
+        let error = ModelStore::in_dir(dir("timeout"))
+            .fetch(&Asset {
+                size,
+                ..asset(&url, &sha)
+            })
+            .await
+            .expect_err("times out");
 
-    assert_eq!(
-        error.to_string(),
-        "Could not download the speech model good.onnx: the download timed out. Check the internet connection and try again."
-    );
-    assert_eq!(error.metric_kind(), "timeout");
-    assert!(!causes(&error).is_empty(), "{error}");
+        let waited = started.elapsed().as_secs();
+        assert!((wait..wait + 10).contains(&waited), "{size}: {waited} s");
+        assert_eq!(
+            error.to_string(),
+            "Could not download the speech model good.onnx: the download timed out. Check the internet connection and try again."
+        );
+        assert_eq!(error.metric_kind(), "timeout");
+        assert!(!causes(&error).is_empty(), "{error}");
+    }
 }
 
 #[tokio::test]
