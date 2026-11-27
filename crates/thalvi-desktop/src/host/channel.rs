@@ -1,6 +1,7 @@
 //! The request/reply socket: the running app answers one line per connection, to its owner alone.
 
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+use nix::sys::socket::{Shutdown, getsockopt, shutdown, sockopt::PeerCredentials};
 
 use super::line::{LineError, MAX_REPLY, MAX_REQUEST, read_line, refusal};
 use crate::host::{HostError, RequestServer};
@@ -131,21 +132,24 @@ fn serve_in(
     }
     let listener = UnixListener::bind(&path)
         .map_err(|error| unsupported(format!("The socket could not be made: {error}.")))?;
+    let listener = Arc::new(listener);
     let private = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     let served = private.map_err(|error| error.to_string()).and_then(|()| {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
+        let accepting = Arc::clone(&listener);
         let handler: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(handler);
         let busy = Arc::new(AtomicUsize::new(0));
         std::thread::Builder::new()
             .name("thalvi-requests".to_owned())
-            .spawn(move || accept(&listener, &stopped, owner, read_timeout, &handler, &busy))
+            .spawn(move || accept(&accepting, &stopped, owner, read_timeout, &handler, &busy))
             .map(|thread| (stop, thread))
             .map_err(|error| error.to_string())
     });
     match served {
         Ok((stop, thread)) => Ok(RequestServer::new(Serving {
             path,
+            listener,
             stop,
             thread: Some(thread),
         })),
@@ -241,6 +245,7 @@ fn reply(mut connection: &UnixStream, answer: &str) -> std::io::Result<()> {
 /// Stops the thread and removes the socket when dropped.
 struct Serving {
     path: PathBuf,
+    listener: Arc<UnixListener>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -248,8 +253,8 @@ struct Serving {
 impl Drop for Serving {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        // Wakes the thread out of `accept`.
-        let _ = UnixStream::connect(&self.path);
+        // Linux wakes a blocked `accept` on shutdown even if the socket path was unlinked.
+        let _ = shutdown(self.listener.as_raw_fd(), Shutdown::Both);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

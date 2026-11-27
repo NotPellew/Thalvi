@@ -1026,8 +1026,12 @@ mod tests {
 
     impl Fake {
         fn new(name: &str, config: &str) -> Arc<Self> {
-            let folder =
-                std::env::temp_dir().join(format!("thalvi-agent-{name}-{}", std::process::id()));
+            static NEXT_FOLDER: AtomicUsize = AtomicUsize::new(0);
+            let instance = NEXT_FOLDER.fetch_add(1, Ordering::Relaxed);
+            let folder = std::env::temp_dir().join(format!(
+                "thalvi-agent-{name}-{}-{instance}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&folder);
             std::fs::create_dir_all(&folder).unwrap();
             let config = DesktopConfig::from_json_str(config).unwrap();
