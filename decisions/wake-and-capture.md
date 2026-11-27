@@ -39,7 +39,7 @@ Starting and ending a capture: wake words, hold keys, cues and silence.
   one runs and a Stop press with none are refused with the overlay notice, and a Toggle or Stop
   press ends the capture running, delivered as the action it started with. Every capture a key
   started ends only by a key or `cancel`: no spoken or pause ending, so every word is text. Each
-  start keeps up to 160 ms (2 frames) of pre-roll from the listening ring, and an AltGr-only press
+  immediate start keeps up to 480 ms (6 frames) of pre-roll from the listening ring, and an AltGr-only press
   keeps its audio from the press while it waits 0.2 s to be told from a chord. The rows are stored
   only when they differ from the desktop's two Hold rows, and a config's `hold_key`/`write_key`
   become its Hold rows once on load; then the old fields are gone. A key appears in one row, and an
@@ -51,7 +51,7 @@ Starting and ending a capture: wake words, hold keys, cues and silence.
   a plain `bindr` when another key is pressed or a modifier is down during the hold, so a Hold's
   release is `bindrti`; `RegisterHotKey` sees no release; a long hold means holding a key for
   minutes, which Discord's keybinds spare the user; binds in the user's config go stale when the
-  executable moves; without pre-roll, speaking as the key goes down clips the first consonant.
+  executable moves; a 450 ms pre-roll kept first words that shorter pre-roll lost in Hex's test.
   Rejected: one key and one mode per action, spoken endings during a key capture, a start-only
   action without a stop key, Ctrl+Z/Y, a managed `thalvi-binds.conf` the user sources, hand-written
   binds, a modifier checklist with a key drop-down (Settings records the combination the user

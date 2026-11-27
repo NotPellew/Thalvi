@@ -278,6 +278,9 @@ worker, which builds the stream before reading any frames. The model layout supp
 and reports a spawn failure the same way. Worker initialization adds no await, ending
 control, or path to delivery, so `Loaded` and `LoadFailed` keep their meaning.
 
+`Engine::begin_capture` copies six listening-ring frames on immediate Hold, Toggle and Start
+presses. The copy is synchronous and leaves the cancellation and delivery boundaries as modeled.
+
 The two checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
