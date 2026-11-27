@@ -730,6 +730,7 @@ impl Publisher {
                 }
                 state.view.engine = engine.clone();
             }),
+            Feedback::KeyRefused(refusal) => publisher.refused(refusal),
             Feedback::StreamingHoldReleased => {
                 let mut state = publisher
                     .state
@@ -2106,7 +2107,7 @@ async fn while_delivering<T>(
 }
 
 fn report_refusal(recorder: &Recorder, refusal: Refusal, count: u64) {
-    refusal.record(recorder, count);
+    refusal.record(recorder, count, None);
     println!("{}", refusal.notice());
 }
 
@@ -3014,8 +3015,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_lost_press_reaches_the_status_without_another_capture() {
+    async fn a_refused_press_reaches_the_status_without_another_capture() {
         use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
+        use thalvi_desktop::hold::{Action, KeyBind, KeyMode, KeyName};
         use thalvi_desktop::recognizer::FakeRecognizer;
 
         LocalSet::new().run_until(async {
@@ -3044,7 +3046,18 @@ mod tests {
             input.set(true);
             input.set(false);
             tokio::time::timeout(Duration::from_secs(5), status.changed()).await.unwrap().unwrap();
-            assert!(matches!(&*status.borrow(), Status::Failed { notice, .. } if notice == Refusal::TooQuick.notice()));
+            assert!(matches!(
+                &*status.borrow(),
+                Status::Failed { notice, headline, .. }
+                    if notice == Refusal::TooQuick.notice() && headline == Refusal::TooQuick.headline()
+            ));
+            publisher.mode(Mode::Idle);
+            input.key(0, &KeyBind::new(Action::Dictate, KeyMode::Stop, KeyName::f9()), true);
+            tokio::time::timeout(Duration::from_secs(5), status.wait_for(|current| matches!(
+                current,
+                Status::Failed { notice, headline, .. }
+                    if notice == Refusal::NothingToStop.notice() && headline == Refusal::NothingToStop.headline()
+            ))).await.unwrap().unwrap();
             listening.abort();
             let _ = listening.await;
 

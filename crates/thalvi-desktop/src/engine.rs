@@ -273,6 +273,8 @@ pub enum EngineState {
 /// Capture feedback that needs to reach the desktop in order.
 pub enum Feedback<'a> {
     State(&'a EngineState),
+    /// A key press was refused and needs its own overlay headline.
+    KeyRefused(Refusal),
     /// A normal streaming release before the overlay would show a finishing state.
     StreamingHoldReleased,
 }
@@ -1277,7 +1279,7 @@ where
                     key_open = changed.is_ok();
                     match self.key.take() {
                         Some(press) if press.mode == KeyMode::Stop => {
-                            self.ignore(Refusal::NothingToStop, 1);
+                            self.refuse_key(Refusal::NothingToStop, 1, Some(press.mode));
                         }
                         Some(press) => {
                             self.begin_capture(press);
@@ -1539,7 +1541,7 @@ where
         };
         let pressed = self.key_presses();
         if pressed > 0 {
-            self.ignore(Refusal::Capturing, pressed);
+            self.ignore(Refusal::Capturing, pressed, None);
         }
         while self.ending_cues.try_join_next().is_some() {}
         if self.ending_cues.is_empty() {
@@ -2099,7 +2101,7 @@ where
         let Some(held) = held else {
             let pressed = self.key_presses();
             if pressed > 0 {
-                self.ignore(Refusal::Capturing, pressed);
+                self.ignore(Refusal::Capturing, pressed, None);
             }
             return None;
         };
@@ -2111,7 +2113,13 @@ where
                 KeyMode::Stop | KeyMode::Toggle if matches!(live.release, Release::Down) => {
                     return self.on_release(live, held, Some(&press), frames).await;
                 }
-                _ => self.ignore(Refusal::Capturing, 1),
+                _ => {
+                    self.ignore(Refusal::Capturing, 1, Some(press.mode));
+                    if press.mode == KeyMode::Start && matches!(live.release, Release::Down) {
+                        live.notice = Some(Refusal::Capturing.notice().to_owned());
+                        self.publish(live);
+                    }
+                }
             }
         }
         None
@@ -2246,9 +2254,14 @@ where
     }
 
     /// Says that `count` presses of the dictation key started nothing, and why.
-    fn ignore(&mut self, refusal: Refusal, count: u64) {
-        refusal.record(&self.recorder, count);
+    fn refuse_key(&self, refusal: Refusal, count: u64, mode: Option<KeyMode>) {
+        refusal.record(&self.recorder, count, mode);
+        (self.status)(Feedback::KeyRefused(refusal));
         (self.notice)(refusal.notice());
+    }
+
+    fn ignore(&mut self, refusal: Refusal, count: u64, mode: Option<KeyMode>) {
+        self.refuse_key(refusal, count, mode);
         self.ignored.push(refusal);
     }
 
@@ -2256,7 +2269,7 @@ where
     fn ignore_lost(&mut self) {
         let lost = self.key.take_lost();
         if lost > 0 {
-            self.ignore(Refusal::TooQuick, lost);
+            self.ignore(Refusal::TooQuick, lost, None);
         }
     }
 

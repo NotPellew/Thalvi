@@ -645,13 +645,12 @@ impl Refusal {
     }
 
     /// Records `count` presses refused for this reason.
-    pub fn record(self, recorder: &Recorder, count: u64) {
-        recorder.metric(
-            Event::HoldStart,
-            "refused",
-            None,
-            serde_json::json!({"reason": self.reason(), "count": count}),
-        );
+    pub fn record(self, recorder: &Recorder, count: u64, mode: Option<KeyMode>) {
+        let mut fields = serde_json::json!({"reason": self.reason(), "count": count});
+        if let Some(mode) = mode {
+            fields["mode"] = serde_json::json!(mode);
+        }
+        recorder.metric(Event::HoldStart, "refused", None, fields);
     }
 }
 
