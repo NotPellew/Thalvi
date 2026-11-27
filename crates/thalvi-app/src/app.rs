@@ -1440,13 +1440,20 @@ fn quit(app: &AppHandle) {
 mod tests {
     use std::sync::Barrier;
 
+    use thalvi_desktop::config::Look;
+
     use super::*;
+
+    struct FormApplication {
+        expected: DesktopConfig,
+        sent: DesktopConfig,
+    }
 
     fn writer(
         saves: &Arc<SyncedConfig>,
-        applied: &Arc<Mutex<Vec<DesktopConfig>>>,
+        applied: &Arc<Mutex<Vec<FormApplication>>>,
         line: &Arc<Barrier>,
-        body: impl FnOnce(&Arc<SyncedConfig>, &Arc<Mutex<Vec<DesktopConfig>>>) + Send + 'static,
+        body: impl FnOnce(&SyncedConfig, &Mutex<Vec<FormApplication>>) + Send + 'static,
     ) -> std::thread::JoinHandle<()> {
         let saves = Arc::clone(saves);
         let applied = Arc::clone(applied);
@@ -1457,16 +1464,48 @@ mod tests {
         })
     }
 
+    fn save_look(saves: &SyncedConfig, applied: &Mutex<Vec<FormApplication>>, look: Look) {
+        saves
+            .save_form(
+                |current| {
+                    let mut settings = crate::settings::settings_json(current)?;
+                    settings["look"] = serde_json::json!(look);
+                    Ok(((), Some(settings)))
+                },
+                |current, config, write| {
+                    let mut expected = current.clone();
+                    expected.look = look;
+                    write()?;
+                    saves.set(config);
+                    applied
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(FormApplication {
+                            expected,
+                            sent: config.clone(),
+                        });
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
     #[test]
     fn overlapping_saves_leave_the_file_and_the_running_config_agreeing() {
+        for switch_last in [true, false] {
+            check_overlapping_saves(switch_last);
+        }
+    }
+
+    fn check_overlapping_saves(switch_last: bool) {
         let dir = std::env::temp_dir().join(format!("thalvi-app-race-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Store::new(Some(dir.join("desktop.json"))).unwrap();
-        let start = DesktopConfig::from_json_str("{}").unwrap();
+        let start = DesktopConfig::from_json_str(r#"{"start_at_login":false}"#).unwrap();
         store.save_switches(&start).unwrap();
         let saves = Arc::new(SyncedConfig::new(store, start));
-        let applied: Arc<Mutex<Vec<DesktopConfig>>> = Arc::new(Mutex::new(Vec::new()));
-        let line = Arc::new(Barrier::new(5));
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        let line = Arc::new(Barrier::new(if switch_last { 4 } else { 5 }));
         let stop = Arc::new(AtomicBool::new(false));
         let reader = {
             let saves = Arc::clone(&saves);
@@ -1478,40 +1517,24 @@ mod tests {
                 }
             })
         };
-        let form = |look: &'static str| {
+        let form = |look: Look| {
             writer(&saves, &applied, &line, move |saves, applied| {
                 for _ in 0..50 {
-                    let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
-                    settings["look"] = serde_json::json!(look);
-                    let synced = Arc::clone(saves);
-                    saves
-                        .save_form(
-                            |_| Ok(((), Some(settings))),
-                            move |_, config, write| {
-                                write()?;
-                                synced.set(config);
-                                applied
-                                    .lock()
-                                    .unwrap_or_else(PoisonError::into_inner)
-                                    .push(config.clone());
-                                Ok(())
-                            },
-                        )
-                        .unwrap();
+                    save_look(saves, applied, look);
                 }
             })
         };
+        let switch = |saves: &SyncedConfig| {
+            for round in 0..50 {
+                saves
+                    .remember(|c| c.start_at_login = round % 2 == 0)
+                    .unwrap();
+            }
+            saves.remember(|c| c.start_at_login = true).unwrap();
+        };
         let handles = [
-            form("holo"),
-            form("neon"),
-            writer(&saves, &applied, &line, |saves, _| {
-                for round in 0..50 {
-                    saves
-                        .remember(|c| c.start_at_login = round % 2 == 0)
-                        .unwrap();
-                }
-                saves.remember(|c| c.start_at_login = true).unwrap();
-            }),
+            form(Look::Holo),
+            form(Look::Neon),
             writer(&saves, &applied, &line, |saves, _| {
                 for _ in 0..50 {
                     let mut settings = crate::settings::settings_json(&saves.config()).unwrap();
@@ -1526,29 +1549,45 @@ mod tests {
                 }
             }),
         ];
+        let login_writer =
+            (!switch_last).then(|| writer(&saves, &applied, &line, move |saves, _| switch(saves)));
         line.wait();
         for handle in handles {
             handle.join().unwrap();
         }
+        if let Some(handle) = login_writer {
+            handle.join().unwrap();
+        } else {
+            switch(&saves);
+        }
         stop.store(true, Ordering::SeqCst);
         reader.join().unwrap();
         let (running, file) = (saves.config(), saves.store.load().unwrap());
-        let applied = applied.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut last = applied
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+            .expect("a form sent a config to the engine");
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(file, running, "the running config matches the file");
-        assert_eq!(applied.last(), Some(&running), "the engine got it last");
-        assert!(file.start_at_login, "the last switch save is kept");
-        assert!(
-            matches!(
-                file.look,
-                thalvi_desktop::config::Look::Holo | thalvi_desktop::config::Look::Neon
-            ),
-            "the file holds a reported form: {:?}",
-            file.look
+        assert_eq!(
+            last.sent, last.expected,
+            "the engine got the last form save"
+        );
+        if switch_last {
+            assert!(
+                !last.sent.start_at_login,
+                "the switch ran after the last form"
+            );
+        }
+        last.expected.start_at_login = true;
+        assert_eq!(
+            file, last.expected,
+            "the file keeps the last form save and the last switch save"
         );
         assert_eq!(leftovers, ["desktop.json"], "no temporary file is left");
     }
