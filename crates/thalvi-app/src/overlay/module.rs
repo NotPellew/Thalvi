@@ -88,7 +88,10 @@ impl Module {
             } else {
                 art::WAVE_ALONE
             } * theme.measures.spacing;
-        #[expect(clippy::cast_possible_truncation, reason = "a clock in seconds")]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "monotonic Duration seconds fit f32; the wave only needs a rounded phase"
+        )]
         let seconds = view.clock as f32;
         if let Some(wave) = &view.wave {
             if let Some(glow) = glow(
@@ -744,7 +747,10 @@ fn line_strip(canvas: &mut Canvas, view: &View, color: Rgba, finish: Finish, the
         canvas.clip(None);
         return;
     }
-    #[expect(clippy::cast_precision_loss, reason = "milliseconds of a pause")]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "left and total are at most 5000 ms, exactly representable in f32"
+    )]
     let share = view.countdown.as_ref().map_or(1.0, |running| {
         view.left_ms(running) as f32 / running.total_ms.max(1) as f32
     });
@@ -860,7 +866,7 @@ mod tests {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "a width in pixels"
+            reason = "the rounded-up advance of the five fixture glyphs is a nonnegative pixel count"
         )]
         let used = with_text(|text| {
             text.measure(
@@ -1013,7 +1019,10 @@ mod tests {
                     .unwrap_or(0),
             );
             if weight > 0.0 {
-                #[expect(clippy::cast_precision_loss, reason = "pixel positions")]
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "scale-1 pixel coordinates are below 460 by 200 and exact in f32"
+                )]
                 let (px, py) = ((i % width) as f32, (i / width) as f32);
                 (sum, x, y) = (sum + weight, x + px * weight, y + py * weight);
                 rows = (rows.0.min(i / width), rows.1.max(i / width));
@@ -1169,7 +1178,7 @@ mod tests {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "a row"
+            reason = "the fixture caret row is the nonnegative integral offset SLOT.1 + 56 below HEIGHT"
         )]
         let row = (SLOT.1 + 52.0 + 4.0) as usize;
         assert_eq!(top, row);
@@ -1197,13 +1206,19 @@ mod tests {
             .iter()
             .enumerate()
             .filter(|(i, [b, g, r, _])| {
-                #[expect(clippy::cast_precision_loss, reason = "a row")]
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "scale-1 row indices are below 200 and exact in f32"
+                )]
                 let in_slot = ((i / width) as f32) < SLOT.1 + SLOT_H;
                 in_slot && *r < 120 && *g > 200 && *b > 100 && *b < 180
             })
             .map(|(i, _)| (i % width, i / width))
             .collect();
-        #[expect(clippy::cast_precision_loss, reason = "pixel positions")]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "fixture columns and rows are below 460 and 200, respectively, and exact in f32"
+        )]
         let span = |pick: fn(&(usize, usize)) -> usize| {
             let values = green.iter().map(pick);
             (
@@ -1269,7 +1284,10 @@ mod tests {
             inked.iter().map(|p| p.0).min().unwrap(),
             inked.iter().map(|p| p.0).max().unwrap(),
         );
-        #[expect(clippy::cast_precision_loss, reason = "pixel columns")]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "two scale-1 columns sum to at most 918, exact in f32"
+        )]
         let middle_x = (left + right) as f32 / 2.0;
         assert!(
             (middle_x - (SLOT.0 + 5.0 + WAVE_W / 2.0)).abs() <= 1.5,
@@ -1278,7 +1296,7 @@ mod tests {
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "a row"
+            reason = "the positive tag centre is inside the 84-point module; drop the subpixel part"
         )]
         let middle = (top + WAVE_H / 2.0) as usize;
         let at = |x: usize, y: usize| tagged[y * width + x][3];
@@ -1293,9 +1311,15 @@ mod tests {
             .filter(|p| p.0.abs_diff(left + (right - left) / 2) < 30)
             .map(|p| p.1)
             .collect();
-        #[expect(clippy::cast_precision_loss, reason = "pixel rows")]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "two scale-1 rows sum to at most 398, exact in f32"
+        )]
         let words_middle = (words.iter().min().unwrap() + words.iter().max().unwrap()) as f32 / 2.0;
-        #[expect(clippy::cast_precision_loss, reason = "a row")]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the scale-1 tag centre is below 84 pixels and exact in f32"
+        )]
         let middle = middle as f32;
         assert!(
             (words_middle - middle).abs() <= 3.0,

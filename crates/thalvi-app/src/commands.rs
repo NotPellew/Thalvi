@@ -2,7 +2,7 @@
 
 #![expect(
     clippy::needless_pass_by_value,
-    reason = "Tauri hands a command its state by value"
+    reason = "platform: Tauri's generated IPC adapters pass decoded arguments and State handles by value"
 )]
 
 use std::path::Path;

@@ -1,14 +1,6 @@
 //! Draws the overlay on the CPU: shapes in points at the surface's scale, and text shaped with the
 //! system's fonts, falling back for any script they cover.
 
-#![expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    clippy::cast_possible_wrap,
-    reason = "pixel arithmetic on a small surface"
-)]
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -29,12 +21,13 @@ use tiny_skia::{
 const SHAPED_KEPT: usize = 32;
 
 fn skia(color: Rgba) -> Color {
-    Color::from_rgba8(
-        color.r,
-        color.g,
-        color.b,
-        (color.a.clamp(0.0, 1.0) * 255.0).round() as u8,
-    )
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped alpha rounds to 0–255, and NaN casts to zero"
+    )]
+    let alpha = (color.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Color::from_rgba8(color.r, color.g, color.b, alpha)
 }
 
 /// How a shape is painted.
@@ -92,11 +85,17 @@ pub struct TextBounds {
 
 impl Canvas {
     pub fn new(width: f32, height: f32, scale: f32) -> Option<Self> {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "ceil includes the last partial pixel; invalid integer dimensions are rejected by Pixmap"
+        )]
+        let pixels = (
+            (width * scale).ceil() as u32,
+            (height * scale).ceil() as u32,
+        );
         Some(Self {
-            pixmap: Pixmap::new(
-                (width * scale).ceil() as u32,
-                (height * scale).ceil() as u32,
-            )?,
+            pixmap: Pixmap::new(pixels.0, pixels.1)?,
             scale,
             clip: None,
             text_bounds: None,
@@ -251,9 +250,17 @@ impl Canvas {
             opacity: opacity.clamp(0.0, 1.0),
             ..PixmapPaint::default()
         };
-        self.pixmap.draw_pixmap(
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "tiny-skia takes signed pixel offsets; round the overlay-space origin to the nearest pixel"
+        )]
+        let (x, y) = (
             (at.0 * self.scale).round() as i32,
             (at.1 * self.scale).round() as i32,
+        );
+        self.pixmap.draw_pixmap(
+            x,
+            y,
             other.pixmap.as_ref(),
             &paint,
             Transform::identity(),
@@ -263,6 +270,11 @@ impl Canvas {
 
     /// Blurs the whole canvas about `radius` points, with three box passes each way.
     pub fn blur(&mut self, radius: f32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "overlay blur radii round to whole pixels with a minimum of one"
+        )]
         let radius = (radius * self.scale / 2.0).round().max(1.0) as usize;
         let (width, height) = (self.pixmap.width() as usize, self.pixmap.height() as usize);
         let data = self.pixmap.data_mut();
@@ -302,6 +314,13 @@ impl Canvas {
     }
 
     /// Blends `alpha` (0–255 coverage, `width` wide) in `color` with its top-left at pixel `(x, y)`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_wrap,
+        reason = "signed glyph coordinates are clipped before indexing; overlay columns fit f32 exactly and blend channels round within 0–255"
+    )]
     fn blend(&mut self, (x, y): (i32, i32), width: usize, coverage: &[u8], color: Rgba) {
         let (cw, ch) = (self.pixmap.width() as i32, self.pixmap.height() as i32);
         let bounds = self.text_bounds;
@@ -363,15 +382,24 @@ fn box_pass(
     step: usize,
     stride: usize,
 ) {
-    let window = (2 * radius + 1) as u32;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "an overlay blur radius and its 2r + 1 pixel window fit u32"
+    )]
+    let (radius_px, window) = (radius as u32, (2 * radius + 1) as u32);
     for line in 0..lines {
         let base = line * stride;
         for channel in 0..4 {
             let at = |i: usize| u32::from(from[base + i * step + channel]);
             let mut sum: u32 =
-                (0..=radius).map(|i| at(i.min(length - 1))).sum::<u32>() + radius as u32 * at(0);
+                (0..=radius).map(|i| at(i.min(length - 1))).sum::<u32>() + radius_px * at(0);
             for i in 0..length {
-                to[base + i * step + channel] = (sum / window) as u8;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the mean of byte channels is at most 255"
+                )]
+                let average = (sum / window) as u8;
+                to[base + i * step + channel] = average;
                 let add = (i + radius + 1).min(length - 1);
                 let drop = i.saturating_sub(radius);
                 sum = sum + at(add) - at(drop);
@@ -550,12 +578,13 @@ impl Text {
             buffer.set_size(width, None);
             buffer.set_rich_text(
                 spans.iter().map(|(text, color)| {
-                    let color = cosmic_text::Color::rgba(
-                        color.r,
-                        color.g,
-                        color.b,
-                        (color.a * 255.0) as u8,
-                    );
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "span alpha is a fraction of 255; drop the fractional byte"
+                    )]
+                    let alpha = (color.a * 255.0) as u8;
+                    let color = cosmic_text::Color::rgba(color.r, color.g, color.b, alpha);
                     (*text, base.clone().color(color))
                 }),
                 &base,
@@ -646,7 +675,12 @@ impl Text {
             .fold((0.0f32, 0usize), |(width, lines), run| {
                 (width.max(run.line_w), lines + 1)
             });
-        (width / scale, lines as f32 * style.line_height)
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the count is exact through 2^24 lines; measurement uses f32 pixel heights"
+        )]
+        let height = lines as f32 * style.line_height;
+        (width / scale, height)
     }
 
     /// Draws `spans` with the top-left of their box at `at` points.
@@ -715,8 +749,12 @@ fn weight_axis(fonts: &Database, id: FontId) -> Option<(u16, u16)> {
         if !(0.0..=1000.0).contains(&min) || !(0.0..=1000.0).contains(&max) || min > max {
             return None;
         }
-        let low = min.ceil() as u16;
-        let high = max.floor() as u16;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both axis limits have been checked in 0–1000; round inwards to whole weights"
+        )]
+        let (low, high) = (min.ceil() as u16, max.floor() as u16);
         (low <= high).then_some((low, high))
     })?
 }
@@ -760,14 +798,18 @@ mod tests {
         };
         let white = Fill::Solid(Rgba::rgb(255, 255, 255));
         // The second blur reaches past the whole canvas.
-        for (width, height, radius) in [(12, 9, 4.0), (2, 3, 8.0)] {
-            let mut full = Canvas::new(width as f32, height as f32, 1.0).unwrap();
-            full.rect((0.0, 0.0, width as f32, height as f32), 0.0, &white);
+        for (width, height, radius) in [(12_u8, 9_u8, 4.0), (2, 3, 8.0)] {
+            let mut full = Canvas::new(width.into(), height.into(), 1.0).unwrap();
+            full.rect((0.0, 0.0, width.into(), height.into()), 0.0, &white);
             full.blur(radius);
             let at = alpha(&full);
             for y in 0..height {
                 for x in 0..width {
-                    assert_eq!(at(x, y), 255, "{width} × {height}: ({x}, {y})");
+                    assert_eq!(
+                        at(x.into(), y.into()),
+                        255,
+                        "{width} × {height}: ({x}, {y})"
+                    );
                 }
             }
         }

@@ -1,6 +1,6 @@
 //! Opt-in local-model replays through the public speech stream, without downloads.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 

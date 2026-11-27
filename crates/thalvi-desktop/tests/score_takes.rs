@@ -5,7 +5,7 @@
 //! the device), and `THALVI_TAKES_DIR` (a folder of 48 kHz mono 16-bit WAV files with a `takes.jsonl` of
 //! `file` and `text`). Prints scores only, never the texts. Run with `--release --ignored --nocapture`.
 
-#![expect(clippy::expect_used, reason = "a test fails by panicking")]
+#![cfg(test)]
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

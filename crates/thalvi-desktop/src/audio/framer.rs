@@ -71,12 +71,13 @@ impl Framer {
     }
 }
 
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the value is clamped to the i16 range first"
-)]
 fn to_i16(sample: f64) -> i16 {
-    (sample * 32_768.0).round().clamp(-32_768.0, 32_767.0) as i16
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "rounded values clamp to i16 bounds; NaN passes through clamp and casts to zero"
+    )]
+    let pcm = (sample * 32_768.0).round().clamp(-32_768.0, 32_767.0) as i16;
+    pcm
 }
 
 #[cfg(test)]
@@ -144,10 +145,12 @@ mod tests {
 
     #[test]
     fn loud_input_clips_instead_of_wrapping() {
-        let out = run(16_000, &vec![1.5; FRAME_SAMPLES]);
-        assert!(out.iter().all(|&s| s == i16::MAX));
-        let out = run(16_000, &vec![-1.5; FRAME_SAMPLES]);
-        assert!(out.iter().all(|&s| s == i16::MIN));
+        for (input, pcm) in [(1.5, i16::MAX), (-1.5, i16::MIN), (f32::NAN, 0)] {
+            assert_eq!(
+                run(16_000, &vec![input; FRAME_SAMPLES]),
+                vec![pcm; FRAME_SAMPLES]
+            );
+        }
     }
 
     #[test]
