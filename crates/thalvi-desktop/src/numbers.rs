@@ -817,6 +817,8 @@ mod tests {
             ("One thing first.", "One thing first."),
             ("I talked to one person", "I talked to one person"),
             ("give one to a friend", "give one to a friend"),
+            ("Give one to 2FA support.", "Give one to 2FA support."),
+            ("Send Cybrex2 to one person.", "Send Cybrex2 to one person."),
             (
                 "Use the larger one. To 2 places.",
                 "Use the larger one. To 2 places.",
