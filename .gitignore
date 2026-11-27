@@ -22,3 +22,4 @@ crates/thalvi-app/gen/
 
 # Built by .github/scripts/whisper-helper for packaging
 crates/thalvi-app/helpers/
+break-it-report/

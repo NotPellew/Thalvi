@@ -72,6 +72,10 @@ Branches, CI, checks and releases.
   target per entry point (spoken commands, spoken numbers, the settings file, recognizer frames), line-based text input so
   seeds are real inputs from tests; Heavy runs each for 60 s (27 Nov 2026, #732). Why: properties check rules someone wrote down,
   not malformed input. Rejected: a member of the root workspace (nightly for `cargo lint`), `arbitrary` structs (seeds unreadable).
+- **Pre-release break-it run on a rented sandbox.** `break-it cloud` runs the long stages (1,000,000 property cases, every fuzz
+  target, optionally all mutants) on a Docker cloud sandbox, 16 vCPU at about $1.12/h, started by hand (27 Nov 2026, #733).
+  Why: hours of fuzzing on the main PC competed with training and interactive work. Rejected: CI (no paid services), the
+  main PC, a long-lived cloud machine (a TTL and a trap delete each sandbox).
 - **Repeatable property cases, separate exploration.** Cargo defaults to 256 ChaCha cases with a fixed seed;
   exploratory runs override and record the seed, and failures become minimized regressions.
   Why: required checks need replayable inputs while exploration needs new ones. Rejected: fixed seeds alone.
