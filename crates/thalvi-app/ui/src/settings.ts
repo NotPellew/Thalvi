@@ -268,6 +268,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     lookStyles = styles;
     applyLookStyles(root, styles.looks[displayedLook]);
     live.lookStyles(styles);
+    if (search.value !== "") applyView();
   }
 
   function load(typing: Typing | null = null): void {

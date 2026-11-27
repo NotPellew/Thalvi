@@ -185,11 +185,16 @@ describe("the look's Customize section", () => {
     expect(accent()).toBe("#2bff88");
     expect(resetAccent().disabled).toBe(false);
     expect(resetFailed().disabled).toBe(true);
+    const search = pick('input[type="search"]') as HTMLInputElement;
+    search.value = "Failed";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(row("Accent").hidden).toBe(true);
     stub.backend.previewOverlay.mockClear();
 
     stub.themeChanged(LIGHT_STYLES);
     await settle();
     expect(accent()).toBe("#007a43");
+    expect(row("Accent").hidden).toBe(true);
     expect(resetAccent().disabled).toBe(true);
     expect(resetFailed().disabled).toBe(false);
     expect(stub.backend.previewOverlay).toHaveBeenCalledTimes(STATES.length);
