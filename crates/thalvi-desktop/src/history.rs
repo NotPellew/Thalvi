@@ -311,14 +311,21 @@ impl Store {
         receive
     }
 
-    /// Like [`set_corrected`](Self::set_corrected) on a blocking thread.
+    /// Like [`set_corrected`](Self::set_corrected) on a blocking thread; the receiver resolves
+    /// once the write has finished or failed, and a failure is logged.
     pub fn set_corrected_in_background(
         self: &Arc<Self>,
         config: HistoryConfig,
         id: u64,
         corrected: String,
-    ) {
-        self.in_background(move |store| store.set_corrected(config, id, corrected));
+    ) -> oneshot::Receiver<()> {
+        let (send, receive) = oneshot::channel();
+        self.in_background(move |store| {
+            let written = store.set_corrected(config, id, corrected);
+            let _ = send.send(());
+            written
+        });
+        receive
     }
 
     /// Like [`trim`](Self::trim) on a blocking thread, with failures logged.

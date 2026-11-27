@@ -3901,13 +3901,17 @@ describe("history", () => {
     expect(plain?.textContent).not.toContain("Your fix:");
   });
 
-  it("says so when nothing has been kept, and reads the list again whenever the page is opened", async () => {
-    const stub = await openHistory([], ENTRIES);
+  it("says so when nothing has been kept, and reads the list again when the page is opened or a fix arrives", async () => {
+    const fixed = "Remind me to call Cybrex2.";
+    const stub = await openHistory([], ENTRIES, [{ ...ENTRIES[0] as HistoryEntry, corrected: fixed }]);
     expect(root.querySelector(".entries")?.textContent).toBe("Nothing has been kept yet.");
     expect(stub.backend.getHistory).toHaveBeenCalledTimes(1);
     goTo("history");
     await settle();
     expect(cards()).toHaveLength(3);
+    stub.learningChanged({ suggestions: [], limit: null });
+    await settle();
+    expect(cards().map((card) => shown(card).text)).toEqual([fixed]);
   });
 
   it("deletes one entry by id and shows the list without it", async () => {
@@ -4086,8 +4090,13 @@ describe("last dictation", () => {
     if (corrected === null) expect(notes().some((line) => line.startsWith("Heard:"))).toBe(false);
   });
 
-  it("keeps the user's own edit instead of the fix when the draft is read again", async () => {
-    const stub = await openDraft({ ...DRAFT, corrected: FIX });
+  it("takes a fix that arrives later, but keeps the user's own edit instead", async () => {
+    const stub = await openDraft();
+    stub.backend.getDraft.mockImplementation(() => Promise.resolve({ ...DRAFT, corrected: FIX, text: FIX }));
+    stub.learningChanged({ suggestions: [], limit: null });
+    await settle();
+    expect(area().value).toBe(FIX);
+    expect(notes()).toContain(`Heard: ${DRAFT.original}`);
     edit("My own edit.");
     stub.backend.getDraft.mockImplementation(() => Promise.resolve({ ...DRAFT, corrected: FIX, text: "My own edit." }));
     stub.emit({ state: "listening" });

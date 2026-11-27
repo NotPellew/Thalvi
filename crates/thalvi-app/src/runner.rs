@@ -2069,7 +2069,10 @@ impl<H: Host + 'static> Settling<'_, H> {
                 if let Some(entry) = entry
                     && let Ok(Some(id)) = entry.await
                 {
-                    history.set_corrected_in_background(history_config, id, corrected.clone());
+                    // Settings rereads History on the learning event, so the fix is on disk first.
+                    let _ = history
+                        .set_corrected_in_background(history_config, id, corrected.clone())
+                        .await;
                 }
                 if let Some(id) = draft {
                     drafts.set_corrected(id, corrected);
@@ -4003,22 +4006,13 @@ mod tests {
         assert_eq!(view.suggestions[0].word, "Cybrex2");
         assert_eq!(view.suggestions[0].heard, "Cyber X2");
 
-        let entries = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let entries = history.list().unwrap();
-                if entries
-                    .first()
-                    .is_some_and(|entry| entry.corrected.is_some())
-                {
-                    return entries;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the history entry was written");
+        let entries = history.list().unwrap();
         assert_eq!(entries[0].text, "Cyber X2");
-        assert_eq!(entries[0].corrected.as_deref(), Some("Cybrex2"));
+        assert_eq!(
+            entries[0].corrected.as_deref(),
+            Some("Cybrex2"),
+            "the fix is saved before Settings is told to reread History"
+        );
         let draft = drafts.view().expect("the draft is shown");
         assert_eq!(draft.original, "Cyber X2");
         assert_eq!(draft.text, "Cybrex2");

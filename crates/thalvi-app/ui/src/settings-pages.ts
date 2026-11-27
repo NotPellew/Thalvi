@@ -2925,7 +2925,8 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
       say(done, "");
       say(problem, "");
     }
-    if (next !== null && next.id !== current?.id) text.value = startingText(next);
+    const untouched = current !== null && text.value === startingText(current);
+    if (next !== null && (next.id !== current?.id || untouched)) text.value = startingText(next);
     current = next;
     const hadFocus = editor.contains(document.activeElement);
     empty.hidden = next !== null;
@@ -2960,6 +2961,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   live.status = (status) => {
     if (!CAPTURE_STATES.includes(status.state)) refresh();
   };
+  backend.onLearningChanged(refresh);
   refresh();
 
   return {
@@ -3012,6 +3014,7 @@ function history(context: PageContext): HTMLElement[] {
       last.refresh();
     }
   };
+  backend.onLearningChanged(refresh);
   refresh();
 
   return [
