@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Observable checks for the rig's read-only model cache, hardlinks, stale-run pruning and Whisper helpers.
+# Observable checks for rig startup, model caching, stale-run pruning and Whisper helpers.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../../.." && pwd)
@@ -13,7 +13,13 @@ fail() { printf 'FAIL %s\n' "$1" >&2; status=1; }
 
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() {
-  local d
+  local d pidfile
+  for d in "${stubs[@]}"; do
+    if [ -s "$d/compositor.pid" ]; then
+      IFS= read -r pidfile < "$d/compositor.pid"
+      kill -- "-$pidfile" 2>/dev/null || true
+    fi
+  done
   for d in "${stubs[@]}"; do rm -rf -- "$d"; done
   for d in "${bases[@]}"; do rm -rf -- "$d"; done
 }
@@ -220,9 +226,95 @@ STUB
   pass 'whisper: --whisper DIR copies the helpers to APPDIR/usr/lib/Thalvi/whisper and sets APPDIR; a DIR without them stops'
 }
 
+test_hyprland_startup() {
+  local monitor_delay=$1 deadline=$2 stub start elapsed rc=0
+  fresh_base
+  stub=$(mktemp -d)
+  stubs+=("$stub")
+  cat > "$stub/bwrap" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+if [ "${!#}" != /tmp/supervisor.sh ]; then
+  printf 'Monitor fixture\n'
+  exit
+fi
+run=${LOG%/*}
+printf '%s\n' "$PPID" > "${0%/*}/compositor.pid"
+export RIG_W=1920 RIG_H=1080
+while [ "$1" != /tmp/supervisor.sh ]; do
+  if [ "$1" = --setenv ] && [ "$2" = DBUS_SESSION_BUS_ADDRESS ]; then
+    export DBUS_SESSION_BUS_ADDRESS="$3"
+  fi
+  shift
+done
+sed -e "s|/home/rig|$run/home|g" -e "s|/tmp/out|$run/out|g" \
+  -e "s|^RUN=.*|export RUN=$run/rt|" "$run/supervisor.sh" > "$run/fixture-supervisor.sh"
+exec bash "$run/fixture-supervisor.sh"
+STUB
+  cat > "$stub/fixture" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+case ${0##*/} in
+  cat)
+    case ${1:-} in /sys/class/drm/renderD*/device/vendor) echo 0x1002 ;; *) exec /bin/cat "$@" ;; esac ;;
+  dbus-daemon) ;;
+  wayland-info) echo "interface: 'wl_output'" ;;
+  kwin_wayland) cd "$RUN"; exec python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind("rig-outer")' ;;
+  Hyprland)
+    [ -n "$DBUS_SESSION_BUS_ADDRESS" ]
+    for i in $(seq 25); do echo "hyprland log line $i"; done
+    cd "$RUN"
+    mkdir -p hypr/fixture
+    exec python3 -c 'import signal,socket
+for path in ["wayland-1", "hypr/fixture/.socket.sock"]:
+    socket.socket(socket.AF_UNIX).bind(path)
+signal.pause()' ;;
+  hyprctl)
+    now=$(date +%s%3N)
+    [ -e "$RUN/monitor-probe" ] || printf '%s 0\n' "$now" > "$RUN/monitor-probe"
+    read -r first probes < "$RUN/monitor-probe"
+    (( probes += 1 ))
+    printf '%s %s\n' "$first" "$probes" > "$RUN/monitor-probe"
+    if [ "$RIG_TEST_MONITOR_DELAY" != never ] && (( now - first >= RIG_TEST_MONITOR_DELAY && probes > 100 )); then
+      echo '[{"name":"fixture"}]'
+    else
+      echo '[]'
+    fi ;;
+esac
+STUB
+  chmod +x "$stub/bwrap" "$stub/fixture"
+  local command
+  for command in cat dbus-daemon kwin_wayland wayland-info Hyprland hyprctl; do
+    ln -s fixture "$stub/$command"
+  done
+
+  start=$(date +%s%3N)
+  PATH="$stub:$PATH" THALVI_RIG_RENDER=hardware THALVI_RIG_STARTUP_TIMEOUT="$deadline" \
+    RIG_TEST_MONITOR_DELAY="$monitor_delay" timeout 30s "$rig" up \
+    > "$THALVI_RIG_BASE/stdout" 2> "$THALVI_RIG_BASE/stderr" || rc=$?
+  elapsed=$(( $(date +%s%3N) - start ))
+  if [ "$monitor_delay" != never ]; then
+    if [ "$rc" = 0 ] && [ "$elapsed" -ge 11000 ] && grep -q '^RUN_DIR=' "$THALVI_RIG_BASE/stdout"; then
+      pass 'Hyprland up waits for a monitor that appears after the old 10 s limit'
+    else
+      cat "$THALVI_RIG_BASE/stderr" >&2
+      fail "Hyprland up did not wait for the late monitor (exit $rc in ${elapsed}ms)"
+    fi
+  elif [ "$rc" = 1 ] && [ "$elapsed" -lt 8000 ] &&
+      grep -Fq 'timed out waiting for Hyprland monitors' "$THALVI_RIG_BASE/stderr" &&
+      diff -u <(seq -f 'hyprland log line %g' 6 25) <(grep '^hyprland log line ' "$THALVI_RIG_BASE/stderr"); then
+    pass 'Hyprland up times out at the monitor step and prints the last 20 Hyprland log lines'
+  else
+    cat "$THALVI_RIG_BASE/stderr" >&2
+    fail "Hyprland monitor timeout did not report the step and log tail within the deadline (exit $rc in ${elapsed}ms)"
+  fi
+}
+
 test_missing_model
 test_prune
 test_prune_keeps_build_named_by_relative_path
 test_models_are_hardlinked
 test_whisper_helpers
+test_hyprland_startup 11000 60
+test_hyprland_startup never 3
 exit "$status"
