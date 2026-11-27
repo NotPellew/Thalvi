@@ -2362,6 +2362,21 @@ mod tests {
         }
     }
 
+    const SPLICE_PIECES: [&str; 12] = [
+        "▁the",
+        "▁region",
+        "▁moves",
+        "▁for",
+        "▁every",
+        "▁ev",
+        "ery",
+        "▁other",
+        "▁side",
+        "▁of",
+        "▁hill",
+        "▁hills",
+    ];
+
     #[test]
     fn a_long_final_keeps_whole_words_at_the_tail_join() {
         const END: usize = 160;
@@ -2428,24 +2443,7 @@ mod tests {
                 "the region of the hills",
             ),
         ];
-        let pieces = Arc::new(
-            [
-                "▁the",
-                "▁region",
-                "▁moves",
-                "▁for",
-                "▁every",
-                "▁ev",
-                "ery",
-                "▁other",
-                "▁side",
-                "▁of",
-                "▁hill",
-                "▁hills",
-            ]
-            .map(String::from)
-            .to_vec(),
-        );
+        let pieces = Arc::new(SPLICE_PIECES.map(String::from).to_vec());
         let frames = |script: Script, offset: usize| {
             let mut frames = vec![Vec::new(); END - offset];
             for &(frame, piece) in script {
