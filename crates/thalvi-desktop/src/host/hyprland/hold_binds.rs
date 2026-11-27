@@ -816,7 +816,9 @@ mod tests {
 
     #[test]
     fn an_existing_program_is_refused_without_promising_reload_removes_it() {
-        let path = std::env::temp_dir().join(format!("thalvi-live-program-{}", std::process::id()));
+        // Quoted, a space and a backslash are part of the program's path.
+        let path =
+            std::env::temp_dir().join(format!("thalvi live\\program-{}", std::process::id()));
         std::fs::write(&path, "").unwrap();
         let command = format!("{} hold-start", quoted(&path).unwrap());
         let hypr = Compositor::new(vec![row("F9", false, "exec", &command)]);
