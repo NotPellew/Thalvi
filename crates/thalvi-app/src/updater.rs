@@ -89,7 +89,7 @@ impl Source for PluginSource {
     type Package = Update;
 
     fn unsupported(&self) -> Option<String> {
-        os::unsupported(&self.app)
+        os::unsupported()
     }
 
     async fn check(&self, channel: UpdateChannel) -> Result<Option<Found<Update>>, UpdateError> {

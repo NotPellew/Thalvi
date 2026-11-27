@@ -2,13 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use tauri::{AppHandle, Manager};
-
+use crate::appimage;
 use crate::update::RELEASES_PAGE;
 
 /// Why the running app cannot update itself, in words that say what to do instead.
-pub fn unsupported(app: &AppHandle) -> Option<String> {
-    Install::of(app.env().appimage.map(PathBuf::from)).unsupported(can_write)
+pub fn unsupported() -> Option<String> {
+    Install::of(appimage::path()).unsupported(can_write)
 }
 
 /// How this copy of Thalvi was installed, which decides whether it can replace itself.
@@ -86,12 +85,18 @@ mod tests {
 
     #[test]
     fn the_install_is_the_appimage_it_runs_from_or_a_loose_build() {
-        let image = || Some(PathBuf::from("/home/me/Thalvi.AppImage"));
-        assert_eq!(
-            Install::of(image()),
-            Install::AppImage(PathBuf::from("/home/me/Thalvi.AppImage"))
-        );
-        assert_eq!(Install::of(None), Install::Loose);
+        let image = "/home/me/Thalvi.AppImage";
+        for (value, expected) in [
+            (Some(image), Install::AppImage(PathBuf::from(image))),
+            (None, Install::Loose),
+            (Some(""), Install::Loose),
+        ] {
+            assert_eq!(
+                Install::of(appimage::from_env_value(value.map(Into::into))),
+                expected,
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
