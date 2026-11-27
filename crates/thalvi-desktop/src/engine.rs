@@ -251,7 +251,8 @@ pub enum EngineState {
     TranscribingLive {
         route: CaptureRoute,
     },
-    /// A released hold whose streaming recognizer is finishing the words said before the release.
+    /// A released hold whose recognizer was still behind: it is finishing the words said before
+    /// the release.
     Finishing {
         route: CaptureRoute,
     },
@@ -267,6 +268,13 @@ pub enum EngineState {
     StartingChat {
         again: bool,
     },
+}
+
+/// Capture feedback that needs to reach the desktop in order.
+pub enum Feedback<'a> {
+    State(&'a EngineState),
+    /// A normal streaming release before the overlay would show a finishing state.
+    StreamingHoldReleased,
 }
 
 /// Whether the live recognizer is Parakeet, which leaves out an English ending spoken after another language.
@@ -488,8 +496,8 @@ pub struct Parts<R, W, C> {
     pub hold: watch::Receiver<KeyState>,
     /// Tells the user about something that did not stop the capture.
     pub notice: Box<dyn Fn(&str)>,
-    /// Tells the app every state in order, including one a watch would replace before it is read.
-    pub status: Box<dyn Fn(&EngineState)>,
+    /// Tells the app every state and quiet streaming release in order.
+    pub status: Box<dyn Fn(Feedback<'_>)>,
     /// Listens for the ending phrases beside the recognizer; none when it could not be loaded.
     pub spotter: Option<Box<dyn KeywordSpotter>>,
     /// Why there is no spotter, for the first capture to tell the user once.
@@ -536,7 +544,7 @@ pub struct Engine<R, W, C> {
     http: reqwest::Client,
     recorder: Recorder,
     notice: Rc<dyn Fn(&str)>,
-    status: Rc<dyn Fn(&EngineState)>,
+    status: Rc<dyn Fn(Feedback<'_>)>,
     spotter: Option<Box<dyn KeywordSpotter>>,
     spotter_off: Option<String>,
     state: watch::Sender<EngineState>,
@@ -808,10 +816,10 @@ impl<S: RecognizerSession> Live<S> {
     fn waiting(&self) -> Option<EngineState> {
         let route = self.hold_route.filter(|_| self.text.pending().is_none())?;
         Some(match self.release {
+            Release::Behind(_) => EngineState::Finishing { route },
             Release::Tail(_) if self.session.buffers_audio() => {
                 EngineState::TranscribingLive { route }
             }
-            Release::Behind(_) | Release::Tail(_) => EngineState::Finishing { route },
             _ => return None,
         })
     }
@@ -1570,7 +1578,7 @@ where
 
     fn publish_state(
         state: &watch::Sender<EngineState>,
-        status: &dyn Fn(&EngineState),
+        status: &dyn Fn(Feedback<'_>),
         next: &EngineState,
     ) {
         let changed = state.send_if_modified(|current| {
@@ -1581,7 +1589,7 @@ where
             true
         });
         if changed {
-            status(next);
+            status(Feedback::State(next));
         }
     }
 
@@ -1849,6 +1857,7 @@ where
                     return Some(stop.into());
                 }
                 live.session.input_ended();
+                self.streaming_hold_released(live);
             }
             live.release = Release::Tail(Instant::now());
             self.publish(live);
@@ -2125,10 +2134,17 @@ where
                 return Some(Done::from(stop));
             }
             live.session.input_ended();
+            self.streaming_hold_released(live);
         }
         live.release = Release::Tail(Instant::now());
         self.publish(live);
         None
+    }
+
+    fn streaming_hold_released(&self, live: &Live<R::Session>) {
+        if live.text.pending().is_none() {
+            (self.status)(Feedback::StreamingHoldReleased);
+        }
     }
 
     /// Ends a released hold: what was said, with the words still being recognized, is pasted.

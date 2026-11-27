@@ -19,7 +19,7 @@ use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureError, CaptureOutcome, CpalCuePlayer, CuePlayer, Engine, EngineHandle, EngineState,
-    FrameSource, Parts, WakeDetector, WakeTrigger,
+    Feedback, FrameSource, Parts, WakeDetector, WakeTrigger,
 };
 use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
@@ -448,6 +448,7 @@ async fn load_spotter(
 
 struct PublisherState {
     view: View,
+    announced_finishing: bool,
     /// Incremented each time a saved settings change requiring a rebuild is queued for the runner.
     requested_apply: u64,
     /// Latest `requested_apply` whose `Runner::apply` has completed (including `resume_listening`).
@@ -502,6 +503,7 @@ impl Publisher {
                 requested_apply: 0,
                 completed_apply: 0,
                 applying: false,
+                announced_finishing: false,
             }),
             out,
             rebuilding: watch::channel(false).0,
@@ -520,16 +522,23 @@ impl Publisher {
             *current = state.view.rebuilding;
             changed
         });
+        let finishing = matches!(
+            status,
+            Status::Finishing { .. } | Status::Transcribing { .. }
+        );
         let mut spoken = None;
         self.out.send_if_modified(|current| {
             if *current == status {
                 return false;
             }
-            spoken = self.announcements.for_change(current, &status);
+            if !finishing || !state.announced_finishing {
+                spoken = self.announcements.for_change(current, &status);
+            }
             *current = status;
             true
         });
         if let Some((announcer, words)) = spoken {
+            state.announced_finishing |= finishing;
             announcer.announce(&words);
         }
         result
@@ -711,11 +720,27 @@ impl Publisher {
         })
     }
 
-    /// Publishes every engine state as the engine produces it, so a state another reader would
-    /// miss is still announced in order.
-    fn status_sink(self: &Arc<Self>) -> Box<dyn Fn(&EngineState)> {
+    /// Publishes each state and release in order, even if a watch would skip it.
+    fn status_sink(self: &Arc<Self>) -> Box<dyn Fn(Feedback<'_>)> {
         let publisher = Arc::clone(self);
-        Box::new(move |engine| publisher.update(|view| view.engine = engine.clone()))
+        Box::new(move |feedback| match feedback {
+            Feedback::State(engine) => publisher.mutate(|state| {
+                if matches!(engine, EngineState::StartingCapture) {
+                    state.announced_finishing = false;
+                }
+                state.view.engine = engine.clone();
+            }),
+            Feedback::StreamingHoldReleased => {
+                let mut state = publisher
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if !state.announced_finishing {
+                    state.announced_finishing = true;
+                    publisher.announcements.finishing();
+                }
+            }
+        })
     }
 }
 

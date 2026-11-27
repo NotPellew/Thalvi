@@ -23,10 +23,10 @@ deferred reload after download, and waiting for an on-device load. Their mapped 
 switching happens after capture; notices, metrics and endpoint payload changes
 add no delivery path. `Control::Overlay` (8df760f) returns false from `Requests::ends`, so it never sets `ended` and neither admits nor blocks delivery, the same as `Apply` for this property; it is not one of the modeled controls. No product promise or bound changed in this maintenance.
 
-Status announcements (#394) publish engine states in order. A streaming hold
-reports Finishing after release as it waits for its last words. Status updates
-only publish display and screen-reader feedback. The control receive points,
-cancellation writes, release waits and delivery admission are unchanged.
+Status announcements (#394) publish engine states and streaming hold releases
+in order. Display reads the same states and the screen reader can also hear
+Finishing when a released hold is waiting for its last words. These synchronous
+notifications add no control receive, cancellation write or delivery path.
 
 The one-recognizer change (#727) removes the extra recognizers, the chat-model
 merge of their texts and the final pass. `Engine::conclude` returns the live

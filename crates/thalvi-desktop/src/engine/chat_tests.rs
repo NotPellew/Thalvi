@@ -80,7 +80,11 @@ async fn writing_uses_the_owned_runtime_and_a_second_crash_stays_failed() {
             chat: Some(chat),
             hold,
             notice: Box::new(|_| {}),
-            status: Box::new(move |state| recorded.borrow_mut().push(state.clone())),
+            status: Box::new(move |event| {
+                if let Feedback::State(state) = event {
+                    recorded.borrow_mut().push(state.clone());
+                }
+            }),
             spotter: None,
             spotter_off: None,
         },

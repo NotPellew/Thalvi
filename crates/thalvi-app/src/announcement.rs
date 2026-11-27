@@ -7,6 +7,8 @@ use thalvi_desktop::host::StatusAnnouncer;
 
 use crate::status::{FailureKind, Status};
 
+const FINISHING: &str = "Finishing";
+
 /// Announces status changes to the desktop's screen reader, in the order they are published.
 pub(crate) struct Announcements {
     announcer: Option<Arc<dyn StatusAnnouncer>>,
@@ -15,6 +17,12 @@ pub(crate) struct Announcements {
 impl Announcements {
     pub(crate) fn new(announcer: Option<Arc<dyn StatusAnnouncer>>) -> Self {
         Self { announcer }
+    }
+
+    pub(crate) fn finishing(&self) {
+        if let Some(announcer) = self.announcer.as_deref() {
+            announcer.announce(FINISHING);
+        }
     }
 
     pub(crate) fn for_change(
@@ -36,7 +44,7 @@ fn announcement(previous: &Status, next: &Status) -> Option<String> {
                 Status::Finishing { .. } | Status::Transcribing { .. }
             ) =>
         {
-            Some("Finishing".to_owned())
+            Some(FINISHING.to_owned())
         }
         Status::Writing { .. } | Status::Thinking { .. }
             if !matches!(previous, Status::Writing { .. } | Status::Thinking { .. }) =>
