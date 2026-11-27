@@ -361,6 +361,25 @@ mod tests {
         format!("heard {request}")
     }
 
+    /// Waits for the kernel to refuse a connection to the stale socket.
+    fn wait_until_refused(socket: PathBuf) {
+        let (probe, result) = std::sync::mpsc::channel();
+        // A connect can block if the listener's accept queue fills.
+        std::thread::spawn(move || {
+            let error = loop {
+                match UnixStream::connect(&socket) {
+                    Ok(_) => std::thread::yield_now(),
+                    Err(error) => break error,
+                }
+            };
+            let _ = probe.send(error);
+        });
+        let error = result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the stale socket did not refuse a connection within five seconds");
+        assert_eq!(error.kind(), ErrorKind::ConnectionRefused, "{error}");
+    }
+
     #[test]
     fn a_client_is_answered_for_its_request_until_the_app_stops_serving() {
         for socket_exists in [true, false] {
@@ -388,8 +407,10 @@ mod tests {
     fn nothing_answers_when_no_app_runs_or_it_died_leaving_its_socket() {
         let dir = Dir::new("stale", 0o700);
         assert_eq!(ask(&dir, "state"), Ok(None), "no socket");
-        drop(UnixListener::bind(dir.socket()).unwrap());
-        assert!(dir.socket().exists());
+        let socket = dir.socket();
+        drop(UnixListener::bind(&socket).unwrap());
+        assert!(socket.exists());
+        wait_until_refused(socket);
         assert_eq!(ask(&dir, "state"), Ok(None), "a socket nothing listens on");
         let server = serve_in(&dir.0, me(), SHORT, echo).unwrap();
         assert_eq!(
