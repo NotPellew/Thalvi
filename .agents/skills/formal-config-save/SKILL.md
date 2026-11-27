@@ -210,7 +210,7 @@ three invariants are unchanged.
 | `crates/thalvi-app/src/app.rs`: `SyncedConfig::wake_head_downloaded` (from `AppState::wake_head_downloaded`, which `commands::download_wake` calls after a wake download, #616) | Not a writer: under the save lock it reads `current` and, when it selects the downloaded head, sends it as `Control::Apply`. That is the `Send` of a save that changed nothing; it writes neither the file nor `current`, and what it sends is what both already hold, so it cannot reorder behind a save. |
 | `crates/thalvi-app/src/settings.rs`: `Store::start` (from `AppState::start` in `app.rs`'s `setup`) | Not modeled: a first start writes the defaults, and a load that drops a saved Thalvi server entry writes the normalized config, both through `Store::write` before `setup` registers the state, serves requests or opens Settings, so no other writer exists yet. |
 | `crates/thalvi-app/src/update.rs`: `Marker::write` and update-channel reads | Not a config writer: the updater's atomic write targets the separate `update.json` marker. The channel is read from `AppState::config`; changing it is covered by the Settings form writer above. |
-| `crates/thalvi-desktop/src/host/channel.rs`: `accept`; `windows/pipe.rs`: `accept`, `answer` | Why `A` and `L` run concurrently: one `thalvi-request` thread per connection, up to `MAX_CONNECTIONS`. |
+| `crates/thalvi-desktop/src/host/channel.rs`: `accept`, `Serving::drop`; `windows/pipe.rs`: `accept`, `answer` | `A` and `L` run on independent request threads. On Linux, shutting down the listening socket stops acceptance and lets existing request threads finish independently. |
 
 ## Run
 
