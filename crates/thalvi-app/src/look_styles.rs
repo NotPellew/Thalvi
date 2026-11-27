@@ -6,14 +6,20 @@ use serde_json::{Map, Value, json};
 use thalvi_desktop::config::{DesktopConfig, Look};
 use thalvi_desktop::theme::{self, Color, Descriptor, Scheme, Style};
 
-/// The property descriptors, every look's resolved custom properties and each look's resolved
-/// value for every descriptor that applies to it.
+/// The property descriptors, every look's CSS tokens, and its active scheme and resolved values.
 #[must_use]
-pub fn response(config: &DesktopConfig) -> Value {
+pub fn response(config: &DesktopConfig, dark: bool) -> Value {
     let mut looks = Map::new();
+    let mut schemes = Map::new();
     let mut values = Map::new();
     for look in [Look::Neon, Look::Holo, Look::Gunmetal] {
         let style = Style::resolve(look, config.themes.of(look));
+        let scheme = if !dark && style.light.is_some() {
+            "light"
+        } else {
+            "dark"
+        };
+        schemes.insert(look.name().to_owned(), scheme.into());
         looks.insert(
             look.name().to_owned(),
             Value::Object(tokens(look, &style).into_iter().collect()),
@@ -24,15 +30,20 @@ pub fn response(config: &DesktopConfig) -> Value {
                 theme::descriptors()
                     .iter()
                     .filter(|property| property.looks.contains(&look))
-                    .map(|property| (property.id.to_owned(), resolved(property, &style.dark)))
+                    .map(|property| {
+                        (
+                            property.id.to_owned(),
+                            resolved(property, style.scheme(dark)),
+                        )
+                    })
                     .collect(),
             ),
         );
     }
-    json!({ "properties": properties(), "looks": looks, "values": values })
+    json!({ "properties": properties(), "looks": looks, "schemes": schemes, "values": values })
 }
 
-/// One descriptor's resolved value in a look's dark scheme.
+/// One descriptor's resolved value in the active scheme.
 fn resolved(property: &Descriptor, scheme: &Scheme) -> Value {
     match property.id {
         "colors.background" => scheme.background.to_hex().into(),
@@ -621,9 +632,9 @@ impl SettingsStyle {
             "--focus-glow",
             if neon && (s.glow - d.glow).abs() > f32::EPSILON {
                 format!(
-                    "0 0 {} {}",
+                    "0 0 {} color-mix(in srgb, var(--neon) {}%, transparent)",
                     px(4.0 + 12.0 * s.glow),
-                    with_alpha(s.accent, (0.15 + 0.5 * (s.glow - d.glow)).clamp(0.0, 1.0))
+                    number((15.0 + 50.0 * (s.glow - d.glow)).clamp(0.0, 100.0))
                 )
             } else {
                 "none".to_owned()
@@ -1484,7 +1495,7 @@ mod tests {
 
     #[test]
     fn the_committed_fixture_matches_what_the_window_reads() {
-        let resolved = response(&config("{}"));
+        let resolved = response(&config("{}"), false);
         // `THALVI_WRITE_LOOK_FIXTURE=1 cargo test -p thalvi-app look_styles` regenerates the fixture.
         if std::env::var_os("THALVI_WRITE_LOOK_FIXTURE").is_some() {
             let text = serde_json::to_string_pretty(&resolved).unwrap();
@@ -1501,12 +1512,15 @@ mod tests {
 
     #[test]
     fn an_override_reaches_its_look_and_a_suspended_or_unreadable_one_keeps_the_built_in_look() {
-        let value = response(&config(
-            r##"{"themes":{"version":1,
+        let value = response(
+            &config(
+                r##"{"themes":{"version":1,
                 "holo":{"colors":{"dark":{"accent":"#ffffff"}}},
                 "gunmetal":{"suspended":true,"colors":{"dark":{"accent":"#ffffff"}}},
                 "neon":{"colors":{"dark":{"accent":"red"}}}}}"##,
-        ));
+            ),
+            false,
+        );
         assert_eq!(value["looks"]["holo"]["--neon"], "#ffffff");
         assert_eq!(value["looks"]["gunmetal"]["--neon"], "#6bf8ff");
         assert_eq!(
@@ -1517,7 +1531,7 @@ mod tests {
 
     #[test]
     fn every_custom_property_the_stylesheets_use_is_emitted_for_every_look() {
-        let value = response(&config("{}"));
+        let value = response(&config("{}"), false);
         let css = concat!(
             include_str!("../ui/src/theme.css"),
             include_str!("../ui/src/settings.css"),
@@ -1550,7 +1564,7 @@ mod tests {
 
     #[test]
     fn every_settings_property_changes_what_the_window_reads_for_its_looks() {
-        let base = response(&config("{}"));
+        let base = response(&config("{}"), false);
         let cases: &[(&str, &str)] = &[
             ("neon", r##"{"colors":{"dark":{"background":"#010203"}}}"##),
             ("neon", r##"{"colors":{"dark":{"surface":"#010203"}}}"##),
@@ -1591,9 +1605,12 @@ mod tests {
             ("neon", r#"{"motion":{"pulse":false}}"#),
         ];
         for (look, overrides) in cases {
-            let themed = response(&config(&format!(
-                r#"{{"themes":{{"version":1,"{look}":{overrides}}}}}"#
-            )));
+            let themed = response(
+                &config(&format!(
+                    r#"{{"themes":{{"version":1,"{look}":{overrides}}}}}"#
+                )),
+                false,
+            );
             assert_ne!(
                 themed["looks"][look], base["looks"][look],
                 "{look} {overrides} changed nothing the settings window reads"
@@ -1603,7 +1620,7 @@ mod tests {
 
     #[test]
     fn each_look_reports_exactly_its_descriptors_with_the_right_value_type() {
-        let value = response(&config("{}"));
+        let value = response(&config("{}"), false);
         assert!(value["values"].is_object(), "the response has no values");
         for look in [Look::Neon, Look::Holo, Look::Gunmetal] {
             let values = &value["values"][look.name()];
@@ -1646,31 +1663,53 @@ mod tests {
 
     #[test]
     fn values_show_a_looks_override_as_written_and_keep_other_and_suspended_looks_at_defaults() {
-        let changed = response(&config(
-            r##"{"themes":{"version":1,"holo":{"colors":{"dark":{"accent":"#ff0000"}},"font":{"scale":1.1},"decoration":{"mesh":0.07}}}}"##,
-        ));
-        let scale = changed["properties"]
-            .as_array()
-            .and_then(|properties| {
-                properties
-                    .iter()
-                    .find(|property| property["id"] == "font.scale")
-            })
-            .expect("font.scale is offered");
-        assert_eq!(
-            (&scale["min"], &scale["max"], &scale["step"]),
-            (&json!(0.85), &json!(1.25), &json!(0.05))
+        let themed = config(
+            r##"{"themes":{"version":1,
+                "holo":{"colors":{"dark":{"accent":"#ff0000"}},"font":{"scale":1.1},"decoration":{"mesh":0.07}},
+                "neon":{"colors":{"light":{"accent":"#a00070"},"dark":{"accent":"#61d8ff"}},"glow":{"strength":1}}}}"##,
         );
-        assert_eq!(changed["values"]["holo"]["colors.accent"], "#ff0000");
-        assert_eq!(changed["values"]["holo"]["font.scale"], json!(1.1));
-        assert_eq!(changed["values"]["holo"]["decoration.mesh"], json!(0.07));
-        assert_ne!(changed["values"]["neon"]["colors.accent"], "#ff0000");
-        assert_ne!(changed["values"]["gunmetal"]["colors.accent"], "#ff0000");
-        assert_eq!(changed["values"]["neon"]["font.scale"], json!(1.0));
+        for (dark, scheme, accent) in [(false, "light", "#a00070"), (true, "dark", "#61d8ff")] {
+            let changed = response(&themed, dark);
+            let scale = changed["properties"]
+                .as_array()
+                .and_then(|properties| {
+                    properties
+                        .iter()
+                        .find(|property| property["id"] == "font.scale")
+                })
+                .expect("font.scale is offered");
+            assert_eq!(
+                (&scale["min"], &scale["max"], &scale["step"]),
+                (&json!(0.85), &json!(1.25), &json!(0.05))
+            );
+            assert_eq!(
+                changed["schemes"],
+                json!({"gunmetal": "dark", "holo": "dark", "neon": scheme})
+            );
+            assert_eq!(changed["values"]["holo"]["colors.accent"], "#ff0000");
+            assert_eq!(changed["values"]["holo"]["font.scale"], json!(1.1));
+            assert_eq!(changed["values"]["holo"]["decoration.mesh"], json!(0.07));
+            assert_eq!(changed["values"]["neon"]["colors.accent"], accent);
+            assert_ne!(changed["values"]["gunmetal"]["colors.accent"], "#ff0000");
+            assert_eq!(changed["values"]["neon"]["font.scale"], json!(1.0));
+            assert_eq!(
+                changed["looks"]["neon"]["--neon"],
+                "light-dark(#a00070, #61d8ff)"
+            );
+            assert!(
+                changed["looks"]["neon"]["--focus-glow"]
+                    .as_str()
+                    .unwrap()
+                    .contains("var(--neon)")
+            );
+        }
 
-        let suspended = response(&config(
-            r##"{"themes":{"version":1,"holo":{"suspended":true,"colors":{"dark":{"accent":"#ff0000"}},"font":{"scale":1.1}}}}"##,
-        ));
+        let suspended = response(
+            &config(
+                r##"{"themes":{"version":1,"holo":{"suspended":true,"colors":{"dark":{"accent":"#ff0000"}},"font":{"scale":1.1}}}}"##,
+            ),
+            false,
+        );
         assert_eq!(suspended["values"]["holo"]["colors.accent"], "#6bf8ff");
         assert_eq!(suspended["values"]["holo"]["font.scale"], json!(1.0));
     }

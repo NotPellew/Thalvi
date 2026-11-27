@@ -412,6 +412,12 @@ impl AppState {
         self.dark.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn set_dark(&self, dark: bool) {
+        if self.dark.swap(dark, Ordering::SeqCst) != dark {
+            self.overlay.set_dark(dark);
+        }
+    }
+
     /// Builds a settings form from the config now in use, saves it and takes it into effect,
     /// ordered against every other save; see `SyncedConfig::save_form`.
     ///
@@ -1046,26 +1052,16 @@ fn create_windows(app: &AppHandle) -> tauri::Result<()> {
             // Built at start, when a login start may hold the foreground; `show_settings` focuses it.
             .focused(false)
             .build()?;
-    // The overlay follows the system's theme as the settings window sees it, as the web views did.
+    // Seed the overlay's theme before the Settings webview reports its preference.
     if let Ok(theme) = settings.theme() {
-        let state = app.state::<AppState>();
-        let dark = theme == Theme::Dark;
-        state.dark.store(dark, Ordering::SeqCst);
-        state.overlay.set_dark(dark);
+        app.state::<AppState>().set_dark(theme == Theme::Dark);
     }
-    let (window, handle) = (settings.clone(), app.clone());
-    settings.on_window_event(move |event| match event {
-        WindowEvent::CloseRequested { api, .. } => {
+    let window = settings.clone();
+    settings.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             let _ = window.hide();
         }
-        WindowEvent::ThemeChanged(theme) => {
-            let state = handle.state::<AppState>();
-            let dark = *theme == Theme::Dark;
-            state.dark.store(dark, Ordering::SeqCst);
-            state.overlay.set_dark(dark);
-        }
-        _ => {}
     });
     Ok(())
 }
