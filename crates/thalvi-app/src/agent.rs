@@ -951,6 +951,8 @@ async fn metrics_summary(running: &impl Running) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[cfg(target_os = "linux")]
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex, PoisonError};
 
     use thalvi_desktop::config::Look;
@@ -969,6 +971,16 @@ mod tests {
 
     /// Long enough for the fake engine to answer, short enough for a control it ignores.
     const WAIT: Duration = Duration::from_millis(150);
+
+    #[cfg(target_os = "linux")]
+    const TEARDOWN_WAIT: Duration = Duration::from_secs(5);
+
+    #[cfg(target_os = "linux")]
+    struct QuitGate {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        cleaned: mpsc::Sender<()>,
+    }
 
     fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -1000,6 +1012,8 @@ mod tests {
         feed_ending: Mutex<FeedEnd>,
         downloaded: Mutex<Vec<(Catalog, String)>>,
         quit: AtomicUsize,
+        #[cfg(target_os = "linux")]
+        quit_gate: Mutex<Option<QuitGate>>,
         overlay: AtomicBool,
         copy_refused: AtomicBool,
         ignoring: AtomicBool,
@@ -1047,6 +1061,8 @@ mod tests {
                 feed_ending: Mutex::new(FeedEnd::Played),
                 downloaded: Mutex::new(Vec::new()),
                 quit: AtomicUsize::new(0),
+                #[cfg(target_os = "linux")]
+                quit_gate: Mutex::new(None),
                 overlay: AtomicBool::new(true),
                 copy_refused: AtomicBool::new(false),
                 ignoring: AtomicBool::new(false),
@@ -1082,6 +1098,14 @@ mod tests {
     impl Drop for Fake {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.folder);
+            #[cfg(target_os = "linux")]
+            if let Some(gate) = self
+                .quit_gate
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                let _ = gate.cleaned.send(());
+            }
         }
     }
 
@@ -1284,6 +1308,11 @@ mod tests {
         }
 
         fn quit(&self) {
+            #[cfg(target_os = "linux")]
+            if let Some(gate) = lock(&self.quit_gate).as_ref() {
+                gate.entered.send(()).unwrap();
+                gate.release.recv_timeout(TEARDOWN_WAIT).unwrap();
+            }
             self.quit.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -2104,6 +2133,47 @@ mod tests {
             );
             assert_eq!(lock(&rig.fake.presses).take_lost(), 0, "{name}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_old_request_worker_can_finish_while_the_next_rig_serves() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let first = Rig::new("late-worker", "{}");
+        let (entered, request_entered) = mpsc::channel();
+        let (release, may_finish) = mpsc::channel();
+        let (cleaned, old_folder_cleaned) = mpsc::channel();
+        *lock(&first.fake.quit_gate) = Some(QuitGate {
+            entered,
+            release: may_finish,
+            cleaned,
+        });
+        let mut client = UnixStream::connect(first.socket.0.join("thalvi.sock")).unwrap();
+        writeln!(client, "{}", Request::Quit.line()).unwrap();
+        request_entered.recv_timeout(TEARDOWN_WAIT).unwrap();
+        drop(first);
+
+        let second = Rig::new("late-worker", "{}");
+        release.send(()).unwrap();
+        old_folder_cleaned.recv_timeout(TEARDOWN_WAIT).unwrap();
+        let reply = thalvi_desktop::host::Desktop::send_request_in(
+            &second.socket.0,
+            &Request::Status.line(),
+            TEARDOWN_WAIT,
+        );
+        let (stopped, server_stopped) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(second);
+            let _ = stopped.send(());
+        });
+        let reply = reply.unwrap().expect("the next rig still has its socket");
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply).unwrap()["state"],
+            "listening"
+        );
+        server_stopped.recv_timeout(TEARDOWN_WAIT).unwrap();
     }
 
     /// Each status with what `state` says of it: its word, the overlay's and the recognizer's.

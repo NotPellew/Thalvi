@@ -358,13 +358,25 @@ mod tests {
 
     #[test]
     fn a_client_is_answered_for_its_request_until_the_app_stops_serving() {
-        let dir = Dir::new("serve", 0o700);
-        let server = serve_in(&dir.0, me(), SHORT, echo).unwrap();
-        assert_eq!(ask(&dir, "state").unwrap(), Some("heard state".to_owned()));
-        assert_eq!(ask(&dir, "pause").unwrap(), Some("heard pause".to_owned()));
-        drop(server);
-        assert_eq!(ask(&dir, "state"), Ok(None));
-        assert!(!dir.socket().exists(), "the socket is removed");
+        for socket_exists in [true, false] {
+            let dir = Dir::new("serve", 0o700);
+            let server = serve_in(&dir.0, me(), SHORT, echo).unwrap();
+            assert_eq!(ask(&dir, "state").unwrap(), Some("heard state".to_owned()));
+            assert_eq!(ask(&dir, "pause").unwrap(), Some("heard pause".to_owned()));
+            if !socket_exists {
+                std::fs::remove_file(dir.socket()).unwrap();
+            }
+            let (stopped, server_stopped) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                drop(server);
+                let _ = stopped.send(());
+            });
+            server_stopped
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the server stops even if its socket file is gone");
+            assert_eq!(ask(&dir, "state"), Ok(None));
+            assert!(!dir.socket().exists(), "the socket is removed");
+        }
     }
 
     #[test]
