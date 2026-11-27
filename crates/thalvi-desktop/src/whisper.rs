@@ -1677,7 +1677,19 @@ mod tests {
         type Process = FakeProcess;
 
         fn launch(&self, launch: &Launch) -> Result<FakeProcess, HelperError> {
-            let plan = locked(&self.plans).pop_front().unwrap_or_default();
+            let mut plans = locked(&self.plans);
+            let listener = match plans.front().and_then(|plan| plan.exits_with) {
+                Some(_) => None,
+                None => match std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, launch.port)) {
+                    // Another test's socket took the free port first; the real helper exits so, and is retried.
+                    Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                        return Ok(FakeProcess::port_taken());
+                    }
+                    listener => Some(listener.unwrap()),
+                },
+            };
+            let plan = plans.pop_front().unwrap_or_default();
+            drop(plans);
             let killed = Arc::new(AtomicBool::new(false));
             let server = Arc::new(Server {
                 health_calls: AtomicUsize::new(0),
@@ -1691,9 +1703,7 @@ mod tests {
                 killed: Arc::clone(&killed),
             });
             let exit = Arc::new(Mutex::new(plan.exits_with.map(|code| Exit(Some(code)))));
-            let handle = plan.exits_with.is_none().then(|| {
-                let listener =
-                    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, launch.port)).unwrap();
+            let handle = listener.map(|listener| {
                 listener.set_nonblocking(true).unwrap();
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 let app = Router::new()
@@ -1717,6 +1727,17 @@ mod tests {
                 server: Mutex::new(handle),
                 killed,
             })
+        }
+    }
+
+    impl FakeProcess {
+        fn port_taken() -> Self {
+            Self {
+                output: vec!["couldn't bind to server socket: hostname=127.0.0.1".to_owned()],
+                exit: Arc::new(Mutex::new(Some(Exit(Some(1))))),
+                server: Mutex::new(None),
+                killed: Arc::default(),
+            }
         }
     }
 
