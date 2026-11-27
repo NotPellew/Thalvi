@@ -1,5 +1,6 @@
 //! Owns the `NeMo` transducers (LSTM predictor, joiner and a cache-aware or buffered encoder) on ONNX Runtime, and the model choice.
 
+use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -1092,6 +1093,17 @@ impl ReplayState {
     }
 }
 
+#[derive(Clone, Copy)]
+struct WordStart {
+    frame: usize,
+    token: usize,
+}
+
+struct ReplayWord {
+    start: WordStart,
+    text: String,
+}
+
 /// Replays the tentative suffix with left context; a decoding that goes quiet while the speech
 /// goes on is replayed from the start, so the text never stops following a long dictation.
 pub struct Replayed<B> {
@@ -1238,26 +1250,57 @@ impl<B: Backend> Replayed<B> {
             .is_some_and(|piece| piece.starts_with('\u{2581}'))
     }
 
-    /// The tokens of the first word of `frames`.
-    fn first_word(&self, frames: &[Vec<usize>]) -> Vec<usize> {
-        let mut word = Vec::new();
-        for token in frames.iter().flatten() {
-            if !word.is_empty() && self.begins(*token) {
-                break;
+    fn words(&self, frames: &[Vec<usize>]) -> Vec<ReplayWord> {
+        let mut words: Vec<ReplayWord> = Vec::new();
+        for (frame, tokens) in frames.iter().enumerate() {
+            for (token, &id) in tokens.iter().enumerate() {
+                let Some(piece) = self.pieces.get(id) else {
+                    continue;
+                };
+                if piece.starts_with('▁') {
+                    words.push(ReplayWord {
+                        start: WordStart { frame, token },
+                        text: String::new(),
+                    });
+                }
+                if let Some(word) = words.last_mut() {
+                    word.text.push_str(piece);
+                }
             }
-            word.push(*token);
         }
-        word
+        words
     }
 
-    /// The tokens of the last word of `frames`.
-    fn last_word(&self, frames: &[Vec<usize>]) -> Vec<usize> {
-        let tokens: Vec<usize> = frames.iter().flatten().copied().collect();
-        let from = tokens
-            .iter()
-            .rposition(|token| self.begins(*token))
-            .unwrap_or(0);
-        tokens[from..].to_vec()
+    /// Uses the words after the cut to distinguish repeated words in the shared audio.
+    fn overlap(
+        shown: &[ReplayWord],
+        heard: &[ReplayWord],
+        cut: usize,
+    ) -> Option<(WordStart, WordStart)> {
+        let through_cut = shown.partition_point(|word| word.start.frame <= cut);
+        let mut best = None;
+        let mut best_score = (0, Reverse(usize::MAX));
+        for (left, shown_word) in shown[..through_cut].iter().enumerate().rev() {
+            for (right, heard_word) in heard.iter().enumerate() {
+                let distance = shown_word.start.frame.abs_diff(heard_word.start.frame);
+                if heard_word.start.frame > shown_word.start.frame + Self::LEFT {
+                    break;
+                }
+                let matching = shown[left..]
+                    .iter()
+                    .zip(&heard[right..])
+                    .take_while(|(a, b)| {
+                        a.text == b.text && a.start.frame.abs_diff(b.start.frame) <= Self::LEFT
+                    })
+                    .count();
+                let score = (matching, Reverse(distance));
+                if matching > 0 && score > best_score {
+                    best = Some((shown_word.start, heard_word.start));
+                    best_score = score;
+                }
+            }
+        }
+        best
     }
 
     /// Hears the last words again, from the stretch heard before the words the windowed decoding
@@ -1267,33 +1310,51 @@ impl<B: Backend> Replayed<B> {
         let Some(start) = self.tail_start(end) else {
             return Ok(None);
         };
-        let mut padded = audio.to_vec();
-        padded.resize(padded.len() + 12_800, 0.0);
         let offset = start.saturating_sub(Self::LEFT);
-        let heard = self.hear(&padded[offset * Self::FRAME..])?;
+        let mut padded = audio[offset * Self::FRAME..].to_vec();
+        padded.resize(padded.len() + 12_800, 0.0);
+        let heard = self.hear(&padded)?;
         let to = (end - offset).min(heard.count);
-        let frames = self.backend.decode(
+        let mut frames = self.backend.decode(
             &heard.values,
             heard.stride,
             0..to,
             &mut ReplayState::default().decoding(),
         )?;
-        if frames.iter().flatten().next().is_none() {
+        if frames.iter().all(Vec::is_empty) {
             return Ok(None);
         }
-        let mut all = self.shown[..start].to_vec();
-        let mut tail: Vec<Vec<usize>> = frames.into_iter().skip(Self::LEFT).collect();
-        // The window hears a word before `start` again, so the text does not say it twice.
-        let repeated = self.first_word(&tail);
-        if !repeated.is_empty() && repeated == self.last_word(&all) {
-            let mut left = repeated.len();
-            for frame in &mut tail {
-                let take = left.min(frame.len());
-                frame.drain(..take);
-                left -= take;
-            }
-        }
-        all.extend(tail);
+        let live = self.words(&self.shown[offset..]);
+        let tail = self.words(&frames);
+        let cut = start - offset;
+        let (left, right) = if let Some(pair) = Self::overlap(&live, &tail, cut) {
+            pair
+        } else if let Some(word) = tail.iter().find(|word| word.start.frame >= cut) {
+            (
+                WordStart {
+                    frame: cut,
+                    token: 0,
+                },
+                word.start,
+            )
+        } else {
+            let mut all = self.shown[..start].to_vec();
+            all.resize_with(offset + frames.len(), Vec::new);
+            return Ok(Some(all));
+        };
+        let keep = offset + left.frame;
+        let join = offset + right.frame;
+        let before = keep.min(join);
+        // If the tail puts the shared word earlier, keep any displaced live tokens in the join frame.
+        let prefix = self.shown[before..keep]
+            .iter()
+            .flatten()
+            .chain(&self.shown[keep][..left.token])
+            .copied();
+        frames[right.frame].splice(..right.token, prefix);
+        let mut all = self.shown[..before].to_vec();
+        all.resize_with(join, Vec::new);
+        all.extend(frames.into_iter().skip(right.frame));
         Ok(Some(all))
     }
 }
@@ -1683,53 +1744,71 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_is_a_model_only_when_all_four_files_are_in_it() {
-        let cases: [(&str, &[&str], Result<(), FolderError>); 7] = [
-            ("all", &FILES, Ok(())),
-            ("no-encoder", &FILES[1..], missing(&["encoder.int8.onnx"])),
+    fn a_folder_is_a_model_only_when_all_four_files_are_in_it_and_each_missing_one_is_named() {
+        // (tag, files present, names that are directories, the verdict, the message when it is a refusal)
+        let cases = [
+            ("all", &FILES[..], &[][..], Ok(()), ""),
+            (
+                "no-encoder",
+                &FILES[1..],
+                &[],
+                missing(&["encoder.int8.onnx"]),
+                "Missing required file: encoder.int8.onnx",
+            ),
             (
                 "no-decoder",
                 &[FILES[0], FILES[2], FILES[3]],
+                &[],
                 missing(&["decoder.int8.onnx"]),
+                "Missing required file: decoder.int8.onnx",
             ),
             (
                 "no-joiner",
                 &[FILES[0], FILES[1], FILES[3]],
+                &[],
                 missing(&["joiner.int8.onnx"]),
+                "Missing required file: joiner.int8.onnx",
             ),
-            ("no-tokens", &FILES[..3], missing(&["tokens.txt"])),
+            (
+                "no-tokens",
+                &FILES[..3],
+                &[],
+                missing(&["tokens.txt"]),
+                "Missing required file: tokens.txt",
+            ),
             (
                 "two-gone",
                 &[FILES[1], FILES[2]],
+                &[],
                 missing(&["encoder.int8.onnx", "tokens.txt"]),
+                "Missing required files: encoder.int8.onnx, tokens.txt",
             ),
             (
                 "empty",
                 &[],
+                &[],
                 missing(&[FILES[0], FILES[1], FILES[2], FILES[3]]),
+                "Missing required files: encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt",
+            ),
+            (
+                "dir-as-file",
+                &FILES[1..],
+                &[FILES[0]],
+                missing(&[FILES[0]]),
+                "Missing required file: encoder.int8.onnx",
             ),
         ];
-        for (tag, present, expected) in cases {
+        for (tag, present, directories, expected, message) in cases {
             let dir = folder_with(tag, present);
-            assert_eq!(check_folder(&dir), expected, "{tag}");
+            for name in directories {
+                std::fs::create_dir(dir.join(name)).unwrap();
+            }
+            let found = check_folder(&dir);
+            assert_eq!(found, expected, "{tag}");
+            if let Err(error) = found {
+                assert_eq!(error.to_string(), message, "{tag}");
+            }
         }
-    }
-
-    #[test]
-    fn a_missing_file_is_named_in_the_message() {
-        let dir = folder_with("message", &FILES[..3]);
-        let one = check_folder(&dir).unwrap_err().to_string();
-        assert_eq!(one, "Missing required file: tokens.txt");
-        let dir = folder_with("messages", &FILES[1..3]);
-        let two = check_folder(&dir).unwrap_err().to_string();
-        assert_eq!(two, "Missing required files: encoder.int8.onnx, tokens.txt");
-    }
-
-    #[test]
-    fn a_directory_in_place_of_a_file_counts_as_missing() {
-        let dir = folder_with("dir-as-file", &FILES[1..]);
-        std::fs::create_dir(dir.join(FILES[0])).unwrap();
-        assert_eq!(check_folder(&dir), missing(&[FILES[0]]));
     }
 
     #[test]
@@ -2134,8 +2213,8 @@ mod tests {
     }
 
     #[test]
-    fn an_encoder_is_told_by_what_it_declares() {
-        let cases: [(&[&str], Option<EncoderKind>); 5] = [
+    fn an_encoder_is_told_by_what_it_declares_and_a_tdt_one_also_by_its_shapes() {
+        let cases: [(&[&str], Option<EncoderKind>); 6] = [
             (
                 &[
                     "audio_signal",
@@ -2153,21 +2232,12 @@ mod tests {
             (&["features", "length"], None),
             (&["features", "length", "language"], None),
             (&[], None),
+            (&["audio_signal", "length"], Some(EncoderKind::Tdt)),
         ];
         for (inputs, kind) in cases {
             assert_eq!(EncoderKind::of(inputs), kind, "{inputs:?}");
         }
-    }
-
-    #[test]
-    fn a_tdt_encoder_is_recognized_without_a_catalog_name() {
-        for (inputs, expected) in [
-            (&["audio_signal", "length"][..], Some(EncoderKind::Tdt)),
-            (&["features", "length"][..], None),
-            (&["audio_signal", "language"][..], None),
-        ] {
-            assert_eq!(EncoderKind::of(inputs), expected);
-        }
+        assert_eq!(EncoderKind::of(&["audio_signal", "language"]), None);
         let encoder = [1, 1024, -1];
         let tdt = [-1, -1, -1, 8198];
         let plain = [-1, -1, -1, 8193];
@@ -2261,6 +2331,159 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
+    struct SpliceFake {
+        frames: Vec<Vec<usize>>,
+        windows: Vec<usize>,
+    }
+
+    impl Backend for SpliceFake {
+        fn encode(
+            &mut self,
+            _features: Vec<f32>,
+            valid: usize,
+        ) -> Result<Encoding, RecognizerError> {
+            let count = valid / 8;
+            self.windows.push(count);
+            Ok(Encoding {
+                values: Vec::new(),
+                stride: count,
+                count,
+            })
+        }
+
+        fn decode(
+            &mut self,
+            _encoded: &[f32],
+            _stride: usize,
+            range: std::ops::Range<usize>,
+            _carried: &mut Decoding<'_>,
+        ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            let mut frames: Vec<_> = self
+                .frames
+                .iter()
+                .skip(range.start)
+                .take(range.len())
+                .cloned()
+                .collect();
+            frames.resize_with(range.len(), Vec::new);
+            Ok(frames)
+        }
+    }
+
+    const SPLICE_PIECES: [&str; 12] = [
+        "▁the",
+        "▁region",
+        "▁moves",
+        "▁for",
+        "▁every",
+        "▁ev",
+        "ery",
+        "▁other",
+        "▁side",
+        "▁of",
+        "▁hill",
+        "▁hills",
+    ];
+
+    #[test]
+    fn a_long_final_keeps_whole_words_at_the_tail_join() {
+        const END: usize = 160;
+        const OFFSET: usize = 128;
+        type Script = &'static [(usize, &'static str)];
+        let cases: [(&str, Script, Script, &str); 8] = [
+            (
+                "cut word",
+                &[(131, "▁the"), (136, "▁region")],
+                &[(132, "▁the"), (135, "▁region"), (139, "▁moves")],
+                "the region moves",
+            ),
+            (
+                "merged word",
+                &[(131, "▁for"), (133, "▁every"), (136, "▁region")],
+                &[(132, "▁for"), (135, "▁ev"), (136, "ery"), (139, "▁region")],
+                "for every region",
+            ),
+            (
+                "exact overlap",
+                &[(132, "▁the"), (136, "▁region")],
+                &[(137, "▁the"), (139, "▁region")],
+                "the region",
+            ),
+            (
+                "same word with different pieces",
+                &[(130, "▁for"), (133, "▁every"), (136, "▁region")],
+                &[(137, "▁ev"), (138, "ery"), (139, "▁region")],
+                "for every region",
+            ),
+            (
+                "shifted phrase",
+                &[(130, "▁other"), (133, "▁side"), (135, "▁of"), (136, "▁the")],
+                &[(137, "▁side"), (139, "▁of"), (140, "▁the"), (141, "▁hill")],
+                "other side of the hill",
+            ),
+            (
+                "cut word without an earlier match",
+                &[(126, "▁the"), (136, "▁region"), (140, "▁moves")],
+                &[(135, "▁region"), (140, "▁moves")],
+                "the region moves",
+            ),
+            (
+                "tail has words only before the cut",
+                &[(126, "▁the"), (136, "▁region")],
+                &[(133, "▁moves")],
+                "the",
+            ),
+            (
+                "repeated word after the cut",
+                &[
+                    (132, "▁the"),
+                    (136, "▁region"),
+                    (137, "▁of"),
+                    (139, "▁the"),
+                    (142, "▁hills"),
+                ],
+                &[
+                    (135, "▁region"),
+                    (137, "▁of"),
+                    (139, "▁the"),
+                    (142, "▁hills"),
+                ],
+                "the region of the hills",
+            ),
+        ];
+        let pieces = Arc::new(SPLICE_PIECES.map(String::from).to_vec());
+        let frames = |script: Script, offset: usize| {
+            let mut frames = vec![Vec::new(); END - offset];
+            for &(frame, piece) in script {
+                frames[frame - offset].push(pieces.iter().position(|p| p == piece).unwrap());
+            }
+            frames
+        };
+        let mut failures = Vec::new();
+        for (case, shown, tail, expected) in cases {
+            let backend = SpliceFake {
+                frames: frames(tail, OFFSET),
+                windows: Vec::new(),
+            };
+            let mut stream = Replayed::new(backend, Arc::clone(&pieces));
+            stream.shown = frames(shown, 0);
+            let final_frames = stream.finish(&sound(END * 1280, 0)).unwrap();
+            assert_eq!(stream.backend.windows, [END - OFFSET + 10], "{case}");
+            assert_eq!(final_frames.len(), END, "{case}");
+            let actual = final_frames
+                .iter()
+                .flatten()
+                .map(|&token| pieces[token].as_str())
+                .collect::<String>()
+                .replace('▁', " ");
+            if actual.trim() != expected {
+                failures.push((case, expected, actual));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
     /// A model whose windowed decoding loses the speech after its first words.
     #[derive(Clone, Default)]
     struct Wanders {
@@ -2297,42 +2520,37 @@ mod tests {
     }
 
     #[test]
-    fn a_decoding_that_goes_quiet_while_the_speech_goes_on_is_replayed_whole() {
-        for (speech, expected) in [(true, 56), (false, 8)] {
+    fn a_decoding_that_goes_quiet_while_the_speech_goes_on_is_replayed_whole_by_a_preview_with_speech_and_by_the_final()
+     {
+        for (ending, speech, expected) in [
+            ("a preview with speech", true, 56),
+            ("a preview without speech", false, 8),
+            ("the final", false, 56),
+        ] {
             let backend = Wanders::default();
             let encoded = Arc::clone(&backend.encoded);
             let mut stream = Replayed::new(backend, Arc::new(Vec::new()));
             for count in [8, 16, 24, 32, 40, 48] {
                 stream.snapshot(&sound(count * 1280, 0), false).unwrap();
             }
-            let frames = stream
-                .snapshot(&sound(56 * 1280, 0), speech)
-                .unwrap()
-                .concat();
+            let frames = if ending == "the final" {
+                stream.finish(&sound(56 * 1280, 0)).unwrap().concat()
+            } else {
+                stream
+                    .snapshot(&sound(56 * 1280, 0), speech)
+                    .unwrap()
+                    .concat()
+            };
             assert_eq!(
                 frames,
                 (0..expected).collect::<Vec<_>>(),
-                "the text covers the whole stretch again only with speech: {speech}"
+                "the text covers the whole stretch again only with speech or at the final: {ending}"
             );
             assert!(
                 !speech || encoded.lock().unwrap().last() == Some(&56),
                 "the whole stretch is heard again"
             );
         }
-    }
-
-    #[test]
-    fn the_final_of_a_decoding_that_went_quiet_replays_the_whole_stretch() {
-        let backend = Wanders::default();
-        let mut stream = Replayed::new(backend, Arc::new(Vec::new()));
-        for count in [8, 16, 24, 32, 40, 48] {
-            stream.snapshot(&sound(count * 1280, 0), false).unwrap();
-        }
-        assert_eq!(
-            stream.finish(&sound(56 * 1280, 0)).unwrap().concat(),
-            (0..56).collect::<Vec<_>>(),
-            "the final holds every word heard"
-        );
     }
 
     #[derive(Clone)]

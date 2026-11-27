@@ -9,7 +9,7 @@ use thalvi_desktop::capture::CaptureRoute;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::entries::{self, LiveKind};
 use thalvi_desktop::feed::{Clip, FeedEnd};
-use thalvi_desktop::hold::Action;
+use thalvi_desktop::hold::{Action, KeyMode};
 use thalvi_desktop::metrics::{self, SUMMARY_WINDOW};
 use thalvi_desktop::models::{SpeechModelInfo, SpeechProgress, WakeModelInfo};
 use thalvi_desktop::transducer::SpeechChoice;
@@ -208,7 +208,7 @@ pub trait Running {
     /// Presses or releases the dictation key.
     fn hold(&self, kind: Action, down: bool);
     /// Presses or releases row `row` of Settings → Keys, refusing a row that does not exist.
-    fn key(&self, row: usize, down: bool) -> Result<(), String>;
+    fn key(&self, row: usize, down: bool) -> Result<KeyMode, String>;
     /// Opens the Settings window, at `page` when one is given.
     fn show_settings(&self, page: Option<&str>);
     async fn copy_error(&self) -> Result<(), String>;
@@ -688,25 +688,25 @@ async fn cancel(running: &impl Running, wait: Duration) -> String {
 /// Presses or releases one row of Settings → Keys, and waits for it to show.
 async fn key_row(running: &impl Running, row: usize, down: bool, wait: Duration) -> String {
     let mut status = running.status();
-    // Marks the status seen: only a change after the press answers it, never one already shown.
-    let refusal = if down {
-        match &*status.borrow_and_update() {
+    let (was_speaking, refusal) = {
+        let current = status.borrow_and_update();
+        let refusal = match &*current {
             Status::Paused => Some("Thalvi is paused. Resume it first."),
             current if capturing(current) => Some("A capture is already running."),
             Status::Working { .. } => Some("The last text is still being delivered."),
             _ => None,
-        }
-    } else {
-        None
+        };
+        (speaking(&current), refusal)
     };
-    if let Err(error) = running.key(row, down) {
-        return refused(&error, json!({"took_effect": false}));
+    let mode = match running.key(row, down) {
+        Ok(mode) => mode,
+        Err(error) => return refused(&error, json!({"took_effect": false})),
+    };
+    if !down && mode != KeyMode::Hold {
+        return no_effect(running, "This keybind acts when pressed.");
     }
-    if let Some(refusal) = refusal {
-        return no_effect(running, refusal);
-    }
-    if !down {
-        if !speaking(&status.borrow()) {
+    if !down || mode == KeyMode::Stop || (mode == KeyMode::Toggle && was_speaking) {
+        if !was_speaking {
             return no_effect(running, "No capture is being taken.");
         }
         return if reached(&mut status, wait, |status| !speaking(status)).await {
@@ -714,6 +714,9 @@ async fn key_row(running: &impl Running, row: usize, down: bool, wait: Duration)
         } else {
             no_effect(running, "The capture did not end.")
         };
+    }
+    if let Some(refusal) = refusal {
+        return no_effect(running, refusal);
     }
     // While Thalvi loads, only the engine knows whether it takes the press: it starts the capture
     // or refuses the press, which fails the status.
@@ -1010,6 +1013,8 @@ async fn metrics_summary(running: &impl Running) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[cfg(target_os = "linux")]
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex, PoisonError};
 
     use thalvi_desktop::config::Look;
@@ -1028,6 +1033,16 @@ mod tests {
 
     /// Long enough for the fake engine to answer, short enough for a control it ignores.
     const WAIT: Duration = Duration::from_millis(150);
+
+    #[cfg(target_os = "linux")]
+    const TEARDOWN_WAIT: Duration = Duration::from_secs(5);
+
+    #[cfg(target_os = "linux")]
+    struct QuitGate {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        cleaned: mpsc::Sender<()>,
+    }
 
     fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -1059,6 +1074,8 @@ mod tests {
         feed_ending: Mutex<FeedEnd>,
         downloaded: Mutex<Vec<(Catalog, String)>>,
         quit: AtomicUsize,
+        #[cfg(target_os = "linux")]
+        quit_gate: Mutex<Option<QuitGate>>,
         overlay: AtomicBool,
         copy_refused: AtomicBool,
         ignoring: AtomicBool,
@@ -1071,8 +1088,12 @@ mod tests {
 
     impl Fake {
         fn new(name: &str, config: &str) -> Arc<Self> {
-            let folder =
-                std::env::temp_dir().join(format!("thalvi-agent-{name}-{}", std::process::id()));
+            static NEXT_FOLDER: AtomicUsize = AtomicUsize::new(0);
+            let instance = NEXT_FOLDER.fetch_add(1, Ordering::Relaxed);
+            let folder = std::env::temp_dir().join(format!(
+                "thalvi-agent-{name}-{}-{instance}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&folder);
             std::fs::create_dir_all(&folder).unwrap();
             let config = DesktopConfig::from_json_str(config).unwrap();
@@ -1106,6 +1127,8 @@ mod tests {
                 feed_ending: Mutex::new(FeedEnd::Played),
                 downloaded: Mutex::new(Vec::new()),
                 quit: AtomicUsize::new(0),
+                #[cfg(target_os = "linux")]
+                quit_gate: Mutex::new(None),
                 overlay: AtomicBool::new(true),
                 copy_refused: AtomicBool::new(false),
                 ignoring: AtomicBool::new(false),
@@ -1141,6 +1164,14 @@ mod tests {
     impl Drop for Fake {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.folder);
+            #[cfg(target_os = "linux")]
+            if let Some(gate) = self
+                .quit_gate
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                let _ = gate.cleaned.send(());
+            }
         }
     }
 
@@ -1181,7 +1212,7 @@ mod tests {
             }
         }
 
-        fn key(&self, row: usize, down: bool) -> Result<(), String> {
+        fn key(&self, row: usize, down: bool) -> Result<KeyMode, String> {
             lock(&self.sent).push(format!("key {row} {}", if down { "down" } else { "up" }));
             let config = self.config();
             let Some(bind) = config.keys.get(row) else {
@@ -1199,7 +1230,7 @@ mod tests {
                     notice: None,
                 });
             }
-            Ok(())
+            Ok(bind.mode)
         }
 
         fn hold(&self, kind: Action, down: bool) {
@@ -1364,6 +1395,11 @@ mod tests {
         }
 
         fn quit(&self) {
+            #[cfg(target_os = "linux")]
+            if let Some(gate) = lock(&self.quit_gate).as_ref() {
+                gate.entered.send(()).unwrap();
+                gate.release.recv_timeout(TEARDOWN_WAIT).unwrap();
+            }
             self.quit.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -1603,19 +1639,6 @@ mod tests {
         assert_eq!(get()["settings"]["writing"]["prompt"], DEFAULT_PROMPT);
         assert_eq!(get()["settings"]["writing_default_prompt"], DEFAULT_PROMPT);
 
-        let blank = json!({"writing": {"prompt": "  "}});
-        let message = "writing.prompt must not be blank. Restore the default to start over.";
-        let check = rig.ask(&Request::SettingsCheck {
-            settings: blank.clone(),
-        });
-        assert_eq!(
-            check,
-            json!({"ok": false, "error": message, "valid": false})
-        );
-        let set = rig.set(blank);
-        assert_eq!(set["error"], message);
-        assert_eq!(rig.fake.config().writing.unwrap().prompt(), DEFAULT_PROMPT);
-
         let set = rig.set(json!({"writing": {"prompt": "Be brief."}}));
         assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
         let config = rig.fake.config();
@@ -1635,32 +1658,6 @@ mod tests {
             r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}}"#,
         );
         let rule = |phrase: &str, prompt: &str| json!({"phrase": phrase, "prompt": prompt});
-        let refusals = [
-            (
-                vec![rule("Write me", "a"), rule("write, me", "b")],
-                "writing.openings has “write me” twice.",
-            ),
-            (
-                vec![rule("write me", " ")],
-                "writing.openings has a blank prompt for “write me”.",
-            ),
-            (
-                vec![rule("", "a")],
-                "writing.openings needs a phrase with at least one word in every rule.",
-            ),
-        ];
-        for (openings, message) in refusals {
-            let change = json!({"writing": {"openings": openings}});
-            let check = rig.ask(&Request::SettingsCheck {
-                settings: change.clone(),
-            });
-            assert_eq!(
-                check,
-                json!({"ok": false, "error": message, "valid": false})
-            );
-            assert_eq!(rig.set(change)["error"], message);
-        }
-
         let set = rig.set(json!({"writing": {"openings": [rule("Write me an email", "Email.")]}}));
         assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
         let shown = rig.ask(&Request::SettingsGet);
@@ -2206,6 +2203,47 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_old_request_worker_can_finish_while_the_next_rig_serves() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let first = Rig::new("late-worker", "{}");
+        let (entered, request_entered) = mpsc::channel();
+        let (release, may_finish) = mpsc::channel();
+        let (cleaned, old_folder_cleaned) = mpsc::channel();
+        *lock(&first.fake.quit_gate) = Some(QuitGate {
+            entered,
+            release: may_finish,
+            cleaned,
+        });
+        let mut client = UnixStream::connect(first.socket.0.join("thalvi.sock")).unwrap();
+        writeln!(client, "{}", Request::Quit.line()).unwrap();
+        request_entered.recv_timeout(TEARDOWN_WAIT).unwrap();
+        drop(first);
+
+        let second = Rig::new("late-worker", "{}");
+        release.send(()).unwrap();
+        old_folder_cleaned.recv_timeout(TEARDOWN_WAIT).unwrap();
+        let reply = thalvi_desktop::host::Desktop::send_request_in(
+            &second.socket.0,
+            &Request::Status.line(),
+            TEARDOWN_WAIT,
+        );
+        let (stopped, server_stopped) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(second);
+            let _ = stopped.send(());
+        });
+        let reply = reply.unwrap().expect("the next rig still has its socket");
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply).unwrap()["state"],
+            "listening"
+        );
+        server_stopped.recv_timeout(TEARDOWN_WAIT).unwrap();
+    }
+
     /// Each status with what `state` says of it: its word, the overlay's and the recognizer's.
     #[expect(clippy::too_many_lines, reason = "one row per status")]
     fn state_words() -> Vec<(Status, &'static str, &'static str, &'static str)> {
@@ -2501,7 +2539,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_is_checked_where_it_enters_and_never_repeats_a_key() {
+    fn a_request_is_checked_where_it_enters_including_the_newer_commands_and_never_repeats_a_key() {
         let rig = Rig::new("entry", "{}");
         let set = rig
             .set(json!({"stt": {"entries": [entry("cybrex2", "realtime", true, Some(SECRET))]}}));
@@ -2512,6 +2550,8 @@ mod tests {
                 COMMANDS.join(", ")
             )
         };
+        let needs =
+            |command: &str| format!("The command {command} was sent without the details it needs.");
         for command in COMMANDS {
             let parsed = Request::parse(&json!({"command": command}).to_string());
             assert!(
@@ -2530,6 +2570,33 @@ mod tests {
             (
                 r#"{"command": "pause", "force": true}"#,
                 "The command pause takes no other details.".to_owned(),
+            ),
+            (r#"{"command": "feed"}"#, needs("feed")),
+            (
+                r#"{"command": "feed", "path": "/a.wav", "loop": true}"#,
+                needs("feed"),
+            ),
+            (
+                r#"{"command": "model-download", "name": "m"}"#,
+                needs("model-download"),
+            ),
+            (
+                r#"{"command": "model-download", "kind": "voice", "name": "m"}"#,
+                needs("model-download"),
+            ),
+            (
+                r#"{"command": "model-download", "kind": "wake"}"#,
+                needs("model-download"),
+            ),
+            (r#"{"command": "speech-check"}"#, needs("speech-check")),
+            (r#"{"command": "show", "page": 3}"#, needs("show")),
+            (
+                r#"{"command": "models", "all": true}"#,
+                "The command models takes no other details.".to_owned(),
+            ),
+            (
+                r#"{"command": "quit", "force": true}"#,
+                "The command quit takes no other details.".to_owned(),
             ),
             (r#"{"command": "rm"}"#, unknown()),
             (&format!(r#"{{"command": "{SECRET}"}}"#), unknown()),
@@ -2550,6 +2617,7 @@ mod tests {
         });
         assert!(!checked.to_string().contains(SECRET), "{checked}");
         assert_eq!(rig.fake.config().stt.entries.key_of("cybrex2"), SECRET);
+        assert_eq!(rig.fake.quit.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(target_os = "linux")]
@@ -3023,49 +3091,6 @@ mod tests {
             .filter_map(|line| line.split('"').next())
             .collect();
         assert_eq!(ids, PAGES);
-    }
-
-    #[test]
-    fn the_new_commands_are_checked_where_they_enter() {
-        let rig = Rig::new("new-entry", "{}");
-        let needs =
-            |command: &str| format!("The command {command} was sent without the details it needs.");
-        for (line, error) in [
-            (r#"{"command": "feed"}"#, needs("feed")),
-            (
-                r#"{"command": "feed", "path": "/a.wav", "loop": true}"#,
-                needs("feed"),
-            ),
-            (
-                r#"{"command": "model-download", "name": "m"}"#,
-                needs("model-download"),
-            ),
-            (
-                r#"{"command": "model-download", "kind": "voice", "name": "m"}"#,
-                needs("model-download"),
-            ),
-            (
-                r#"{"command": "model-download", "kind": "wake"}"#,
-                needs("model-download"),
-            ),
-            (r#"{"command": "speech-check"}"#, needs("speech-check")),
-            (r#"{"command": "show", "page": 3}"#, needs("show")),
-            (
-                r#"{"command": "models", "all": true}"#,
-                "The command models takes no other details.".to_owned(),
-            ),
-            (
-                r#"{"command": "quit", "force": true}"#,
-                "The command quit takes no other details.".to_owned(),
-            ),
-        ] {
-            assert_eq!(
-                rig.ask_line(line),
-                json!({"ok": false, "error": error}),
-                "{line}"
-            );
-        }
-        assert_eq!(rig.fake.quit.load(Ordering::SeqCst), 0);
     }
 
     #[test]

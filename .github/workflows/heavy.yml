@@ -10,10 +10,10 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: Narrow tests and mutants to one crate or UI package; a scoped run never moves verified
+        description: Run all checks, one crate, Settings, or the packaged update checks
         type: choice
         default: all
-        options: [all, thalvi-app, thalvi-asr, thalvi-desktop, desktop-ui]
+        options: [all, thalvi-app, thalvi-asr, thalvi-desktop, desktop-ui, update-ab]
 
 run-name: ${{ inputs.scope && inputs.scope != 'all' && format('Heavy, scoped to {0} (verified unchanged)', inputs.scope) || github.event.head_commit.message || 'Heavy' }}
 
@@ -68,7 +68,7 @@ jobs:
   ci:
     name: ci
     needs: start
-    if: needs.start.outputs.superseded == 'false'
+    if: needs.start.outputs.superseded == 'false' && inputs.scope != 'update-ab'
     uses: ./.github/workflows/ci.yml
     with:
       scope: ${{ inputs.scope || 'all' }}
@@ -76,7 +76,7 @@ jobs:
   mutants:
     name: mutants (${{ matrix.shard }})
     needs: start
-    if: needs.start.outputs.superseded == 'false' && (inputs.scope || 'all') != 'desktop-ui'
+    if: needs.start.outputs.superseded == 'false' && !contains(fromJSON('["desktop-ui", "update-ab"]'), inputs.scope || 'all')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -124,6 +124,9 @@ jobs:
           tool: cargo-mutants@27.1.0
       - if: steps.diff.outputs.rust == 'true'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+      - if: steps.diff.outputs.rust == 'true'
+        # Ubuntu's AppArmor blocks the unprivileged user namespaces the sandboxed socket test runs in.
+        run: unshare --user --map-current-user true || sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - if: steps.diff.outputs.rust == 'true'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -218,14 +221,15 @@ jobs:
         with:
           tool: cargo-fuzz@0.13.2
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libgtk-3-dev libxkbcommon-dev
-      - run: cargo fuzz build
+      # install-action's cargo-fuzz is a musl build and defaults to its own target, which has no sanitizers.
+      - run: cargo fuzz build --target x86_64-unknown-linux-gnu
       - name: run each target for 60 s from its seeds
         run: |
           set -o pipefail
           status=0
           for target in $(cargo fuzz list); do
             echo "::group::$target"
-            if ! cargo fuzz run "$target" -- -max_total_time=60 2>&1 | tee "$RUNNER_TEMP/$target.log"; then
+            if ! cargo fuzz run --target x86_64-unknown-linux-gnu "$target" -- -max_total_time=60 2>&1 | tee "$RUNNER_TEMP/$target.log"; then
               status=1
               echo "::error::$target crashed; its input is in the fuzz-artifacts artifact."
             fi
@@ -307,9 +311,75 @@ jobs:
           path: gnome-smoke
           retention-days: 7
 
+  update-ab:
+    name: signed update (${{ matrix.bundle }})
+    needs: start
+    if: needs.start.outputs.superseded == 'false' && contains(fromJSON('["all", "update-ab"]'), inputs.scope || 'all')
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            bundle: appimage
+          - os: windows-2025-vs2026
+            bundle: nsis
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable, respects rust-toolchain.toml
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: crates/thalvi-app/ui/package-lock.json
+      - run: npm ci --prefix crates/thalvi-app/ui && npm run build --prefix crates/thalvi-app/ui
+      - if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bubblewrap dbus-x11 gir1.2-gtk-3.0 gnome-shell libasound2-dev libasound2-plugins \
+            libayatana-appindicator3-dev libegl-mesa0 libgl1-mesa-dri libwebkit2gtk-4.1-dev \
+            libxdo3 pipewire python3-gi python3-pil wireplumber x11-utils xdotool xwayland
+          if ! bwrap --unshare-user --ro-bind / / true; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            bwrap --unshare-user --ro-bind / / true
+          fi
+          .github/scripts/update-ab update-ab-evidence
+      - if: runner.os == 'Windows'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+      - if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python -m pip install Pillow==12.1.1
+          cargo build --release --locked -p thalvi-app
+          mkdir -p crates/thalvi-app/helpers/webgpu
+          for dll in webgpu_dawn.dll dxcompiler.dll; do
+            src="target/release/$dll"
+            if [[ ! -f $src && -n ${LOCALAPPDATA:-} ]]; then
+              src=$(find "$LOCALAPPDATA/ort.pyke.io" -name "$dll" -type f 2>/dev/null | head -n 1 || true)
+            fi
+            cp "$src" "crates/thalvi-app/helpers/webgpu/$dll"
+          done
+          python .github/scripts/e2e/update-fixture.py suite update-ab-evidence
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: update-ab-${{ matrix.bundle }}
+          path: update-ab-evidence
+          retention-days: 7
+
   verified:
     name: verified
-    needs: [start, ci, mutants, explore, fuzz, gnome-appimage]
+    needs: [start, ci, mutants, explore, fuzz, gnome-appimage, update-ab]
     if: >-
       github.ref == 'refs/heads/main' &&
       (inputs.scope || 'all') == 'all' &&
@@ -317,7 +387,8 @@ jobs:
       needs.mutants.result == 'success' &&
       needs.explore.result == 'success' &&
       needs.fuzz.result == 'success' &&
-      needs.gnome-appimage.result == 'success'
+      needs.gnome-appimage.result == 'success' &&
+      needs.update-ab.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -344,7 +415,7 @@ jobs:
 
   report:
     name: report
-    needs: [start, ci, mutants, explore, fuzz, gnome-appimage]
+    needs: [start, ci, mutants, explore, fuzz, gnome-appimage, update-ab]
     if: failure() && github.ref == 'refs/heads/main' && (inputs.scope || 'all') == 'all'
     runs-on: ubuntu-latest
     timeout-minutes: 5

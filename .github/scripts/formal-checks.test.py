@@ -117,12 +117,15 @@ class Selection(unittest.TestCase):
         return path.read_text() if path.is_file() else ''
 
     def test_uncovered_pull_request_skips_checkers(self):
-        head = self.change('README.md')
-        result = self.invoke('pull_request', scope='all', base=self.base, head=head)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('checkers not run', result.stdout)
-        for name in SKILLS:
-            self.assertEqual(self.ran(name), '')
+        for relative in ('README.md', 'crates/thalvi-desktop/src/hold.rs.extra'):
+            with self.subTest(relative=relative):
+                head = self.change(relative)
+                result = self.invoke('pull_request', scope='all', base=self.base, head=head)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('checkers not run', result.stdout)
+                for name in SKILLS:
+                    self.assertEqual(self.ran(name), '')
+                self.base = head
 
     def test_pull_request_excludes_changes_only_on_the_base_branch(self):
         git(self.repo, 'switch', '-q', '-c', 'topic')
@@ -155,13 +158,6 @@ class Selection(unittest.TestCase):
                     if name != chosen:
                         self.assertEqual(self.ran(name), '')
                 self.base = head
-
-    def test_prefix_of_a_covered_path_skips_checkers(self):
-        head = self.change('crates/thalvi-desktop/src/hold.rs.extra')
-        result = self.invoke('pull_request', scope='all', base=self.base, head=head)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for name in SKILLS:
-            self.assertEqual(self.ran(name), '')
 
     def test_unusable_pull_request_runs_every_checker(self):
         cases = (
@@ -211,34 +207,22 @@ class Selection(unittest.TestCase):
                 for name in SKILLS:
                     self.assertEqual(self.ran(name), '')
 
-    def test_checker_failure_stops_before_the_negative_control(self):
-        head = self.change('crates/thalvi-app/src/settings.rs')
-        result = self.invoke(
-            'pull_request', scope='all', base=self.base, head=head,
-            extra={'FORMAL_FAKE_EXIT_CHECK': '6', 'FORMAL_FAKE_EXIT_SELF_TEST': '5'},
+    def test_a_failing_checker_self_test_or_helper_fails_the_run_and_stops_there(self):
+        cases = (
+            ('crates/thalvi-app/src/settings.rs', {'FORMAL_FAKE_EXIT_CHECK': '6', 'FORMAL_FAKE_EXIT_SELF_TEST': '5'}, 6, 'formal-config-save', 'CHECK\n'),
+            ('crates/thalvi-app/src/runner.rs', {'FORMAL_FAKE_EXIT_SELF_TEST': '5'}, 5, 'formal-capture-cancel', 'CHECK\nSELF_TEST\n'),
+            ('crates/thalvi-desktop/src/hold.rs', {'FORMAL_FAKE_EXIT_HELPER': '7'}, 7, 'formal-hold-keys', 'CHECK\nSELF_TEST\nHELPER\n'),
         )
-        self.assertEqual(result.returncode, 6, result.stderr)
-        self.assertEqual(self.ran('formal-config-save'), 'CHECK\n')
+        for relative, extra, code, chosen, expected in cases:
+            with self.subTest(relative=relative):
+                head = self.change(relative)
+                result = self.invoke('pull_request', scope='all', base=self.base, head=head, extra=extra)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(self.ran(chosen), expected)
+                self.base = head
+                (self.repo / '.agents' / 'skills' / chosen / 'ran.txt').unlink()
 
-    def test_self_test_failure_fails_the_run(self):
-        head = self.change('crates/thalvi-app/src/runner.rs')
-        result = self.invoke(
-            'pull_request', scope='all', base=self.base, head=head,
-            extra={'FORMAL_FAKE_EXIT_SELF_TEST': '5'},
-        )
-        self.assertEqual(result.returncode, 5, result.stderr)
-        self.assertEqual(self.ran('formal-capture-cancel'), 'CHECK\nSELF_TEST\n')
-
-    def test_helper_test_failure_fails_the_hold_keys_run(self):
-        head = self.change('crates/thalvi-desktop/src/hold.rs')
-        result = self.invoke(
-            'pull_request', scope='all', base=self.base, head=head,
-            extra={'FORMAL_FAKE_EXIT_HELPER': '7'},
-        )
-        self.assertEqual(result.returncode, 7, result.stderr)
-        self.assertEqual(self.ran('formal-hold-keys'), 'CHECK\nSELF_TEST\nHELPER\n')
-
-    def test_stale_chart_fails_and_leaves_chart_mmd_unchanged(self):
+    def test_a_stale_chart_fails_and_leaves_chart_mmd_unchanged_and_a_missing_one_fails(self):
         chart = self.repo / '.agents' / 'skills' / 'formal-config-save' / 'chart.mmd'
         original = chart.read_bytes()
         head = self.change('crates/thalvi-app/src/settings.rs')
@@ -250,11 +234,9 @@ class Selection(unittest.TestCase):
         self.assertIn('STALE CHART formal-config-save', result.stderr)
         self.assertEqual(chart.read_bytes(), original)
 
-    def test_missing_chart_fails(self):
-        chart = self.repo / '.agents' / 'skills' / 'formal-config-save' / 'chart.mmd'
         chart.unlink()
-        head = self.change('crates/thalvi-app/src/settings.rs')
-        result = self.invoke('pull_request', scope='all', base=self.base, head=head)
+        again = self.change('crates/thalvi-app/src/settings.rs')
+        result = self.invoke('pull_request', scope='all', base=head, head=again)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('STALE CHART formal-config-save', result.stderr)
         self.assertFalse(chart.exists())

@@ -1,5 +1,6 @@
 //! The Linux desktop host: picks Hyprland or GNOME Wayland at startup and forwards every call to it.
 
+mod announce;
 mod layer;
 mod place;
 mod xwayland;
@@ -16,6 +17,7 @@ use super::{
     OverlayFrame, PasteText, RequestServer, WebUrl, WindowApp, channel,
 };
 use crate::hold::{HoldChange, KeyBind, KeyName};
+pub use announce::status_announcer;
 
 /// The desktop session Thalvi runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

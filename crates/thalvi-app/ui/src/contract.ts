@@ -91,10 +91,12 @@ export interface LookProperty {
 }
 /** A resolved property value: a colour or font string, a number, or a switch. */
 export type LookValue = string | number | boolean;
+export type LookScheme = "light" | "dark";
 /** What Settings draws from: every property a look offers, each look's CSS properties and its resolved values. */
 export interface LookStyles {
   properties: LookProperty[];
   looks: Record<Look, Record<string, string>>;
+  schemes: Record<Look, LookScheme>;
   values: Record<Look, Record<string, LookValue>>;
 }
 /** An overlay state the renderer can draw a preview for. */
@@ -355,6 +357,7 @@ export interface Backend {
   getSettings(): Promise<Settings>;
   /** The look model resolved into the CSS custom properties this window wears, and every property a look offers. */
   getLookStyles(): Promise<LookStyles>;
+  onThemeChanged(listener: () => void): void;
   /** Straight-alpha RGBA of one overlay state: width and height as u32 LE, then width * height * 4 bytes. */
   previewOverlay(state: OverlayPreviewState, scale: number): Promise<ArrayBuffer>;
   /** Says this window has its styles, so a show asked for meanwhile can happen. */

@@ -81,7 +81,8 @@ bundle() {
 
 # Needs the Rust toolchain, Node pinned in .node-version, Python pinned in .python-version and, on Linux,
 # libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev. The package also needs what
-# whisper-helper builds with: git, cmake, a C++ compiler and libvulkan-dev glslc spirv-headers.
+# whisper-helper builds with: git, cmake, a C++ compiler and libvulkan-dev glslc spirv-headers. The tests
+# need `unshare` and unprivileged user namespaces.
 gate_server() {
   desktop_ui
   step cargo fmt --all -- --check
@@ -89,6 +90,9 @@ gate_server() {
   step .github/scripts/rust-layout.test.sh
   step .github/scripts/lint-exceptions
   step python3 .github/scripts/lint-exceptions.test.py
+  step python3 .github/scripts/test-hygiene
+  step python3 .github/scripts/test-hygiene.test.py
+  step bash .agents/skills/verify-thalvi/scripts/thalvi-desktop-rig.test.sh
   step cargo lint
   tests --workspace
   RUSTDOCFLAGS="-D warnings" step cargo docs
@@ -114,6 +118,7 @@ gate_desktop_ui() {
   node_checks crates/thalvi-app/ui
   # Fetches the headless shell playwright-core pins.
   in_dir crates/thalvi-app/ui npm exec -- playwright-core install --only-shell chromium
+  in_dir crates/thalvi-app/ui npm run layout
   in_dir crates/thalvi-app/ui npm run explore
 }
 
@@ -128,17 +133,23 @@ gate_speech() {
 # Needs pipx, git, perl and python3.
 gate_issue_sync() {
   step "${SHELLCHECK[@]}" .github/scripts/gates .github/scripts/whisper-helper .github/scripts/issue-refs.sh .github/scripts/issue-refs.test.sh \
-    .github/scripts/changed .github/scripts/changed.test.sh .github/scripts/rust-layout.test.sh
+    .github/scripts/changed .github/scripts/changed.test.sh .github/scripts/rust-layout.test.sh \
+    .github/scripts/break-it .github/scripts/break-it.test.sh
   step .github/scripts/issue-refs.test.sh
+  step .github/scripts/break-it.test.sh
   step .github/scripts/changed.test.sh
   step python3 .github/scripts/required-checks.test.py
 }
 
 # Needs Node pinned in .node-version, minisign, jq and pipx.
 gate_release() {
+  step .github/scripts/release-no-update-fixture .github/workflows/release.yml
   step npm ci --ignore-scripts --prefix crates/thalvi-app/ui
   step "${SHELLCHECK[@]}" .github/scripts/updater-feed .github/scripts/updater-feed.test.sh \
-    .github/scripts/newer-version .github/scripts/newer-version.test.sh
+    .github/scripts/newer-version .github/scripts/newer-version.test.sh \
+    .github/scripts/release-no-update-fixture .github/scripts/release-no-update-fixture.test.sh \
+    .github/scripts/update-ab
+  step .github/scripts/release-no-update-fixture.test.sh
   step .github/scripts/updater-feed.test.sh
   step .github/scripts/newer-version.test.sh
 }

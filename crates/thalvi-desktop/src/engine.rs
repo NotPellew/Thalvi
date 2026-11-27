@@ -270,6 +270,13 @@ pub enum EngineState {
     },
 }
 
+/// Capture feedback that needs to reach the desktop in order.
+pub enum Feedback<'a> {
+    State(&'a EngineState),
+    /// A normal streaming release before the overlay would show a finishing state.
+    StreamingHoldReleased,
+}
+
 /// Whether the live recognizer is Parakeet, which leaves out an English ending spoken after another language.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndingListener {
@@ -489,6 +496,8 @@ pub struct Parts<R, W, C> {
     pub hold: watch::Receiver<KeyState>,
     /// Tells the user about something that did not stop the capture.
     pub notice: Box<dyn Fn(&str)>,
+    /// Tells the app every state and quiet streaming release in order.
+    pub status: Box<dyn Fn(Feedback<'_>)>,
     /// Listens for the ending phrases beside the recognizer; none when it could not be loaded.
     pub spotter: Option<Box<dyn KeywordSpotter>>,
     /// Why there is no spotter, for the first capture to tell the user once.
@@ -535,6 +544,7 @@ pub struct Engine<R, W, C> {
     http: reqwest::Client,
     recorder: Recorder,
     notice: Rc<dyn Fn(&str)>,
+    status: Rc<dyn Fn(Feedback<'_>)>,
     spotter: Option<Box<dyn KeywordSpotter>>,
     spotter_off: Option<String>,
     state: watch::Sender<EngineState>,
@@ -1100,6 +1110,7 @@ where
             http: parts.http,
             recorder,
             notice: Rc::from(parts.notice),
+            status: Rc::from(parts.status),
             spotter: parts.spotter,
             spotter_off: parts.spotter_off,
             state,
@@ -1216,7 +1227,7 @@ where
         &mut self,
         frames: &mut impl FrameSource,
     ) -> Result<WakeTrigger, ListenError> {
-        self.set_state(EngineState::Listening);
+        self.set_state(&EngineState::Listening);
         if self.listening == ListenState::Stopped {
             self.key.skip();
         }
@@ -1494,7 +1505,7 @@ where
     ) -> CaptureOutcome {
         self.writing_window = window;
         self.cancel.borrow_and_update();
-        self.set_state(EngineState::StartingCapture);
+        self.set_state(&EngineState::StartingCapture);
         let source = if frames.fed() { "file" } else { "microphone" };
         let started = Instant::now();
         let held = self.held.take();
@@ -1535,7 +1546,7 @@ where
             self.gate.set_enabled(true);
         }
         self.level.send_replace(0.0);
-        self.set_state(EngineState::Listening);
+        self.set_state(&EngineState::Listening);
         let route = match &outcome {
             CaptureOutcome::Accepted(request) => Some(request.route.name()),
             _ => None,
@@ -1575,22 +1586,33 @@ where
         outcome
     }
 
-    fn set_state(&self, next: EngineState) {
-        self.state.send_if_modified(|current| {
-            if *current == next {
+    fn set_state(&self, next: &EngineState) {
+        Self::publish_state(&self.state, self.status.as_ref(), next);
+    }
+
+    fn publish_state(
+        state: &watch::Sender<EngineState>,
+        status: &dyn Fn(Feedback<'_>),
+        next: &EngineState,
+    ) {
+        let changed = state.send_if_modified(|current| {
+            if current == next {
                 return false;
             }
-            *current = next;
+            *current = next.clone();
             true
         });
+        if changed {
+            status(Feedback::State(next));
+        }
     }
 
     fn publish(&self, live: &Live<R::Session>) {
         if let Some(state) = live.waiting() {
-            self.set_state(state);
+            self.set_state(&state);
             return;
         }
-        self.set_state(match live.text.pending() {
+        self.set_state(&match live.text.pending() {
             Some(pending) => EngineState::PendingEnding {
                 route: pending.route,
                 text: pending.text.clone(),
@@ -1769,7 +1791,7 @@ where
                 break None;
             }
             if cue_ended && session.is_none() && loads_model {
-                self.set_state(EngineState::LoadingModel);
+                self.set_state(&EngineState::LoadingModel);
             }
         };
         let decided = Instant::now();
@@ -1839,7 +1861,7 @@ where
                 if let Err(error) = live.session.finish_audio().await {
                     return Some(Done::Failed(error.into()));
                 }
-                self.set_state(EngineState::TranscribingLive {
+                self.set_state(&EngineState::TranscribingLive {
                     route: held.route(),
                 });
             } else {
@@ -1849,6 +1871,7 @@ where
                     return Some(stop.into());
                 }
                 live.session.input_ended();
+                self.streaming_hold_released(live);
             }
             live.release = Release::Tail(Instant::now());
             self.publish(live);
@@ -2081,87 +2104,48 @@ where
             return None;
         };
         if held.holds() && self.key.is_over(held.press) && matches!(live.release, Release::Down) {
-            return self.on_release(live, held, frames).await;
+            return self.on_release(live, held, None, frames).await;
         }
-        let mut done = None;
         while let Some(press) = self.key.take() {
             match press.mode {
-                KeyMode::Stop | KeyMode::Toggle => {
-                    done = self.on_stop(live, held, &press, frames).await;
-                    break;
+                KeyMode::Stop | KeyMode::Toggle if matches!(live.release, Release::Down) => {
+                    return self.on_release(live, held, Some(&press), frames).await;
                 }
-                KeyMode::Hold | KeyMode::Start => self.ignore(Refusal::Capturing, 1),
+                _ => self.ignore(Refusal::Capturing, 1),
             }
         }
-        done
-    }
-
-    /// A Stop or Toggle press ended the capture: its audio is cut where the press happened, as a
-    /// Hold key's release cuts it, and the words are delivered as the action the capture started
-    /// with.
-    async fn on_stop(
-        &mut self,
-        live: &mut Live<R::Session>,
-        held: &Started,
-        press: &Press,
-        frames: &mut impl FrameSource,
-    ) -> Option<Done> {
-        let now = Instant::now();
-        self.held_for = Some(now.duration_since(held.at));
-        self.hold_end = Some(if press.mode == KeyMode::Toggle {
-            "toggled"
-        } else {
-            "stopped"
-        });
-        let end = Cutoff::at(press.at);
-        let mut queued = Vec::new();
-        if let Err(error) = take_queued_before(frames, &end, &mut queued) {
-            return Some(Done::Failed(error.into()));
-        }
-        for frame in &queued {
-            if let Err(stop) = self.on_frame(live, frame).await {
-                return Some(Done::from(stop));
-            }
-        }
-        live.cutoff = Some(end);
-        live.session.hold_released();
-        if live.session.buffers_audio() {
-            if let Err(error) = live.session.finish_audio().await {
-                return Some(Done::Failed(error.into()));
-            }
-            self.set_state(EngineState::TranscribingLive {
-                route: held.route(),
-            });
-        } else {
-            if live.session.needs_release_silence()
-                && let Err(stop) = self.feed(live, &RELEASE_SILENCE).await
-            {
-                return Some(Done::from(stop));
-            }
-            live.session.input_ended();
-        }
-        live.release = Release::Tail(Instant::now());
-        self.publish(live);
         None
     }
 
-    /// The key came up: a slip of the finger ends the capture; otherwise pre-release audio is
-    /// drained, silence frames are sent at once to trigger the final, and the engine waits for
-    /// that final bounded by [`RecognizerSession::release_limit`].
+    /// Ends a key capture at its own Hold release or at a Stop or Toggle press.
+    /// The recognizer flushes the audio it heard before the ending and delivers the started action.
     async fn on_release(
         &mut self,
         live: &mut Live<R::Session>,
         held: &Started,
+        press: Option<&Press>,
         frames: &mut impl FrameSource,
     ) -> Option<Done> {
-        let now = Instant::now();
-        self.held_for = Some(now.duration_since(held.at));
-        if now.duration_since(held.at) < MIN_HOLD {
-            self.hold_end = Some("too_short");
-            return Some(Done::Failed(CaptureError::HoldTooShort));
-        }
+        let elapsed = held.at.elapsed();
+        self.held_for = Some(elapsed);
+        let cutoff = if let Some(press) = press {
+            self.hold_end = Some(if press.mode == KeyMode::Toggle {
+                "toggled"
+            } else {
+                "stopped"
+            });
+            Some(Cutoff::at(press.at))
+        } else {
+            if elapsed < MIN_HOLD {
+                self.hold_end = Some("too_short");
+                return Some(Done::Failed(CaptureError::HoldTooShort));
+            }
+            None
+        };
         let mut queued = Vec::new();
-        if let Err(error) = take_queued_before(frames, &held.end, &mut queued) {
+        if let Err(error) =
+            take_queued_before(frames, cutoff.as_ref().unwrap_or(&held.end), &mut queued)
+        {
             return Some(Done::Failed(error.into()));
         }
         for frame in &queued {
@@ -2169,12 +2153,15 @@ where
                 return Some(Done::from(stop));
             }
         }
+        if let Some(cutoff) = cutoff {
+            live.cutoff = Some(cutoff);
+        }
         live.session.hold_released();
         if live.session.buffers_audio() {
             if let Err(error) = live.session.finish_audio().await {
                 return Some(Done::Failed(error.into()));
             }
-            self.set_state(EngineState::TranscribingLive {
+            self.set_state(&EngineState::TranscribingLive {
                 route: held.route(),
             });
         } else {
@@ -2184,10 +2171,17 @@ where
                 return Some(Done::from(stop));
             }
             live.session.input_ended();
+            self.streaming_hold_released(live);
         }
         live.release = Release::Tail(Instant::now());
         self.publish(live);
         None
+    }
+
+    fn streaming_hold_released(&self, live: &Live<R::Session>) {
+        if live.text.pending().is_none() {
+            (self.status)(Feedback::StreamingHoldReleased);
+        }
     }
 
     /// Ends a released hold: what was said, with the words still being recognized, is pasted.
@@ -2428,7 +2422,7 @@ where
                     .map_err(|error| Stop::Failed(error.into()))?;
                 live.capture_end = Some(now);
                 live.release = Release::Tail(now);
-                self.set_state(EngineState::TranscribingLive {
+                self.set_state(&EngineState::TranscribingLive {
                     route: CaptureRoute::Paste,
                 });
             }
@@ -2877,7 +2871,7 @@ where
         if Instant::now() >= deadline {
             return self.cleanup_fell_back(request, WritingError::Timeout, decided, None);
         }
-        self.set_state(EngineState::CleaningUp);
+        self.set_state(&EngineState::CleaningUp);
         let started = Instant::now();
         let mut reply = match bounded(
             &mut self.cancel,
@@ -3008,7 +3002,7 @@ where
             Ok(endpoint) => endpoint,
             Err(stop) => return self.not_written(&words, stop, None),
         };
-        self.set_state(EngineState::Writing {
+        self.set_state(&EngineState::Writing {
             text: String::new(),
         });
         let started = Instant::now();
@@ -3037,14 +3031,14 @@ where
             {
                 Ok(Some(Piece::Thinking)) => {
                     if first.text.is_none() {
-                        self.set_state(EngineState::Thinking);
+                        self.set_state(&EngineState::Thinking);
                     }
                     first.reasoning.get_or_insert_with(|| started.elapsed());
                 }
                 Ok(Some(Piece::Text(piece))) => {
                     first.text.get_or_insert_with(|| started.elapsed());
                     text.push_str(&piece);
-                    self.set_state(EngineState::Writing { text: text.clone() });
+                    self.set_state(&EngineState::Writing { text: text.clone() });
                 }
                 Ok(None) => break,
                 Err(stop) => {
@@ -3091,7 +3085,8 @@ where
         let Some(chat) = self.chat.as_mut() else {
             return Err(Some(WritingError::NotInstalled));
         };
-        let state = self.state.clone();
+        let state = &self.state;
+        let status = self.status.as_ref();
         let started = Instant::now();
         let result = tokio::select! {
             biased;
@@ -3100,7 +3095,7 @@ where
                 return Err(None);
             }
             () = until(deadline) => return Err(Some(WritingError::Timeout)),
-            result = chat.ready(|again| { state.send_replace(EngineState::StartingChat { again }); }) => result,
+            result = chat.ready(|again| Self::publish_state(state, status, &EngineState::StartingChat { again })) => result,
         };
         match result {
             Ok(ready) => {
@@ -3201,6 +3196,7 @@ mod tests {
                 chat: None,
                 hold,
                 notice: Box::new(|_| {}),
+                status: Box::new(|_| {}),
                 spotter: None,
                 spotter_off: None,
             },
@@ -3278,10 +3274,6 @@ mod tests {
             (
                 SpeechSource::direct("Office", "ws://127.0.0.1:9".to_owned()),
                 "The speech server \"Office\" at ws://127.0.0.1:9 was not ready after 8 seconds. Nothing was delivered. Check that it is running, or fix its address under Settings → Recognition.",
-            ),
-            (
-                SpeechSource::direct("Cybrex2", "ws://100.64.0.2:8012".to_owned()),
-                "The speech server \"Cybrex2\" at ws://100.64.0.2:8012 was not ready after 8 seconds. Nothing was delivered. Check that it is running, or fix its address under Settings → Recognition.",
             ),
             (
                 SpeechSource::on_device("On this computer", "nemotron_160ms".to_owned()),

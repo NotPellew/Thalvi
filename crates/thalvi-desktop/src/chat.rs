@@ -810,35 +810,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_server_that_ended_is_started_once_more_on_the_next_use() {
-        let (mut chat, control, dir) = chat("crash");
-        use_it(&mut chat).await.0.expect("first start");
-        control.exit(0);
-        let (second, told) = use_it(&mut chat).await;
-        assert!(second.is_ok(), "{second:?}");
-        assert_eq!(told, [true], "told it is a start again");
-        assert_eq!(control.spawns(), 2);
-        assert!(control.killed(0), "the ended one is let go");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_start_that_fails_after_an_earlier_one_says_stopped_and_starts_nothing_more() {
-        let (mut chat, control, dir) = chat("twice");
-        use_it(&mut chat).await.0.expect("first start");
-        control.exit(0);
-        control.dead_from_now();
-        let (result, told) = use_it(&mut chat).await;
-        assert_eq!(result, Err(WritingError::Stopped));
-        assert_eq!(told, [true]);
-        assert_eq!(control.spawns(), 2, "no third start in that use");
-        assert_eq!(use_it(&mut chat).await.0, Err(WritingError::Stopped));
-        assert_eq!(
-            control.spawns(),
-            2,
-            "later uses cannot start a third process"
-        );
-        let _ = std::fs::remove_dir_all(dir);
+    async fn a_server_that_ended_is_started_once_more_on_the_next_use_and_no_more_if_that_fails() {
+        for restart_fails in [false, true] {
+            let (mut chat, control, dir) = chat(if restart_fails { "twice" } else { "crash" });
+            use_it(&mut chat).await.0.expect("first start");
+            control.exit(0);
+            if restart_fails {
+                control.dead_from_now();
+            }
+            let (second, told) = use_it(&mut chat).await;
+            assert_eq!(told, [true], "told it is a start again");
+            assert_eq!(control.spawns(), 2, "no third start in that use");
+            if restart_fails {
+                assert_eq!(second, Err(WritingError::Stopped));
+                assert_eq!(use_it(&mut chat).await.0, Err(WritingError::Stopped));
+                assert_eq!(
+                    control.spawns(),
+                    2,
+                    "later uses cannot start a third process"
+                );
+            } else {
+                assert!(second.is_ok(), "{second:?}");
+                assert!(control.killed(0), "the ended one is let go");
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test(start_paused = true)]

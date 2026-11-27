@@ -58,6 +58,8 @@ pub struct SchemeColors {
     pub muted: Option<Color>,
     pub border: Option<Color>,
     pub accent: Option<Color>,
+    #[cfg(feature = "update-fixture-b")]
+    pub heading_rule: Option<Color>,
     pub on_accent: Option<Color>,
     pub secondary: Option<Color>,
     pub pending: Option<Color>,
@@ -616,6 +618,11 @@ const DESCRIPTORS: &[Descriptor] = &[
     color_desc("colors.muted", "Muted text", &["settings", "overlay"]),
     color_desc("colors.border", "Border", &["settings", "overlay"]),
     color_desc("colors.accent", "Accent", &["settings", "overlay"]),
+    #[cfg(feature = "update-fixture-b")]
+    Descriptor {
+        looks: HOLO,
+        ..color_desc("colors.heading_rule", "Heading rule", &["settings"])
+    },
     color_desc("colors.on_accent", "On accent", &["settings"]),
     Descriptor {
         id: "colors.secondary",
@@ -889,6 +896,8 @@ pub struct Scheme {
     pub muted: Color,
     pub border: Color,
     pub accent: Color,
+    #[cfg(feature = "update-fixture-b")]
+    pub heading_rule: Color,
     pub on_accent: Color,
     pub secondary: Color,
     pub pending: Color,
@@ -972,6 +981,8 @@ fn apply(base: &Scheme, colors: Option<&SchemeColors>, rest: Option<&Overrides>)
         muted: pick(colors.muted, base.muted),
         border: pick(colors.border, base.border),
         accent: pick(colors.accent, base.accent),
+        #[cfg(feature = "update-fixture-b")]
+        heading_rule: pick(colors.heading_rule, base.heading_rule),
         on_accent: pick(colors.on_accent, base.on_accent),
         secondary: pick(colors.secondary, base.secondary),
         pending: pick(colors.pending, base.pending),
@@ -1075,6 +1086,8 @@ fn neon_dark() -> Scheme {
         muted: must("#9cc7b4"),
         border: must("#12315e"),
         accent: must("#2bff88"),
+        #[cfg(feature = "update-fixture-b")]
+        heading_rule: must("#ffdc73"),
         on_accent: must("#02120a"),
         secondary: must("#3b82f6"),
         pending: must("#ffc24b"),
@@ -1131,7 +1144,9 @@ fn holo() -> Scheme {
         text: must("#dfe9ef"),
         muted: must("#8ea7b5"),
         border: must("#5d92b4"),
-        accent: must("#6bf8ff"),
+        accent: module_accent(),
+        #[cfg(feature = "update-fixture-b")]
+        heading_rule: must("#ffdc73"),
         on_accent: must("#04141a"),
         secondary: must("#6bf8ff"),
         pending: must("#ffc24b"),
@@ -1167,7 +1182,9 @@ fn gunmetal() -> Scheme {
         text: must("#dfe9ef"),
         muted: must("#8ea7b5"),
         border: must("#3a3a3d"),
-        accent: must("#6bf8ff"),
+        accent: module_accent(),
+        #[cfg(feature = "update-fixture-b")]
+        heading_rule: must("#ffdc73"),
         on_accent: must("#6bf8ff"),
         secondary: must("#6bf8ff"),
         pending: must("#ffc24b"),
@@ -1197,6 +1214,14 @@ fn gunmetal() -> Scheme {
 
 fn must(hex: &str) -> Color {
     Color::parse(hex).unwrap_or(Color([0, 0, 0, 0xff]))
+}
+
+fn module_accent() -> Color {
+    must(if cfg!(feature = "update-fixture-b") {
+        "#b5ff62"
+    } else {
+        "#6bf8ff"
+    })
 }
 
 /// Reads one look. A property that does not apply, or a leaf out of range, keeps the original JSON.
@@ -1288,6 +1313,10 @@ fn read_scheme(look: Look, value: &Value, path: &str) -> Result<SchemeColors, St
             "muted" => scheme.muted = Some(leaf_color(value, &format!("{path}.muted"))?),
             "border" => scheme.border = Some(leaf_color(value, &format!("{path}.border"))?),
             "accent" => scheme.accent = Some(leaf_color(value, &format!("{path}.accent"))?),
+            #[cfg(feature = "update-fixture-b")]
+            "heading_rule" if look == Look::Holo => {
+                scheme.heading_rule = Some(leaf_color(value, &format!("{path}.heading_rule"))?);
+            }
             "on_accent" => {
                 scheme.on_accent = Some(leaf_color(value, &format!("{path}.on_accent"))?);
             }
@@ -1709,6 +1738,8 @@ fn scheme_value(scheme: &SchemeColors) -> Value {
     put("muted", scheme.muted);
     put("border", scheme.border);
     put("accent", scheme.accent);
+    #[cfg(feature = "update-fixture-b")]
+    put("heading_rule", scheme.heading_rule);
     put("on_accent", scheme.on_accent);
     put("secondary", scheme.secondary);
     let mut state = Map::new();
@@ -2211,53 +2242,50 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_version_keeps_the_original_json_and_resolves_to_the_built_in_look() {
-        let json =
-            r##"{"version":9,"holo":{"colors":{"dark":{"accent":"#ffffff"}},"future":true}}"##;
-        let loaded = themes(json);
-        assert!(loaded.of(Look::Holo).is_none(), "no look is invented");
-        let style = Style::resolve(Look::Holo, loaded.of(Look::Holo));
-        assert_eq!(style.dark.accent.to_hex(), "#6bf8ff");
-        let written = loaded.to_value();
-        assert_eq!(written, serde_json::from_str::<Value>(json).unwrap());
-        assert_eq!(loaded.notices().len(), 1);
-        assert_eq!(
-            loaded.notices()[0],
-            "Your look customizations could not be read (themes.version 9 is newer than this Thalvi)."
-        );
-        assert!(!loaded.notices()[0].contains("Holo"));
-    }
-
-    #[test]
-    fn a_themes_value_that_is_not_an_object_is_kept_and_names_no_look() {
-        for json in [r#""bad""#, "[]", "1", "true"] {
+    fn an_empty_or_unreadable_themes_value_is_kept_and_names_no_look() {
+        let not_an_object =
+            Some("Your look customizations could not be read (themes must be an object).");
+        for (json, notice) in [
+            ("{}", None),
+            (
+                r##"{"version":9,"holo":{"colors":{"dark":{"accent":"#ffffff"}},"future":true}}"##,
+                Some(
+                    "Your look customizations could not be read (themes.version 9 is newer than this Thalvi).",
+                ),
+            ),
+            (r#""bad""#, not_an_object),
+            ("[]", not_an_object),
+            ("1", not_an_object),
+            ("true", not_an_object),
+        ] {
             let loaded = themes(json);
-            assert!(loaded.of(Look::Gunmetal).is_none());
-            assert!(loaded.of(Look::Holo).is_none());
-            assert!(loaded.of(Look::Neon).is_none());
+            assert!(loaded.of(Look::Gunmetal).is_none(), "{json}");
+            assert!(
+                loaded.of(Look::Holo).is_none(),
+                "{json}: no look is invented"
+            );
+            assert!(loaded.of(Look::Neon).is_none(), "{json}");
+            // An empty object is written back with its version; anything unreadable as it came.
+            let kept = if notice.is_some() {
+                json
+            } else {
+                r#"{"version":1}"#
+            };
             assert_eq!(
                 loaded.to_value(),
-                serde_json::from_str::<Value>(json).unwrap()
+                serde_json::from_str::<Value>(kept).unwrap(),
+                "{json}"
             );
-            assert!(!loaded.is_empty());
-            assert_eq!(loaded.notices().len(), 1);
-            assert_eq!(
-                loaded.notices()[0],
-                "Your look customizations could not be read (themes must be an object)."
-            );
+            assert_eq!(loaded.is_empty(), notice.is_none(), "{json}");
+            assert_eq!(loaded.notices(), Vec::from_iter(notice), "{json}");
+            assert!(!loaded.notices().concat().contains("Holo"), "{json}");
             for look in [Look::Neon, Look::Holo, Look::Gunmetal] {
                 let style = Style::resolve(look, loaded.of(look));
-                assert_eq!(style, Style::resolve(look, None));
+                assert_eq!(style, Style::resolve(look, None), "{json}");
             }
+            let holo = Style::resolve(Look::Holo, loaded.of(Look::Holo));
+            assert_eq!(holo.dark.accent.to_hex(), "#6bf8ff", "{json}");
         }
-    }
-
-    #[test]
-    fn an_empty_themes_object_is_empty() {
-        let loaded = themes("{}");
-        assert!(loaded.is_empty());
-        assert_eq!(loaded.notices(), Vec::<String>::new());
-        assert!(loaded.of(Look::Gunmetal).is_none());
     }
 
     #[test]

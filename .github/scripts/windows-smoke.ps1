@@ -1,8 +1,46 @@
 # Installs the built desktop app, checks its Whisper helpers, starts it, opens Settings, feeds a
-# dictation fixture into Notepad, and saves screenshots of the desktop.
-param([Parameter(Mandatory)][string]$Installer, [Parameter(Mandatory)][string]$OutDir)
+# dictation fixture into Notepad, and saves screenshots of the desktop. Heavy CI can instead run a
+# signed local update on a fresh account and record the NSIS process exit status.
+param(
+  [Parameter(Mandatory)][string]$Installer,
+  [Parameter(Mandatory)][string]$OutDir,
+  [string]$UpdateFeed,
+  [string]$ExpectedInstaller
+)
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $OutDir | Out-Null
+
+if ($UpdateFeed) {
+  $exitWatch = Start-Job -ArgumentList $ExpectedInstaller -ScriptBlock {
+    param([string]$InstallerName)
+    $name = [IO.Path]::GetFileNameWithoutExtension($InstallerName)
+    $deadline = [DateTime]::UtcNow.AddMinutes(15)
+    do {
+      foreach ($process in [Diagnostics.Process]::GetProcessesByName($name)) {
+        try {
+          [void]$process.Handle
+        } catch [InvalidOperationException] {
+          continue
+        }
+        if (-not $process.WaitForExit(120000)) { throw 'the NSIS updater did not exit' }
+        return @{ process = $InstallerName; pid = $process.Id; exit_code = $process.ExitCode }
+      }
+      Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+  }
+  try {
+    python (Join-Path $PSScriptRoot 'e2e/update-fixture.py') drive $Installer $OutDir $UpdateFeed
+    if ($LASTEXITCODE -ne 0) { throw "the signed update fixture exited with $LASTEXITCODE" }
+    if (-not (Wait-Job $exitWatch -Timeout 15)) { throw 'the NSIS updater process was not observed' }
+    $stopped = Receive-Job $exitWatch
+    if ($null -eq $stopped) { throw 'the NSIS updater did not report an exit status' }
+    $stopped | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutDir 'update-installer.json')
+    if ($stopped.exit_code -ne 0) { throw "the NSIS updater exited with $($stopped.exit_code)" }
+  } finally {
+    Remove-Job $exitWatch -Force
+  }
+  return
+}
 
 $config = Join-Path $env:APPDATA 'thalvi\desktop.json'
 New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null

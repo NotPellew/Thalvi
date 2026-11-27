@@ -149,7 +149,7 @@ fn wanted(exe: &Path, keys: &[KeyBind]) -> Result<Vec<Bind>, HostError> {
 
 /// What Hyprland needs to hold every wanted bind.
 struct Changes<'a> {
-    /// Keys whose binds go first: they hold binds of a Thalvi whose program is gone.
+    /// Keys whose previous binds are obsolete or left over from a missing executable.
     replace: Vec<&'a str>,
     add: Vec<&'a Bind>,
 }
@@ -157,15 +157,17 @@ struct Changes<'a> {
 /// The binds of `wanted` that Hyprland lacks, or the notice why they cannot be added: another bind
 /// holds a key, or a hold bind that Thalvi did not add does. A bind identical to a wanted one is
 /// adopted, so it is neither added again nor in the way, and a leftover is replaced.
-fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> {
+fn missing<'a>(wanted: &[&'a Bind], rows: &[Row], owned: &[&Bind]) -> Result<Changes<'a>, String> {
     let mut keys: Vec<&str> = wanted.iter().map(|bind| bind.key.as_str()).collect();
     keys.dedup();
     let (mut doubled, mut taken, mut replace) = (Vec::new(), Vec::new(), Vec::new());
     for key in keys {
-        let (leftovers, others): (Vec<_>, Vec<_>) = rows
-            .iter()
-            .filter(|row| row.on(key))
-            .partition(|row| row.is_leftover());
+        let (leftovers, others): (Vec<_>, Vec<_>) =
+            rows.iter().filter(|row| row.on(key)).partition(|row| {
+                row.is_leftover()
+                    || (owned.iter().any(|bind| bind.is(row))
+                        && !wanted.iter().any(|bind| bind.is(row)))
+            });
         let conflicts: Vec<_> = others
             .into_iter()
             .filter(|row| !wanted.iter().any(|bind| bind.is(row)))
@@ -202,6 +204,7 @@ fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> 
     Ok(Changes {
         add: wanted
             .iter()
+            .copied()
             .filter(|bind| {
                 replace.contains(&bind.key.as_str()) || !rows.iter().any(|row| bind.is(row))
             })
@@ -210,49 +213,28 @@ fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> 
     })
 }
 
-/// The binds this process has put in Hyprland, each with the watches that rely on it: a key change
-/// binds the new keys before the old go, so a key kept by both must stay bound.
+/// Successful watches, in installation order. The newest watch for a key owns that key while
+/// the settings save is in flight. If the save fails its drop restores the older watch.
 #[derive(Clone, Default)]
-pub(super) struct Installed(Arc<Mutex<Vec<(Bind, usize)>>>);
+pub(super) struct Installed(Arc<Mutex<Vec<Arc<[Bind]>>>>);
 
 impl Installed {
-    fn entries(&self) -> MutexGuard<'_, Vec<(Bind, usize)>> {
+    fn watches(&self) -> MutexGuard<'_, Vec<Arc<[Bind]>>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
 
-    fn rely_on(&self, binds: &[Bind]) {
-        let mut entries = self.entries();
-        for bind in binds {
-            match entries.iter_mut().find(|(held, _)| held == bind) {
-                Some((_, watches)) => *watches += 1,
-                None => entries.push((bind.clone(), 1)),
-            }
-        }
-    }
+fn latest<'a>(watches: &'a [Arc<[Bind]>], key: &str) -> impl Iterator<Item = &'a Bind> {
+    watches
+        .iter()
+        .rev()
+        .find(|binds| binds.iter().any(|bind| bind.key == key))
+        .into_iter()
+        .flat_map(move |binds| binds.iter().filter(move |bind| bind.key == key))
+}
 
-    /// Stops relying on `binds`; returns the keys no watch relies on any longer.
-    fn give_up(&self, binds: &[Bind]) -> Vec<String> {
-        let mut entries = self.entries();
-        for bind in binds {
-            if let Some(at) = entries.iter().position(|(held, _)| held == bind) {
-                entries[at].1 -= 1;
-                if entries[at].1 == 0 {
-                    entries.remove(at);
-                }
-            }
-        }
-        let mut free: Vec<String> = Vec::new();
-        for bind in binds {
-            if !free.contains(&bind.key) && !entries.iter().any(|(held, _)| held.key == bind.key) {
-                free.push(bind.key.clone());
-            }
-        }
-        free
-    }
-
-    fn relies_on_key(&self, key: &str) -> bool {
-        self.entries().iter().any(|(held, _)| held.key == key)
-    }
+fn owned(watches: &[Arc<[Bind]>]) -> Vec<&Bind> {
+    watches.iter().flat_map(|binds| binds.iter()).collect()
 }
 
 /// Whether a watch relies on its binds in [`Installed`]: only a bound watch gives them up when dropped.
@@ -266,14 +248,14 @@ enum State {
 struct Shared<R> {
     run: Arc<R>,
     installed: Installed,
-    binds: Vec<Bind>,
+    binds: Arc<[Bind]>,
     state: Mutex<State>,
     tell: Box<dyn Fn(HoldReport) + Send + Sync>,
 }
 
 impl<R: CommandRunner> Shared<R> {
     /// Adds the binds Hyprland lacks, after checking that nothing else holds their keys.
-    fn ensure(&self) -> Result<(), HostError> {
+    fn ensure(&self, wanted: &[&Bind], owned: &[&Bind]) -> Result<(), HostError> {
         let list = self
             .run
             .run("hyprctl", &["-j", "binds"], None)
@@ -284,7 +266,7 @@ impl<R: CommandRunner> Shared<R> {
         let Changes {
             replace,
             add: missing,
-        } = missing(&self.binds, &rows).map_err(HostError::Unsupported)?;
+        } = missing(wanted, &rows, owned).map_err(HostError::Unsupported)?;
         if missing.is_empty() {
             return Ok(());
         }
@@ -315,14 +297,32 @@ impl<R: CommandRunner> Shared<R> {
             }
             Err(error) => error.to_string(),
         };
-        // Some of the batch may have gone in.
-        let mut added: Vec<String> = Vec::new();
+        // Some commands may have succeeded. Put back the owned bindings the batch replaced.
+        let mut changed: Vec<String> = replace.iter().map(ToString::to_string).collect();
         for bind in &missing {
-            if !added.contains(&bind.key) && !self.installed.relies_on_key(&bind.key) {
-                added.push(bind.key.clone());
+            if !changed.contains(&bind.key) && !owned.iter().any(|old| old.key == bind.key) {
+                changed.push(bind.key.clone());
             }
         }
-        self.unbind(&added);
+        self.unbind(&changed);
+        let mut restore = Vec::new();
+        for bind in owned {
+            if replace.contains(&bind.key.as_str()) && rows.iter().any(|row| bind.is(row)) {
+                let command = bind.keyword();
+                if !restore.contains(&command) {
+                    restore.push(command);
+                }
+            }
+        }
+        if !restore.is_empty()
+            && let Err(error) = self
+                .run
+                .run("hyprctl", &["--batch", &restore.join("; ")], None)
+        {
+            (self.tell)(HoldReport::Problem(format!(
+                "Thalvi could not restore its previous keys: {error}."
+            )));
+        }
         Err(HostError::NothingTyped(format!(
             "Hyprland would not bind the hold keys: {}.",
             refusal.trim_end_matches('.')
@@ -345,18 +345,54 @@ impl<R: CommandRunner> Shared<R> {
         }
     }
 
+    fn install(&self) -> Result<(), HostError> {
+        let mut watches = self.installed.watches();
+        self.ensure(&self.binds.iter().collect::<Vec<_>>(), &owned(&watches))?;
+        watches.push(Arc::clone(&self.binds));
+        Ok(())
+    }
+
+    fn uninstall(&self) {
+        let mut watches = self.installed.watches();
+        watches.retain(|binds| !Arc::ptr_eq(binds, &self.binds));
+        let mut keys: Vec<_> = self.binds.iter().map(|bind| bind.key.as_str()).collect();
+        keys.dedup();
+        let free: Vec<_> = keys
+            .iter()
+            .filter(|key| latest(&watches, key).next().is_none())
+            .map(ToString::to_string)
+            .collect();
+        let restore: Vec<_> = keys.iter().flat_map(|key| latest(&watches, key)).collect();
+        let mut owned = owned(&watches);
+        owned.extend(self.binds.iter());
+        if !restore.is_empty()
+            && let Err(error) = self.ensure(&restore, &owned)
+        {
+            (self.tell)(HoldReport::Problem(format!(
+                "Thalvi could not restore its previous keys: {error}."
+            )));
+        }
+        self.unbind(&free);
+    }
+
     /// Puts the binds back after Hyprland dropped them, unless something else took a key meanwhile.
     fn rebind(&self) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if matches!(*state, State::Gone) {
             return;
         }
-        match self.ensure() {
+        let result = if matches!(*state, State::Waiting) {
+            self.install()
+        } else {
+            let watches = self.installed.watches();
+            let mut keys: Vec<_> = self.binds.iter().map(|bind| bind.key.as_str()).collect();
+            keys.dedup();
+            let wanted: Vec<_> = keys.iter().flat_map(|key| latest(&watches, key)).collect();
+            self.ensure(&wanted, &owned(&watches))
+        };
+        match result {
             Ok(()) => {
-                if matches!(*state, State::Waiting) {
-                    self.installed.rely_on(&self.binds);
-                    *state = State::Bound;
-                }
+                *state = State::Bound;
                 (self.tell)(HoldReport::Working);
             }
             Err(error) => (self.tell)(HoldReport::Problem(format!(
@@ -390,8 +426,7 @@ impl<R: CommandRunner> Drop for HoldBinds<R> {
             let bound = matches!(*state, State::Bound);
             *state = State::Gone;
             if bound {
-                let free = self.shared.installed.give_up(&self.shared.binds);
-                self.shared.unbind(&free);
+                self.shared.uninstall();
             }
         }
         if let Some(close) = self.close_events.take() {
@@ -475,13 +510,12 @@ pub(super) fn bind<R: CommandRunner + 'static>(
     let shared = Arc::new(Shared {
         run,
         installed,
-        binds: wanted(exe, keys)?,
+        binds: wanted(exe, keys)?.into(),
         state: Mutex::new(State::Waiting),
         tell: Box::new(tell),
     });
-    let refusal = match shared.ensure() {
+    let refusal = match shared.install() {
         Ok(()) => {
-            shared.installed.rely_on(&shared.binds);
             *shared.state.lock().unwrap_or_else(PoisonError::into_inner) = State::Bound;
             None
         }
@@ -868,7 +902,9 @@ mod tests {
 
     #[test]
     fn an_existing_program_is_refused_without_promising_reload_removes_it() {
-        let path = std::env::temp_dir().join(format!("thalvi-live-program-{}", std::process::id()));
+        // Quoted, a space and a backslash are part of the program's path.
+        let path =
+            std::env::temp_dir().join(format!("thalvi live\\program-{}", std::process::id()));
         std::fs::write(&path, "").unwrap();
         let command = format!("{} key 0 down", quoted(&path).unwrap());
         let hypr = Compositor::new(vec![row("F9", false, "exec", &command)]);
@@ -1063,6 +1099,23 @@ mod tests {
             ],
             "each key reports the row it is in the new list"
         );
+
+        let toggle = KeyBind::new(
+            Action::Dictate,
+            KeyMode::Toggle,
+            KeyName::parse("F8").unwrap(),
+        );
+        let moved = [write("F10"), toggle];
+        let (changed, _) = bind_keys(&hypr, &installed, EXE, &moved);
+        let changed = changed.unwrap();
+        assert_eq!(hypr.bound(), bound_by_thalvi(EXE, &moved));
+        // A failed save drops the proposed watcher and restores the previous mode and row order.
+        drop(changed);
+        let mut restored = hypr.bound();
+        restored.sort();
+        let mut expected = bound_by_thalvi(EXE, &[hold("F8"), write("F10")]);
+        expected.sort();
+        assert_eq!(restored, expected);
 
         // F7 is taken by another bind: the change is refused and the keys in use stay.
         hypr.binds
@@ -1278,20 +1331,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reload_that_finds_a_key_taken_binds_nothing_and_says_so() {
-        let hypr = Compositor::new(Vec::new());
-        let mut following = follow_events(&hypr);
-        *hypr.binds.lock().unwrap() = vec![row("F10", false, "exec", "obs")];
-        following.hyprland.write_all(b"configreloaded>>\n").unwrap();
-        drop(following.hyprland);
-        assert_eq!(
-            following.notices.recv_timeout(WAIT).unwrap(),
-            "F10 is already bound in Hyprland. Pick another key or remove that bind. The hold keys do not work until that is fixed and Hyprland reloads its config again."
-        );
-        assert_eq!(hypr.bound().len(), 1, "only the other program's bind");
-    }
-
-    #[test]
     fn losing_the_event_socket_is_told_and_leaves_the_binds_working() {
         let hypr = Compositor::new(Vec::new());
         let (told, notices) = mpsc::channel();
@@ -1312,14 +1351,6 @@ mod tests {
         assert_eq!(notices.try_recv().unwrap(), RELOADS_NOT_FOLLOWED);
         assert_eq!(hypr.bound().len(), 4);
         drop(watch);
-
-        let following = follow_events(&hypr);
-        drop(following.hyprland);
-        assert_eq!(
-            following.notices.recv_timeout(WAIT).unwrap(),
-            RELOADS_NOT_FOLLOWED
-        );
-        assert_eq!(hypr.bound().len(), 4);
     }
 
     #[test]

@@ -57,7 +57,9 @@ directing you.
   as that takes: one test per behavior, not per function, and table-driven
   cases instead of near-copies. Test what a caller can observe, not
   internals, and only failures that can really happen, not invented or
-  far-fetched ones. A bug fix adds a test that fails without it. Never sleep
+  far-fetched ones. A fix or feature first extends the existing test of that
+  behavior with a row or an assertion that fails without it, and adds a test
+  only when none covers it. Never sleep
   for a fixed time: drive time with a paused or fake clock, or wait for an
   observable event under a bounded timeout.
 - Rust lint exceptions use a narrow `#[expect(..., reason = "...")]` for a
@@ -152,6 +154,9 @@ Locally, run checks in three stages; none replaces a required CI result.
 
 Fuzz targets live in `fuzz/fuzz_targets/`, a nightly-only workspace of its own; run one with
 `cargo fuzz run <target> -- -max_total_time=300` from `fuzz/`, under `dev-job`.
+Before a release, `.github/scripts/break-it` runs long property tests, every fuzz target and
+optionally mutants for hours (`--help`). Only a person, or an agent explicitly asked to, starts
+`break-it cloud`: it rents a paid Docker cloud sandbox.
 
 Run mutation testing locally only when an issue explicitly asks for it, and
 only `--in-diff` against the base with no desktop session and a throwaway

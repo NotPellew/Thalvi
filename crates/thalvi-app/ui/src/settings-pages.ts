@@ -758,7 +758,6 @@ function keybindRow(
   index: number,
   bind: KeyBind,
   { settings, controls, apply }: PageContext,
-  others: readonly HTMLElement[],
   rebuilt: () => void,
 ): HTMLElement {
   const shown = el("kbd", { class: "key", "aria-live": "polite" }, keyLabel(bind.key));
@@ -768,7 +767,7 @@ function keybindRow(
   problem.classList.add("keybind-note");
   const clear = (): void => {
     applied.textContent = "";
-    for (const notice of [problem, ...others]) say(notice, "");
+    say(problem, "");
   };
   const change = (edit: (row: KeyBind) => void, explain?: (reason: string) => string): Promise<void> => {
     clear();
@@ -776,37 +775,36 @@ function keybindRow(
       const row = next.keys[index];
       if (row === undefined) return;
       edit(row);
-      hint.textContent = MODE_HINTS[row.mode];
-    }, explain === undefined ? {} : { explain }).then(
-      () => {
-        applied.textContent = APPLIED_TEXT;
-        shown.textContent = keyLabel(settings.keys[index]?.key ?? bind.key);
-      },
-      (error: unknown) => {
-        say(problem, errorText(error));
-        shown.textContent = keyLabel(settings.keys[index]?.key ?? bind.key);
-      },
-    );
+    }, explain === undefined ? {} : { explain }).then(() => {
+      applied.textContent = APPLIED_TEXT;
+      shown.textContent = keyLabel(settings.keys[index]?.key ?? bind.key);
+      hint.textContent = MODE_HINTS[settings.keys[index]?.mode ?? bind.mode];
+    });
   };
   const action = controls.select(KEY_ACTIONS, bind.action, (value) =>
     change((row) => {
       row.action = value;
     }),
+    "Action",
   );
   const mode = controls.select(KEY_MODES, bind.mode, (value) =>
     change((row) => {
       row.mode = value;
     }),
+    "Mode",
   );
   const pick = button("Change…", () => {
     recordKey(
       pick,
       shown,
-      [problem, applied, ...others],
+      [problem, applied],
       (name) => {
         void change((row) => {
           row.key = name;
-        }, (reason) => keyNotice(reason, name));
+        }, (reason) => keyNotice(reason, name)).catch((error: unknown) => {
+          say(problem, errorText(error));
+          shown.textContent = keyLabel(settings.keys[index]?.key ?? bind.key);
+        });
       },
       () => {
         shown.textContent = keyLabel(settings.keys[index]?.key ?? bind.key);
@@ -840,14 +838,14 @@ function keybinds(context: PageContext): HTMLElement[] {
     const why = (): HTMLElement => unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null });
     return [group("Keys"), row("Keys", null, why())];
   }
-  const notices: HTMLElement[] = [];
   const list = el("div", { class: "keys" });
   const applied = el("small", { class: "applied keybind-applied", role: "status" });
   const problem = note();
   problem.classList.add("keybind-note");
   const render = (focus: number | null = null): void => {
-    const rows = settings.keys.map((bind, index) => keybindRow(index, bind, context, notices, () => {
-      render(focus);
+    const rows = settings.keys.map((bind, index) => keybindRow(index, bind, context, () => {
+      render(settings.keys.length === 0 ? null : Math.min(index, settings.keys.length - 1));
+      if (settings.keys.length === 0) add.focus();
     }));
     if (rows.length === 0) {
       rows.push(row("Keys", "No keys yet. Add one to dictate with the keyboard.", el("span", {})));
@@ -859,11 +857,11 @@ function keybinds(context: PageContext): HTMLElement[] {
     }
   };
   const add = button("+ Add keybind", () => {
-    for (const notice of [problem, applied, ...notices]) say(notice, "");
+    for (const notice of [problem, applied]) say(notice, "");
     recordKey(
       add,
       applied,
-      [problem, ...notices],
+      [problem],
       (name) => {
         apply((next) => {
           next.keys.push({ action: "dictate", mode: "hold", key: name });
@@ -880,7 +878,7 @@ function keybinds(context: PageContext): HTMLElement[] {
     );
   });
   const restore = button("Restore defaults", () => {
-    for (const notice of [problem, applied, ...notices]) say(notice, "");
+    for (const notice of [problem, applied]) say(notice, "");
     apply((next) => {
       next.keys = keyDefaults.keys.map((bind) => ({ ...bind }));
     }).then(

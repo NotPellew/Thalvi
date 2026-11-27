@@ -16,6 +16,7 @@ function downloadFailure(rejection: unknown): DownloadFailure {
 }
 
 export function tauriBackend(): Backend {
+  const dark = window.matchMedia("(prefers-color-scheme: dark)");
   return {
     getStatus: () => invoke<Status>("get_status"),
     onStatus: (listener) => {
@@ -46,7 +47,8 @@ export function tauriBackend(): Backend {
       });
     },
     getSettings: () => invoke<Settings>("get_settings"),
-    getLookStyles: () => invoke<LookStyles>("get_look_styles"),
+    getLookStyles: () => invoke<LookStyles>("get_look_styles", { dark: dark.matches }),
+    onThemeChanged: (listener) => { dark.addEventListener("change", listener); },
     previewOverlay: (state: OverlayPreviewState, scale: number) => invoke<ArrayBuffer>("preview_overlay", { state, scale }),
     settingsReady: () => invoke<undefined>("settings_ready"),
     saveSettings: (patch) => invoke<undefined>("save_settings", { patch }),

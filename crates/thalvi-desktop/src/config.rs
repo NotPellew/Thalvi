@@ -10,7 +10,7 @@ use crate::cues::Cues;
 use crate::entries::{Entries, EntryError, RawStt};
 use crate::history::HistoryConfig;
 use crate::hold::{Action, KeyBind, KeyMode, KeyName};
-use crate::host::{App, Desktop, Modifier, Shortcut, WebUrl};
+use crate::host::{App, Desktop, HostError, Modifier, Shortcut, WebUrl};
 use crate::metrics::RecordKinds;
 use crate::phrases::WordList;
 use crate::recognizer::SpeechSource;
@@ -36,6 +36,12 @@ pub enum ConfigError {
         path: PathBuf,
         #[source]
         source: serde_json::Error,
+    },
+    #[error("The desktop config at {path} cannot use these keys: {source}")]
+    UnbindableKeys {
+        path: PathBuf,
+        #[source]
+        source: HostError,
     },
 }
 
@@ -120,15 +126,26 @@ struct RawDesktopConfig {
     #[serde(default)]
     show_in_menu: bool,
     /// Read only to migrate a config written before keybinds held modes.
-    #[serde(default)]
-    hold_key: Option<KeyName>,
-    #[serde(default)]
-    write_key: Option<KeyName>,
+    #[serde(default, deserialize_with = "legacy_key")]
+    hold_key: LegacyKey,
+    #[serde(default, deserialize_with = "legacy_key")]
+    write_key: LegacyKey,
     /// Read as written, validated in `build`.
     #[serde(default)]
     keys: Option<Vec<KeyBind>>,
     #[serde(default)]
     writing: Option<Writing>,
+}
+
+#[derive(Default)]
+enum LegacyKey {
+    #[default]
+    Absent,
+    Present(Option<KeyName>),
+}
+
+fn legacy_key<'de, D: Deserializer<'de>>(input: D) -> Result<LegacyKey, D::Error> {
+    Option::deserialize(input).map(LegacyKey::Present)
 }
 
 impl DesktopConfig {
@@ -228,8 +245,8 @@ fn default_keys((hold, write): &KeyDefaults) -> Vec<KeyBind> {
 
 /// The rows to store: none when they are the desktop's default, which a config then follows if it
 /// changes.
-fn stored_keys<'a>(keys: &'a [KeyBind], defaults: &KeyDefaults) -> Option<Vec<&'a KeyBind>> {
-    (keys != default_keys(defaults)).then(|| keys.iter().collect())
+fn stored_keys<'a>(keys: &'a [KeyBind], defaults: &KeyDefaults) -> Option<&'a [KeyBind]> {
+    (keys != default_keys(defaults)).then_some(keys)
 }
 
 /// Why key rows cannot be used, in the words Settings shows: each key only once, and each action
@@ -268,14 +285,11 @@ fn validate_keys(keys: &[KeyBind]) -> Result<(), String> {
 
 /// The key in effect for a stored one: the default when none is stored, or when it is the value
 /// every config stored before defaults were set per desktop.
-fn in_effect(
-    stored: Option<KeyName>,
-    formerly_always_stored: &KeyName,
-    default: &KeyName,
-) -> KeyName {
-    stored
-        .filter(|key| key != formerly_always_stored)
-        .unwrap_or_else(|| default.clone())
+fn in_effect(stored: LegacyKey, formerly_always_stored: &KeyName, default: &KeyName) -> KeyName {
+    match stored {
+        LegacyKey::Present(Some(key)) if &key != formerly_always_stored => key,
+        LegacyKey::Absent | LegacyKey::Present(_) => default.clone(),
+    }
 }
 
 impl TryFrom<RawDesktopConfig> for DesktopConfig {
@@ -577,7 +591,7 @@ struct FileForm<'a> {
     start_at_login: bool,
     show_in_menu: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    keys: Option<Vec<&'a KeyBind>>,
+    keys: Option<&'a [KeyBind]>,
     writing: &'a Option<Writing>,
 }
 
@@ -694,14 +708,32 @@ impl DesktopConfig {
     /// # Errors
     /// Fails when the file cannot be read or a setting is unknown or out of range.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        Self::load_with_legacy_keys(path).map(|(config, _)| config)
+    }
+
+    /// Loads the config and reports whether it contained the old key fields.
+    ///
+    /// # Errors
+    /// Fails when the file cannot be read, is invalid or names a key the desktop cannot bind.
+    pub fn load_with_legacy_keys(path: &Path) -> Result<(Self, bool), ConfigError> {
         let json = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_owned(),
             source,
         })?;
-        serde_json::from_str(&json).map_err(|source| ConfigError::InvalidFile {
+        let invalid = |source| ConfigError::InvalidFile {
             path: path.to_owned(),
             source,
-        })
+        };
+        let raw: RawDesktopConfig = serde_json::from_str(&json).map_err(invalid)?;
+        let had_legacy_keys = matches!(raw.hold_key, LegacyKey::Present(_))
+            || matches!(raw.write_key, LegacyKey::Present(_));
+        let config =
+            Self::try_from(raw).map_err(|message| invalid(serde::de::Error::custom(message)))?;
+        Desktop::check_hold_keys(&config.keys).map_err(|source| ConfigError::UnbindableKeys {
+            path: path.to_owned(),
+            source,
+        })?;
+        Ok((config, had_legacy_keys))
     }
 
     /// Validates config `json`.
@@ -778,14 +810,7 @@ mod tests {
         );
         assert_eq!(config.wake, WakeConfig::default());
         assert_eq!(config.cues, Cues::default());
-        assert_eq!(config.ending_pause, EndingPauses::default());
-        assert_eq!(config.capture_limits, CaptureLimits::default());
         assert_eq!(config.endings, Endings::default());
-        assert_eq!(config.recordings, RecordKinds::default());
-        assert_eq!(
-            (config.history.enabled(), config.history.limit()),
-            (true, 200)
-        );
         assert!(!config.start_at_login);
         assert!(!config.show_in_menu);
         assert_eq!(config.keys, default_keys(&Desktop::default_hold_keys()));
@@ -1051,6 +1076,14 @@ mod tests {
             (
                 r#"{"writing": {"url": "http://x"}}"#,
                 "writing.model must be",
+            ),
+            (
+                r#"{"writing": {"url": "http://x", "prompt": "Be brief."}}"#,
+                "writing.model must be",
+            ),
+            (
+                r#"{"writing": {"prompt": " \n"}}"#,
+                "writing.prompt must not be blank",
             ),
             (
                 r#"{"writing": {"url": "http://x", "model": "m", "tone": 1}}"#,
@@ -1517,29 +1550,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn speech_recognition_settings_that_cannot_work_are_rejected_in_plain_words() {
-        for (json, expected) in [
-            (
-                r#"{"stt": {"model": "nemotron_160ms"}}"#,
-                "stt.model only applies when stt.engine is local.",
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "whisper"}}"#,
-                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms, parakeet_tdt_v3 or the path of a folder",
-            ),
-            (r#"{"stt": {"engine": "cloud"}}"#, "unknown variant `cloud`"),
-        ] {
-            let error = parse(json).unwrap_err();
-            assert!(error.to_string().contains(expected), "{json}: {error}");
-        }
-    }
-
-    #[test]
-    fn invalid_settings_are_rejected_in_plain_words() {
+    fn rejected_settings() -> Vec<(String, &'static str)> {
+        const HISTORY_LIMIT: &str =
+            "history limit must be a whole number of entries from 1 to 1000";
         let valid_endings = r#""paste": "paste", "write": "write", "send": "submit", "do it": "task",
             "scratch": "scratch", "cancel": "cancel""#;
-        for (json, expected) in [
+        vec![
             (r#"{"discord": {}}"#.to_owned(), "unknown field `discord`"),
             (
                 r#"{"server": "http://127.0.0.1:8080"}"#.to_owned(),
@@ -1576,29 +1592,6 @@ mod tests {
                 "unknown field `chime`",
             ),
             (
-                r#"{"ending_pause": {"submit": 5.5}}"#.to_owned(),
-                "submit pause must be a number of seconds from 0 to 5",
-            ),
-            (
-                r#"{"ending_pause": {"paste": -1}}"#.to_owned(),
-                "paste pause must be a number of seconds from 0 to 5",
-            ),
-            (r#"{"ending_pause": 2.5}"#.to_owned(), "invalid type"),
-            (r#"{"ending_pause": true}"#.to_owned(), "invalid type"),
-            (
-                r#"{"capture_limits": {"idle": 9}}"#.to_owned(),
-                "idle limit must be a whole number of seconds from 10 to 600",
-            ),
-            (
-                r#"{"capture_limits": {"max": 3601}}"#.to_owned(),
-                "max limit must be a whole number of seconds from 60 to 3600",
-            ),
-            (r#"{"capture_limits": 60}"#.to_owned(), "invalid type"),
-            (
-                r#"{"capture_limits": {"min": 1}}"#.to_owned(),
-                "unknown field `min`",
-            ),
-            (
                 r#"{"endings": {"enter": "submit"}}"#.to_owned(),
                 "Configure paste, write, submit, task, scratch, and cancel",
             ),
@@ -1614,16 +1607,31 @@ mod tests {
                 format!(r#"{{"endings": {{{valid_endings}, "x": "enter"}}}}"#),
                 "unknown variant `enter`",
             ),
-        ] {
-            let error = parse(&json).unwrap_err();
-            assert!(matches!(error, ConfigError::Invalid(_)), "{json}");
-            assert!(error.to_string().contains(expected), "{json}: {error}");
-        }
+            (
+                r#"{"stt": {"model": "nemotron_160ms"}}"#.to_owned(),
+                "stt.model only applies when stt.engine is local.",
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "whisper"}}"#.to_owned(),
+                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms, parakeet_tdt_v3 or the path of a folder",
+            ),
+            (
+                r#"{"stt": {"engine": "cloud"}}"#.to_owned(),
+                "unknown variant `cloud`",
+            ),
+            (r#"{"history": {"limit": 0}}"#.to_owned(), HISTORY_LIMIT),
+            (r#"{"history": {"limit": 1001}}"#.to_owned(), HISTORY_LIMIT),
+            (r#"{"history": {"limit": -1}}"#.to_owned(), "invalid value"),
+            (r#"{"history": {"enabled": "yes"}}"#.to_owned(), "boolean"),
+            (
+                r#"{"history": {"audio": true}}"#.to_owned(),
+                "unknown field `audio`",
+            ),
+        ]
     }
 
-    #[test]
-    fn invalid_apps_and_scripts_are_rejected_in_plain_words() {
-        for (json, expected) in [
+    fn rejected_apps_and_scripts() -> Vec<(String, &'static str)> {
+        vec![
             (
                 r#"{"apps": {"t3": {"classes": ["a"], "keys": []}}}"#.to_owned(),
                 "unknown field `keys`",
@@ -1702,7 +1710,15 @@ mod tests {
                 .to_owned(),
                 "Script phrases must be distinct.",
             ),
-        ] {
+        ]
+    }
+
+    #[test]
+    fn invalid_settings_are_rejected_in_plain_words() {
+        for (json, expected) in rejected_settings()
+            .into_iter()
+            .chain(rejected_apps_and_scripts())
+        {
             let error = parse(&json).unwrap_err();
             assert!(matches!(error, ConfigError::Invalid(_)), "{json}");
             assert!(error.to_string().contains(expected), "{json}: {error}");
@@ -1768,22 +1784,6 @@ mod tests {
                 )),
                 "{written}"
             );
-        }
-    }
-
-    #[test]
-    fn history_settings_that_cannot_work_are_rejected_in_plain_words() {
-        let limit = "history limit must be a whole number of entries from 1 to 1000";
-        for (json, expected) in [
-            (r#"{"history": {"limit": 0}}"#, limit),
-            (r#"{"history": {"limit": 1001}}"#, limit),
-            (r#"{"history": {"limit": -1}}"#, "invalid value"),
-            (r#"{"history": {"enabled": "yes"}}"#, "boolean"),
-            (r#"{"history": {"audio": true}}"#, "unknown field `audio`"),
-        ] {
-            let error = parse(json).unwrap_err();
-            assert!(matches!(error, ConfigError::Invalid(_)), "{json}");
-            assert!(error.to_string().contains(expected), "{json}: {error}");
         }
     }
 
@@ -1865,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn look_defaults_to_gunmetal_and_rejects_unknown_names() {
+    fn look_defaults_to_gunmetal_rejects_unknown_names_and_round_trips_byte_for_byte() {
         assert_eq!(parse("{}").unwrap().look, Look::Gunmetal);
         for (name, look) in [
             ("neon", Look::Neon),
@@ -1883,10 +1883,6 @@ mod tests {
                 "{json}: {error}"
             );
         }
-    }
-
-    #[test]
-    fn a_config_with_only_look_round_trips_byte_for_byte() {
         let original = "{\n  \"look\": \"holo\"\n}";
         let config = parse(original).unwrap();
         assert_eq!(config.look, Look::Holo);

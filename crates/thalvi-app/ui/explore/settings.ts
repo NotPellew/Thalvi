@@ -10,17 +10,31 @@ const DEFAULT_RUNS = 40;
 const TIME_LIMIT_MS = 150_000;
 const LOCALE = "en-US";
 const TIME_ZONE = "UTC";
+const PINNED = "fake&at=0";
+const WAKE_LABEL = "Wake model (dictation)";
+const WAKE_FAULT = "fail=wake-download&slow=wake-download";
 const KEYS = ["Tab", "Shift+Tab", "Enter", "Space", "Escape", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"] as const;
 
 type Key = (typeof KEYS)[number];
+type WakeStatus = "Downloading…" | "Ready";
 
 /** One step. A generated click picks the n-th visible control; a regression click names its control. */
 type Action =
   | { kind: "click"; n: number }
   | { kind: "click"; name: string }
+  | { kind: "focus"; name: string }
+  | { kind: "selectWake"; model: string }
   | { kind: "type"; text: string }
   | { kind: "key"; key: Key }
   | { kind: "wait"; ms: number };
+
+type Step = Action & {
+  expect?: {
+    downloadFocused?: true;
+    wake?: { model: string; status: WakeStatus };
+    refusal?: string;
+  };
+};
 
 interface Target {
   x: number;
@@ -34,6 +48,13 @@ interface Observation {
   progress: string[];
   silent: string[];
   unnamed: string[];
+  wake: {
+    model: string;
+    badge: string;
+    option: string;
+    canDownload: boolean;
+    downloadFocused: boolean;
+  } | null;
   now: number;
 }
 
@@ -120,7 +141,22 @@ function observe(): Observation {
       unnamed.push(`${control.tagName.toLowerCase()}${control.id === "" ? "" : `#${control.id}`}`);
     }
   }
-  return { focus, onBody, progress, silent, unnamed, now: Date.now() };
+  const wakeRow = doc.querySelector('[data-label="wake model (dictation)"]');
+  let wake: Observation["wake"] = null;
+  if (wakeRow !== null && visible(wakeRow)) {
+    const picker = wakeRow.querySelector("select");
+    const badge = wakeRow.querySelector(".trow.pick .badge");
+    const download = wakeRow.querySelector(".trow.pick button");
+    const canDownload = download !== null && visible(download) && !download.matches(':disabled, [aria-disabled="true"]');
+    wake = {
+      model: picker?.value ?? "",
+      badge: badge?.checkVisibility({ visibilityProperty: true, opacityProperty: true }) === true ? textOf(badge) : "",
+      option: textOf(picker?.selectedOptions.item(0) ?? null),
+      canDownload,
+      downloadFocused: canDownload && active === download,
+    };
+  }
+  return { focus, onBody, progress, silent, unnamed, wake, now: Date.now() };
 }
 
 /** Scrolls the n-th visible control into view. Runs in the page. */
@@ -175,6 +211,10 @@ function describe(step: Action, what: string): string {
   switch (step.kind) {
     case "click":
       return `click ${what === "" ? "(nothing)" : what}`;
+    case "focus":
+      return `focus ${step.name}`;
+    case "selectWake":
+      return `select wake model ${step.model}`;
     case "type":
       return `type "${step.text}"`;
     case "key":
@@ -230,17 +270,28 @@ async function openContext(session: Session, viewport: { width: number; height: 
 }
 
 /** Waits until a page control has rendered. `boot.ts` imports the fake after `load`. */
-async function gotoSettings(page: Page, base: string, pinned: boolean): Promise<void> {
-  await page.goto(`${base}/settings.html?${pinned ? "fake&at=0" : "fake"}`, { waitUntil: "commit" });
+async function gotoSettings(page: Page, base: string, query: string): Promise<void> {
+  await page.goto(`${base}/settings.html?${query}`, { waitUntil: "commit" });
   await page.locator("nav[aria-label='Settings pages'] button").first().waitFor({ state: "visible" });
   await page.clock.runFor(500);
   await settle(page);
 }
 
-async function play(session: Session, steps: readonly Action[], pinned: boolean, log?: string[]): Promise<void> {
+function checkWakeStatus(wake: Observation["wake"], status: WakeStatus, model?: string): void {
+  const property = status === "Ready" ? "progressEnds" : "wakeDownloadStatus";
+  if (wake === null) throw new Violation(`${property}: the wake model row is hidden`);
+  if (model !== undefined && wake.model !== model) {
+    throw new Violation(`${property}: expected ${model} selected, saw "${wake.option}"`);
+  }
+  if (wake.badge !== status || !wake.option.endsWith(` — ${status}`) || wake.canDownload) {
+    throw new Violation(`${property}: expected ${status} with Download unavailable, saw badge "${wake.badge}", option "${wake.option}", Download ${wake.canDownload ? "enabled" : "unavailable"}`);
+  }
+}
+
+async function play(session: Session, steps: readonly Step[], query: string, log?: string[]): Promise<void> {
   const { context, page, errors } = await openContext(session);
   try {
-    await gotoSettings(page, session.base, pinned);
+    await gotoSettings(page, session.base, query);
     let before = await page.evaluate(observe);
     let progressSince: number | null = null;
     for (const step of steps) {
@@ -256,6 +307,12 @@ async function play(session: Session, steps: readonly Action[], pinned: boolean,
         } else if ("name" in step) {
           throw new Violation(`no visible control named ${step.name}`);
         }
+      } else if (step.kind === "focus") {
+        await page.getByLabel(step.name, { exact: true }).focus();
+      } else if (step.kind === "selectWake") {
+        const picker = page.getByLabel(WAKE_LABEL, { exact: true });
+        await picker.focus();
+        await picker.selectOption(step.model);
       } else if (step.kind === "type") {
         await page.keyboard.type(step.text);
       } else if (step.kind === "key") {
@@ -274,9 +331,20 @@ async function play(session: Session, steps: readonly Action[], pinned: boolean,
       const userMoved = pressedPlain || tabbed;
       if (errors.length > 0) throw new Violation(`errors: ${errors.join("; ")}`);
       if (!before.onBody && after.onBody && !userMoved) throw new Violation(`focusNotDropped: ${before.focus} -> body after ${describe(step, what)}`);
+      if (step.expect?.downloadFocused && !after.wake?.downloadFocused) {
+        throw new Violation(`focusNotDropped: expected focus on Download after ${describe(step, what)}, saw ${after.focus}`);
+      }
       progressSince = after.progress.length > 0 ? (progressSince ?? after.now) : null;
       if (progressSince !== null && after.now - progressSince > 20_000) throw new Violation(`progressEnds: ${after.progress.join(" | ")}`);
+      const wake = after.wake;
+      const expectedWake = step.expect?.wake;
+      if (expectedWake !== undefined) checkWakeStatus(wake, expectedWake.status, expectedWake.model);
+      else if (wake?.badge === "Downloading…" || wake?.option.endsWith(" — Downloading…")) checkWakeStatus(wake, "Downloading…");
       if (after.silent.length > 0) throw new Violation(`refusalsSayWhy: ${after.silent.join(", ")}`);
+      const refusal = step.expect?.refusal;
+      if (refusal !== undefined && await page.getByRole("alert").filter({ hasText: refusal, visible: true }).count() === 0) {
+        throw new Violation(`refusalsSayWhy: no visible alert containing "${refusal}"`);
+      }
       if (after.unnamed.length > 0) throw new Violation(`controlsHaveNames: ${after.unnamed.join(", ")}`);
       before = after;
     }
@@ -285,18 +353,24 @@ async function play(session: Session, steps: readonly Action[], pinned: boolean,
   }
 }
 
-/** Named regressions for the fixed focus bugs. Each step names its control; status is pinned except #454. */
-const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Action[] }[] = [
+const WAKE_DOWNLOADING = { model: "hey_mycroft", status: "Downloading…" } as const;
+const WAKE_READY = { ...WAKE_DOWNLOADING, status: "Ready" } as const;
+const WAKE_START: readonly Step[] = [
+  { kind: "click", name: "Listening" },
+  { kind: "selectWake", model: WAKE_DOWNLOADING.model, expect: { wake: WAKE_DOWNLOADING } },
+];
+
+/** Named regressions for fixed bugs. Most pin the unrelated capture status. */
+const REGRESSIONS: { issue: number; title: string; query?: string; steps: Step[] }[] = [
   {
     issue: 454,
     title: "status refresh while Edit on On this computer is focused",
-    pinned: false,
+    query: "fake",
     steps: [{ kind: "click", name: "Edit On this computer" }, { kind: "wait", ms: 5000 }],
   },
   {
     issue: 531,
     title: "Listening, Change…, Space (hold-key recorder)",
-    pinned: true,
     steps: [
       { kind: "click", name: "Listening" },
       { kind: "click", name: "Change…" },
@@ -306,7 +380,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 532,
     title: "History, delete an entry",
-    pinned: true,
     steps: [
       { kind: "click", name: "History & recordings" },
       { kind: "click", name: "Delete the entry from" },
@@ -315,7 +388,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 533,
     title: "Commands, Remove an app with Space",
-    pinned: true,
     steps: [
       { kind: "click", name: "Commands" },
       { kind: "click", name: "New app name" },
@@ -326,7 +398,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 534,
     title: "Discard the last dictation",
-    pinned: true,
     steps: [
       { kind: "click", name: "History & recordings" },
       { kind: "key", key: "Tab" },
@@ -337,7 +408,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 535,
     title: "Check for updates",
-    pinned: true,
     steps: [
       { kind: "click", name: "App" },
       { kind: "click", name: "Check for updates" },
@@ -346,7 +416,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 536,
     title: "speech-model Download, then the refresh when it finishes",
-    pinned: true,
     steps: [
       { kind: "click", name: "Add a streaming server" },
       { kind: "click", name: "Edit On this computer" },
@@ -358,7 +427,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 546,
     title: "Commands, Remove an ending phrase",
-    pinned: true,
     steps: [
       { kind: "click", name: "Commands" },
       { kind: "click", name: "Remove “never mind”" },
@@ -367,7 +435,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 551,
     title: "Listening, Restore default after changing the hold key",
-    pinned: true,
     steps: [
       { kind: "click", name: "Listening" },
       { kind: "click", name: "Change…" },
@@ -378,7 +445,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 552,
     title: "Commands, Remove script 1",
-    pinned: true,
     steps: [
       { kind: "click", name: "Commands" },
       { kind: "click", name: "Remove script 1" },
@@ -387,7 +453,6 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 579,
     title: "Clear saved key in a speech server's form",
-    pinned: true,
     steps: [
       { kind: "click", name: "Recognition" },
       { kind: "click", name: "Edit LLM Gateway" },
@@ -395,9 +460,42 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
     ],
   },
   {
+    issue: 593,
+    title: "wake model status and Download while a model is in flight",
+    query: `${PINNED}&slow=wake-download`,
+    steps: [
+      ...WAKE_START,
+      { kind: "wait", ms: 1000, expect: { wake: WAKE_DOWNLOADING } },
+      { kind: "wait", ms: 1200, expect: { wake: WAKE_READY } },
+    ],
+  },
+  {
+    issue: 594,
+    title: "retry a failed wake-model download with the keyboard",
+    query: `${PINNED}&${WAKE_FAULT}`,
+    steps: [
+      ...WAKE_START,
+      { kind: "wait", ms: 2200 },
+      { kind: "focus", name: WAKE_LABEL },
+      { kind: "key", key: "Tab", expect: { downloadFocused: true } },
+      { kind: "key", key: "Enter", expect: { wake: WAKE_DOWNLOADING } },
+      { kind: "wait", ms: 2200, expect: { downloadFocused: true, refusal: "Could not download the wake model: the connection timed out." } },
+    ],
+  },
+  {
+    issue: 596,
+    title: "a refused save keeps keyboard focus and gives a reason",
+    query: `${PINNED}&fail=save`,
+    steps: [
+      { kind: "click", name: "Listening" },
+      { kind: "focus", name: "Wake words" },
+      { kind: "key", key: "Space", expect: { refusal: "The settings could not be saved: permission denied." } },
+    ],
+  },
+  {
     issue: 620,
     title: "error bar clears while Copied is focused",
-    pinned: false,
+    query: "fake",
     steps: [
       { kind: "wait", ms: 37_000 },
       { kind: "click", name: "Copy" },
@@ -407,7 +505,7 @@ const REGRESSIONS: { issue: number; title: string; pinned: boolean; steps: Actio
   {
     issue: 620,
     title: "Dismiss error in the footer bar",
-    pinned: false,
+    query: "fake",
     steps: [
       { kind: "wait", ms: 37_000 },
       { kind: "click", name: "Dismiss error" },
@@ -421,9 +519,10 @@ function replayLine(seed: number, path: string | undefined): string {
   return `${seedPart}${pathPart} npm run explore --prefix crates/thalvi-app/ui`;
 }
 
-function reportFailure(seed: number, path: string | null, message: string, log: string[]): string {
+function reportFailure(seed: number, path: string | null, query: string, message: string, log: string[]): string {
   const lines = [
     "Settings exploration failed.",
+    `backend: ?${query}`,
     `seed: ${String(seed)}`,
     `counterexample path: ${path ?? "(none)"}`,
     `property: ${message === "" ? "(no message)" : message}`,
@@ -469,7 +568,7 @@ async function regressions(session: Session): Promise<void> {
   for (const regression of REGRESSIONS) {
     const log: string[] = [];
     try {
-      await play(session, regression.steps, regression.pinned, log);
+      await play(session, regression.steps, regression.query ?? PINNED, log);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`#${String(regression.issue)} (${regression.title}) failed: ${message}\n${log.map((line, index) => `  ${String(index + 1)}. ${line}`).join("\n")}`);
@@ -481,10 +580,10 @@ function thrownMessage(error: unknown): string {
   return error instanceof Error ? error.message : "";
 }
 
-async function explore(session: Session, inputs: Inputs): Promise<{ runs: number; seconds: number }> {
+async function explore(session: Session, inputs: Inputs, query: string, start: readonly Step[] = []): Promise<void> {
   const started = Date.now();
   const property = fc.asyncProperty(trace, async (steps) => {
-    await play(session, steps, false);
+    await play(session, [...start, ...steps], query);
   });
   const details = await fc.check(property, {
     seed: inputs.seed,
@@ -500,14 +599,14 @@ async function explore(session: Session, inputs: Inputs): Promise<{ runs: number
     const log: string[] = [];
     let message = thrownMessage(details.errorInstance);
     try {
-      await play(session, steps, false, log);
+      await play(session, [...start, ...steps], query, log);
     } catch (error) {
       // The replay names each control; an interrupt has no property message of its own.
       if (message === "") message = thrownMessage(error);
     }
-    throw new Error(reportFailure(inputs.seed, details.counterexamplePath, message, log));
+    throw new Error(reportFailure(inputs.seed, details.counterexamplePath, query, message, log));
   }
-  return { runs: details.numRuns, seconds };
+  console.log(`?${query}, seed ${String(inputs.seed)}: ${String(details.numRuns)} runs in ${seconds.toFixed(1)} s`);
 }
 
 async function serve(): Promise<{ server: ViteDevServer; base: string }> {
@@ -527,8 +626,8 @@ async function main(): Promise<void> {
     const session: Session = { browser, base };
     await regressions(session);
     await offerLayout(session, { width: 613, height: 858 });
-    const result = await explore(session, inputs);
-    console.log(`seed ${String(inputs.seed)}: ${String(result.runs)} runs in ${result.seconds.toFixed(1)} s`);
+    await explore(session, inputs, "fake");
+    await explore(session, inputs, `fake&${WAKE_FAULT}`, WAKE_START);
   } finally {
     await browser?.close();
     await server.close();

@@ -28,11 +28,18 @@ const STYLES: LookStyles = {
     prop("motion.pulse", "Pulse", "motion", "toggle", ALL),
   ],
   looks: LOOK_STYLES.looks,
+  schemes: { gunmetal: "dark", holo: "dark", neon: "dark" },
   values: {
     gunmetal: { "colors.accent": "#00ff00", "colors.text": "#eeeeee", "colors.state.failed": "#ff0000", "font.family": "", "font.scale": 1, "border.width": 4, "motion.pulse": true },
     holo: { "colors.accent": "#6bf8ff", "colors.text": "#e6fbff", "colors.state.failed": "#ff5a6e", "font.family": "", "font.scale": 1.1, "border.width": 1, "decoration.scanlines": false, "motion.pulse": true },
     neon: { "colors.accent": "#2bff88", "colors.text": "#ffffff", "colors.state.failed": "#ff5a6e", "colors.secondary": "#ff77aa", "font.family": "Inter", "font.scale": 1, "border.width": 2, "motion.pulse": false },
   },
+};
+
+const LIGHT_STYLES: LookStyles = {
+  ...STYLES,
+  schemes: { ...STYLES.schemes, neon: "light" },
+  values: { ...STYLES.values, neon: { ...STYLES.values.neon, "colors.accent": "#007a43" } },
 };
 
 function buffer(state: OverlayPreviewState, shade: number): ArrayBuffer {
@@ -146,8 +153,10 @@ describe("the look's Customize section", () => {
     { label: "Font", act: (node: HTMLElement) => { change(node.querySelector("input") as HTMLInputElement, "Inter"); }, patch: { themes: { holo: { font: { family: "Inter" } } } } },
     { label: "Font scale", act: (node: HTMLElement) => { change(node.querySelector('input[type="range"]') as HTMLInputElement, "1.2"); }, patch: { themes: { holo: { font: { scale: 1.2 } } } } },
     { label: "Scanlines", act: (node: HTMLElement) => { (node.querySelector('input[type="checkbox"]') as HTMLInputElement).click(); }, patch: { themes: { holo: { decoration: { scanlines: true } } } } },
-  ])("sends exactly the one-property patch for $label", async ({ label, act, patch }) => {
-    const stub = await open();
+    { look: "neon" as const, label: "Accent", styles: LIGHT_STYLES, act: (node: HTMLElement) => { change(node.querySelector("input") as HTMLInputElement, "#ff00aa"); }, patch: { themes: { neon: { colors: { light: { accent: "#ff00aa" } } } } } },
+    { look: "neon" as const, label: "Accent", styles: STYLES, act: (node: HTMLElement) => { change(node.querySelector("input") as HTMLInputElement, "#ff00aa"); }, patch: { themes: { neon: { colors: { dark: { accent: "#ff00aa" } } } } } },
+  ])("sends exactly the one-property patch for $label", async ({ look, label, styles, act, patch }) => {
+    const stub = await open({ ...look && { look }, ...styles && { styles } });
     act(row(label));
     await settle();
     expect(stub.backend.saveSettings).toHaveBeenCalledWith(patch);
@@ -165,6 +174,39 @@ describe("the look's Customize section", () => {
     await settle();
     expect(stub.backend.saveSettings).toHaveBeenCalledWith(patch);
     expect(pick(`[data-reset="${id}"]`).getAttribute("aria-label")).toBe(`Reset ${label}`);
+  });
+
+  it("switches Neon's values, resets, and preview while Customize is open", async () => {
+    const colors = { dark: { accent: "#2bff88" }, light: { state: { failed: "#9d174d" } } };
+    const stub = await open({ look: "neon", config: { themes: { version: 1, neon: { colors } } } });
+    const accent = () => row("Accent").querySelector<HTMLInputElement>("input")?.value;
+    const resetAccent = () => pick('[data-reset="colors.accent"]') as HTMLButtonElement;
+    const resetFailed = () => pick('[data-reset="colors.state.failed"]') as HTMLButtonElement;
+    expect(accent()).toBe("#2bff88");
+    expect(resetAccent().disabled).toBe(false);
+    expect(resetFailed().disabled).toBe(true);
+    const search = pick('input[type="search"]') as HTMLInputElement;
+    search.value = "Failed";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(row("Accent").hidden).toBe(true);
+    stub.backend.previewOverlay.mockClear();
+
+    stub.themeChanged(LIGHT_STYLES);
+    await settle();
+    expect(accent()).toBe("#007a43");
+    expect(row("Accent").hidden).toBe(true);
+    expect(resetAccent().disabled).toBe(true);
+    expect(resetFailed().disabled).toBe(false);
+    expect(stub.backend.previewOverlay).toHaveBeenCalledTimes(STATES.length);
+    resetFailed().click();
+    await settle();
+    expect(stub.backend.saveSettings).toHaveBeenCalledWith({ themes: { neon: { colors: { light: { state: { failed: null } } } } } });
+    expect(stub.applied().at(-1)?.themes?.neon?.colors).toMatchObject({ dark: colors.dark });
+
+    stub.themeChanged(STYLES);
+    await settle();
+    expect(accent()).toBe("#2bff88");
+    expect(resetAccent().disabled).toBe(false);
   });
 
   it("resets only this look and leaves other looks and settings out of the patch", async () => {

@@ -56,10 +56,13 @@ input[type="checkbox"]:checked::after { transform: translateX(var(--check-travel
 
 .table, .cards { display: flex; flex-direction: column; gap: var(--stack-gap); }
 .trow { display: flex; align-items: center; gap: var(--inline-gap); }
+.row:has(kbd.key) .stack { max-width: 100%; }
+.trow:has(> kbd.key) { flex-wrap: wrap; justify-content: flex-end; }
 .trow.pick { min-width: 0; max-width: 100%; }
 .trow.pick > .stack { min-width: 0; max-width: 100%; }
 .trow.pick select { max-width: 100%; min-width: 0; box-sizing: border-box; }
 .trow .phrase { flex: 1; white-space: nowrap; font: var(--fs-13) var(--mono); }
+[data-page="commands"] .table .phrase { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .trow.file .unit:last-child { overflow-wrap: anywhere; }
 .trow.add { justify-content: flex-end; }
 .trow.add input { flex: 1; max-width: var(--entry-add-max); }
@@ -112,6 +115,7 @@ details.entry-details, details.model-details, details.fold { font-size: var(--fs
 details.entry-details summary, details.model-details summary, details.fold summary { cursor: pointer; }
 details.fold { margin: var(--fold-margin) 0; }
 details.fold .row { padding-left: var(--fold-indent); }
+[data-fold="chat/writing/endpoint"] :is(.stack, input) { max-width: 100%; }
 textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .entries { display: flex; flex-direction: column; gap: var(--stack-gap); max-height: var(--entries-max); overflow-y: auto; }
 .entries > .note { padding: var(--entry-note-pad-y) var(--entry-note-pad-x); }

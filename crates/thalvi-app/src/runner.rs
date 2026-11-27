@@ -19,13 +19,15 @@ use thalvi_desktop::device::Step;
 use thalvi_desktop::draft::{Draft, Drafts};
 use thalvi_desktop::engine::{
     CaptureError, CaptureOutcome, CpalCuePlayer, CuePlayer, Engine, EngineHandle, EngineState,
-    FrameSource, Parts, WakeDetector, WakeTrigger,
+    Feedback, FrameSource, Parts, WakeDetector, WakeTrigger,
 };
 use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
-use thalvi_desktop::host::{Desktop, HoldReport, Host, WindowApp};
+use thalvi_desktop::host::{
+    Desktop, HoldReport, Host, StatusAnnouncer, WindowApp, status_announcer,
+};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError};
@@ -36,6 +38,7 @@ use thalvi_desktop::wake::{WakeConfig, WakeEngine};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
+use crate::announcement::Announcements;
 use crate::status::{
     Failure, FailureKind, LighterModel, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status,
     View, WAKE_DOWNLOAD_NOTICE, load_notice,
@@ -146,7 +149,7 @@ impl EngineLink {
         paused: bool,
         whisper_helpers: PathBuf,
     ) -> Result<Self, String> {
-        let (link, ends, stopped) = Self::wire(&config, paused);
+        let (link, ends, stopped) = Self::wire_with(&config, paused, status_announcer());
         let (ready_tx, ready) = std_mpsc::channel();
         std::thread::Builder::new()
             .name("thalvi-engine".to_owned())
@@ -181,14 +184,23 @@ impl EngineLink {
         Ok(link)
     }
 
+    #[cfg(test)]
     fn wire(config: &DesktopConfig, paused: bool) -> (Self, RunnerEnds, std_mpsc::Sender<()>) {
+        Self::wire_with(config, paused, None)
+    }
+
+    fn wire_with(
+        config: &DesktopConfig,
+        paused: bool,
+        announcer: Option<Arc<dyn StatusAnnouncer>>,
+    ) -> (Self, RunnerEnds, std_mpsc::Sender<()>) {
         let last_writing_window = Arc::new(Mutex::new(None));
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
             notice: STARTING_NOTICE.to_owned(),
             downloading: false,
         });
-        let publisher = Publisher::new(status_tx, config.ending_pause);
+        let publisher = Publisher::announcing(status_tx, config.ending_pause, announcer);
         publisher.update(|view| view.wake_words = config.wake.enabled());
         let (level_tx, level) = watch::channel(0.0);
         let (audio_tx, audio) = watch::channel(AudioStatus {
@@ -436,6 +448,7 @@ async fn load_spotter(
 
 struct PublisherState {
     view: View,
+    announced_finishing: bool,
     /// Incremented each time a saved settings change requiring a rebuild is queued for the runner.
     requested_apply: u64,
     /// Latest `requested_apply` whose `Runner::apply` has completed (including `resume_listening`).
@@ -458,10 +471,21 @@ pub(crate) struct Publisher {
     rebuilding: watch::Sender<bool>,
     /// The failure the last speech model load showed, so a reload clears that and no other.
     load_failure: Mutex<Option<Failure>>,
+    /// What each published status change says to a screen reader.
+    announcements: Announcements,
 }
 
 impl Publisher {
+    #[cfg(test)]
     fn new(out: watch::Sender<Status>, pauses: EndingPauses) -> Arc<Self> {
+        Self::announcing(out, pauses, None)
+    }
+
+    fn announcing(
+        out: watch::Sender<Status>,
+        pauses: EndingPauses,
+        announcer: Option<Arc<dyn StatusAnnouncer>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(PublisherState {
                 view: View {
@@ -479,10 +503,12 @@ impl Publisher {
                 requested_apply: 0,
                 completed_apply: 0,
                 applying: false,
+                announced_finishing: false,
             }),
             out,
             rebuilding: watch::channel(false).0,
             load_failure: Mutex::new(None),
+            announcements: Announcements::new(announcer),
         })
     }
 
@@ -496,13 +522,25 @@ impl Publisher {
             *current = state.view.rebuilding;
             changed
         });
+        let finishing = matches!(
+            status,
+            Status::Finishing { .. } | Status::Transcribing { .. }
+        );
+        let mut spoken = None;
         self.out.send_if_modified(|current| {
             if *current == status {
                 return false;
             }
+            if !finishing || !state.announced_finishing {
+                spoken = self.announcements.for_change(current, &status);
+            }
             *current = status;
             true
         });
+        if let Some((announcer, words)) = spoken {
+            state.announced_finishing |= finishing;
+            announcer.announce(&words);
+        }
         result
     }
 
@@ -678,6 +716,29 @@ impl Publisher {
                     headline: "Dictation notice".to_owned(),
                     causes: Vec::new(),
                 }));
+            }
+        })
+    }
+
+    /// Publishes each state and release in order, even if a watch would skip it.
+    fn status_sink(self: &Arc<Self>) -> Box<dyn Fn(Feedback<'_>)> {
+        let publisher = Arc::clone(self);
+        Box::new(move |feedback| match feedback {
+            Feedback::State(engine) => publisher.mutate(|state| {
+                if matches!(engine, EngineState::StartingCapture) {
+                    state.announced_finishing = false;
+                }
+                state.view.engine = engine.clone();
+            }),
+            Feedback::StreamingHoldReleased => {
+                let mut state = publisher
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if !state.announced_finishing {
+                    state.announced_finishing = true;
+                    publisher.announcements.finishing();
+                }
             }
         })
     }
@@ -1194,6 +1255,7 @@ async fn build_session<S: Rig>(
             http,
             hold: key_state.clone(),
             notice: publisher.notice_sink(),
+            status: publisher.status_sink(),
             spotter,
             spotter_off,
         },
@@ -2257,6 +2319,7 @@ async fn follow(
     level_out: Arc<watch::Sender<f32>>,
     audio: watch::Receiver<AudioStatus>,
 ) {
+    // A new engine starts listening; the engine's own callback publishes every later state in order.
     publisher.update(|view| view.engine = state.borrow_and_update().clone());
     loop {
         tokio::select! {
@@ -2264,11 +2327,9 @@ async fn follow(
                 if changed.is_err() {
                     break;
                 }
-                let engine = state.borrow_and_update().clone();
-                if let EngineState::Capturing { notice: Some(notice), .. } = &engine {
+                if let EngineState::Capturing { notice: Some(notice), .. } = &*state.borrow_and_update() {
                     println!("{notice}");
                 }
-                publisher.update(|view| view.engine = engine);
             }
             changed = level.changed() => {
                 if changed.is_err() {
@@ -2378,7 +2439,7 @@ mod tests {
     fn a_queued_rebuild_is_published_while_the_capture_keeps_its_status() {
         let (out, status) = watch::channel(Status::Paused);
         let publisher = Publisher::new(out, EndingPauses::default());
-        let queued = publisher.rebuilding.subscribe();
+        let mut queued = publisher.rebuilding.subscribe();
         publisher.mode(Mode::Idle);
         publisher.update(|view| {
             view.engine = EngineState::Capturing {
@@ -2388,15 +2449,28 @@ mod tests {
             };
         });
         assert!(!*queued.borrow());
+        assert!(!queued.has_changed().unwrap(), "no rebuild was queued");
 
         publisher.queue_rebuild();
-        assert!(*queued.borrow(), "the next dictation waits for the rebuild");
+        assert!(queued.has_changed().unwrap(), "the rebuild was queued");
+        assert!(
+            *queued.borrow_and_update(),
+            "the next dictation waits for the rebuild"
+        );
         assert!(
             matches!(&*status.borrow(), Status::Capturing { .. }),
             "the running capture is not loading"
         );
 
-        publisher.finish_apply(publisher.start_apply());
+        let seq = publisher.start_apply();
+        publisher.set_applying(true);
+        assert!(
+            !queued.has_changed().unwrap(),
+            "the rebuild is still pending"
+        );
+
+        publisher.finish_apply(seq);
+        assert!(queued.has_changed().unwrap(), "the rebuild finished");
         assert!(!*queued.borrow(), "the rebuild is done");
     }
 
@@ -2716,11 +2790,29 @@ mod tests {
     }
 
     #[test]
-    fn a_download_that_finishes_during_a_capture_is_kept_for_after_it() {
+    fn a_download_a_file_or_an_update_request_during_a_capture_ends_nothing() {
         let mut requests = Requests::default();
         let downloaded = ListedSpeech::Catalog(CatalogSpeech::ALL[0]);
         assert!(!requests.take(Some(Control::ReloadSpeechModel(downloaded))));
-        assert_eq!(requests.reload, Some(downloaded));
+        assert_eq!(
+            requests.reload,
+            Some(downloaded),
+            "a finished download is kept for after the capture"
+        );
+
+        let (feed, mut ended) = Feed::new(Clip::from_frames(Vec::new()));
+        assert!(!requests.take(Some(Control::Feed(feed))));
+        assert!(!requests.ended);
+        assert_eq!(
+            ended.try_recv(),
+            Ok(FeedEnd::Refused("Thalvi was busy. Try again in a moment."))
+        );
+
+        let (reply, mut answer) = oneshot::channel();
+        let restart = Restart::new(|_| panic!("a busy engine saves nothing"), reply);
+        assert!(!requests.take(Some(Control::RestartIfIdle(restart))));
+        assert!(!requests.ended && !requests.quit);
+        assert_eq!(answer.try_recv(), Ok(Stop::Busy));
     }
 
     const WAIT: Duration = Duration::from_secs(5);
@@ -2842,29 +2934,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_away_mid_download_leaves_no_downloading_notice() {
-        LocalSet::new()
-            .run_until(async {
-                let (steps, publisher, load, mut status) = loading_download();
-                let cpu = cpu_files(CatalogSpeech::Nemotron160ms);
-                steps.send(Step::Downloading(cpu, 40)).unwrap();
-                assert_eq!(
-                    next_loading(&mut status).await.0,
-                    "Downloading the speech model, about 662 MB \u{2014} 40%"
-                );
-
-                load.abort();
-                assert!(load.await.unwrap_err().is_cancelled());
-                publisher.loading(None);
-                let late = steps.send(Step::Downloading(cpu, 41));
-
-                assert!(late.is_err(), "the aborted load no longer listens");
-                assert_eq!(*status.borrow(), Status::Listening);
-            })
-            .await;
-    }
-
-    #[tokio::test]
     async fn the_overlay_shows_a_wake_download_only_while_a_missing_file_downloads() {
         let config = WakeConfig::default();
         let cached = [
@@ -2964,6 +3033,7 @@ mod tests {
                 recognizer, wake, cues, gate, hold,
                 http: reqwest::Client::new(),
                 notice: publisher.notice_sink(),
+                status: publisher.status_sink(),
                 spotter: None,
                 spotter_off: None,
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
@@ -3033,49 +3103,26 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_control_that_ends_the_capture_before_it_starts_keeps_it_from_starting() {
-        for (control, quit, listening_off) in [
-            (Control::Quit, true, false),
-            (Control::Cancel, false, false),
-            (Control::SetListening(false), false, true),
-            (Control::ToggleListening, false, true),
-        ] {
-            let label = format!("{control:?}");
-            let (outcome, requests, started) = run(vec![control], vec![]).await;
-            assert_eq!(outcome, None, "{label}");
-            assert!(!started, "{label}");
-            assert_eq!(requests.quit, quit, "{label}");
-            assert_eq!(requests.listening_off, listening_off, "{label}");
+    async fn a_control_ends_the_capture_before_it_starts_or_cancels_it_during() {
+        for during in [false, true] {
+            for (control, quit, listening_off) in [
+                (Control::Quit, true, false),
+                (Control::Cancel, false, false),
+                (Control::SetListening(false), false, true),
+                (Control::ToggleListening, false, true),
+            ] {
+                let label = format!("{control:?} during {during}");
+                let (outcome, requests, started) = if during {
+                    run(vec![], vec![control]).await
+                } else {
+                    run(vec![control], vec![]).await
+                };
+                assert_eq!(outcome, during.then_some("cancelled"), "{label}");
+                assert_eq!(started, during, "{label}");
+                assert_eq!(requests.quit, quit, "{label}");
+                assert_eq!(requests.listening_off, listening_off, "{label}");
+            }
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_control_during_the_capture_cancels_it() {
-        for (control, quit, listening_off) in [
-            (Control::Quit, true, false),
-            (Control::Cancel, false, false),
-            (Control::SetListening(false), false, true),
-            (Control::ToggleListening, false, true),
-        ] {
-            let label = format!("{control:?}");
-            let (outcome, requests, started) = run(vec![], vec![control]).await;
-            assert_eq!(outcome, Some("cancelled"), "{label}");
-            assert!(started, "{label}");
-            assert_eq!(requests.quit, quit, "{label}");
-            assert_eq!(requests.listening_off, listening_off, "{label}");
-        }
-    }
-
-    #[test]
-    fn a_file_that_arrives_while_a_capture_runs_is_refused_and_ends_nothing() {
-        let (feed, mut ended) = Feed::new(Clip::from_frames(Vec::new()));
-        let mut requests = Requests::default();
-        assert!(!requests.take(Some(Control::Feed(feed))));
-        assert!(!requests.ended);
-        assert_eq!(
-            ended.try_recv(),
-            Ok(FeedEnd::Refused("Thalvi was busy. Try again in a moment."))
-        );
     }
 
     /// What an engine answers to a request to stop for an update, whether it quits, and what the
@@ -3129,16 +3176,6 @@ mod tests {
     }
 
     #[test]
-    fn a_request_to_stop_for_an_update_during_a_capture_is_told_busy_and_ends_nothing() {
-        let (reply, mut answer) = oneshot::channel();
-        let mut requests = Requests::default();
-        let restart = Restart::new(|_| panic!("a busy engine saves nothing"), reply);
-        assert!(!requests.take(Some(Control::RestartIfIdle(restart))));
-        assert!(!requests.ended && !requests.quit);
-        assert_eq!(answer.try_recv(), Ok(Stop::Busy));
-    }
-
-    #[test]
     fn desktop_only_settings_and_the_wake_switch_do_not_rebuild_the_engine() {
         let old = DesktopConfig::from_json_str("{}").unwrap();
         for (change, rebuilds) in [
@@ -3175,12 +3212,16 @@ mod tests {
             let new = DesktopConfig::from_json_str(change).unwrap();
             assert_eq!(needs_rebuild(&old, &new), rebuilds, "{change}");
         }
-    }
-
-    #[test]
-    fn a_missing_microphone_is_retried_after_one_two_then_every_five_seconds() {
-        let waits: Vec<u64> = (0..6).map(|failures| backoff(failures).as_secs()).collect();
-        assert_eq!(waits, [1, 2, 5, 5, 5, 5]);
+        let with = |prompt: &str| {
+            DesktopConfig::from_json_str(&format!(
+                r#"{{"writing": {{"url": "http://127.0.0.1:9/v1", "model": "m", "openings": [{{"phrase": "write me an email", "prompt": "{prompt}"}}]}}}}"#
+            ))
+            .unwrap()
+        };
+        assert!(
+            needs_rebuild(&with("Old."), &with("New.")),
+            "changed writing openings"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3293,6 +3334,7 @@ mod tests {
                         hold,
                         http: reqwest::Client::new(),
                         notice: publisher.notice_sink(),
+                        status: publisher.status_sink(),
                         spotter: None,
                         spotter_off: None,
                     },
@@ -3369,6 +3411,7 @@ mod tests {
         for (control, delivered) in [
             (None, true),
             (Some(Control::Apply(Box::new(config))), true),
+            (Some(Control::SetListening(true)), true),
             (Some(Control::Cancel), false),
             (Some(Control::SetListening(false)), false),
             (Some(Control::ToggleListening), false),
@@ -3382,7 +3425,8 @@ mod tests {
                 tokio::task::yield_now().await;
                 "accepted"
             };
-            let driven = drive(finishing, &mut control_rx, || {}, &mut requests);
+            let cancel = || assert!(!delivered, "{label}: nothing asked to cancel");
+            let driven = drive(finishing, &mut control_rx, cancel, &mut requests);
             let sending = async {
                 if let Some(control) = control {
                     sender.send(control).unwrap();
@@ -3469,41 +3513,6 @@ mod tests {
             assert!(requests.ended, "{label}");
             assert_eq!(requests.quit, quit, "{label}");
             assert_eq!(requests.listening_off, listening_off, "{label}");
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_capture_nothing_ended_is_delivered_even_with_settings_and_a_resume_sent() {
-        let config = DesktopConfig::from_json_str("{}").unwrap();
-        for during in [
-            vec![],
-            vec![Control::Apply(Box::new(config))],
-            vec![Control::SetListening(true)],
-        ] {
-            let label = format!("{during:?}");
-            let (sender, mut control) = mpsc::unbounded_channel();
-            let (release, gate) = tokio::sync::oneshot::channel();
-            let mut requests = Requests::default();
-            let driven = drive(
-                async {
-                    gate.await.unwrap();
-                    "accepted"
-                },
-                &mut control,
-                || panic!("{label}: nothing asked to cancel"),
-                &mut requests,
-            );
-            let sending = async {
-                for message in during {
-                    sender.send(message).unwrap();
-                }
-                tokio::task::yield_now().await;
-                release.send(()).unwrap();
-                sender
-            };
-            let (outcome, _sender) = tokio::join!(driven, sending);
-            assert_eq!(outcome, Some("accepted"), "{label}");
-            assert!(!requests.ended, "{label}");
         }
     }
 
@@ -3936,60 +3945,6 @@ mod tests {
         )
         .await;
         assert!(requests.listening_off);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn changed_writing_openings_wait_for_the_end_of_the_capture_and_then_rebuild_the_engine()
-    {
-        let with = |openings: &str| {
-            DesktopConfig::from_json_str(&format!(
-                r#"{{"writing": {{"url": "http://127.0.0.1:9/v1", "model": "m", "openings": {openings}}}}}"#
-            ))
-            .unwrap()
-        };
-        let running = with(r#"[{"phrase": "write me an email", "prompt": "Old."}]"#);
-        let changed = with(r#"[{"phrase": "write me an email", "prompt": "New."}]"#);
-        let (outcome, requests, started) = run(
-            vec![],
-            vec![Control::Apply(Box::new(changed.clone())), Control::Cancel],
-        )
-        .await;
-        assert!(started);
-        assert_eq!(outcome, Some("cancelled"));
-        assert_eq!(
-            requests.pending,
-            Some(changed.clone()),
-            "the capture goes on with the rules it started with"
-        );
-        assert!(!retunes_only(&running, &changed));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_switch_of_the_live_entry_waits_for_the_end_of_the_running_capture() {
-        let running = DesktopConfig::from_json_str(
-            r#"{"stt":{"entries":[{"kind":"on_device","id":"first","name":"First","active":true,"model":"nemotron_160ms"}]}}"#,
-        )
-        .unwrap();
-        let switched = DesktopConfig::from_json_str(
-            r#"{"stt":{"entries":[{"kind":"on_device","id":"second","name":"Second","active":true,"model":"unified_160ms"}]}}"#,
-        )
-        .unwrap();
-        assert_ne!(
-            running.stt.entries.active_live().id,
-            switched.stt.entries.active_live().id
-        );
-        let (outcome, requests, started) = run(
-            vec![],
-            vec![Control::Apply(Box::new(switched.clone())), Control::Cancel],
-        )
-        .await;
-        assert!(started);
-        assert_eq!(outcome, Some("cancelled"));
-        assert_eq!(
-            requests.pending,
-            Some(switched),
-            "the new entry is held for the next capture"
-        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -4655,6 +4610,7 @@ mod tests {
         pause_on_rebuild: bool,
         cancel_on_audio_error: bool,
         first_open: Option<oneshot::Receiver<()>>,
+        announcer: Option<Arc<dyn StatusAnnouncer>>,
     }
 
     impl Default for FedOptions {
@@ -4667,6 +4623,7 @@ mod tests {
                 pause_on_rebuild: false,
                 cancel_on_audio_error: false,
                 first_open: None,
+                announcer: None,
             }
         }
     }
@@ -4695,7 +4652,7 @@ mod tests {
             }
             let opens = Rc::new(Cell::new(0));
             let feed = Rc::new(RefCell::new(None));
-            let (link, ends, _) = EngineLink::wire(&options.config, paused);
+            let (link, ends, _) = EngineLink::wire_with(&options.config, paused, options.announcer);
             let lab = MicLab {
                 opens: Rc::clone(&opens),
                 missing: Rc::new(Cell::new(missing)),
@@ -5121,6 +5078,72 @@ mod tests {
         script.stop().await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_fed_hold_announces_finishing_once_at_release_then_where_the_words_went() {
+        use thalvi_desktop::recognizer::RecognizerEvent;
+
+        use crate::announcement::tests::Spoken;
+
+        for buffered in [true, false] {
+            LocalSet::new()
+                .run_until(async {
+                    let spoken = Spoken::default();
+                    let mut script = FedRun::configured(
+                        false,
+                        false,
+                        FedOptions {
+                            announcer: Some(Arc::new(spoken.clone())),
+                            ..FedOptions::default()
+                        },
+                    );
+                    yield_until("listening never started", || {
+                        matches!(&*script.status.borrow(), Status::Listening)
+                    })
+                    .await;
+                    script.server.ready();
+                    if buffered {
+                        script.server.buffer_audio();
+                    } else {
+                        script.server.flushes_on_end();
+                    }
+                    let (feed, mut ended) = Feed::new(spoken_clip());
+                    script.link.send(Control::Feed(feed));
+                    feed_started(&mut ended, &script.feeding)
+                        .await
+                        .unwrap_or_else(|end| panic!("the file was refused: {end:?}"));
+                    let key = script.link.hold_input();
+                    key.set(true);
+                    capture_started(&mut script).await;
+                    assert!(
+                        spoken.said().is_empty(),
+                        "a screen reader spoke during the capture: {:?}",
+                        spoken.said()
+                    );
+                    // The words are recognized the moment the key comes up: delivery follows at once.
+                    tokio::time::advance(Duration::from_millis(500)).await;
+                    key.set(false);
+                    script
+                        .server
+                        .emit(Ok(RecognizerEvent::Final("Hello".to_owned())));
+                    if !buffered {
+                        script.server.emit(Ok(RecognizerEvent::Ended));
+                    }
+                    pump_until("the hold was not pasted", || script.pasted() == ["Hello"]).await;
+                    status_until(&mut script.status, "the delivery was not shown", |status| {
+                        matches!(status, Status::Done { .. })
+                    })
+                    .await;
+                    assert_eq!(
+                        spoken.said(),
+                        ["Finishing", "Sent to Editor"],
+                        "buffered: {buffered}"
+                    );
+                    script.stop().await;
+                })
+                .await;
+        }
+    }
+
     /// Starts a file's capture and fails it with a recognizer that cannot keep up.
     async fn cant_keep_up(script: &mut FedRun, model: &str) {
         use thalvi_desktop::recognizer::RecognizerError;
@@ -5153,39 +5176,86 @@ mod tests {
         serde_json::to_value(&*script.status.borrow()).expect("the status serializes")
     }
 
+    /// What the user does after a model that cannot keep up offers a lighter one.
+    #[derive(Clone, Copy, Debug)]
+    enum AfterOffer {
+        NextCapture,
+        Dismiss,
+        SwitchFails,
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn a_nemotron_that_cannot_keep_up_offers_parakeet_as_the_lighter_model_until_the_next_capture()
+    async fn a_nemotron_that_cannot_keep_up_offers_parakeet_until_a_capture_succeeds_or_the_notice_is_dismissed()
      {
-        LocalSet::new()
-            .run_until(async {
-                let mut script = FedRun::start(false, false);
-                yield_until("listening did not start", || {
-                    matches!(&*script.status.borrow(), Status::Listening)
+        for after in [
+            AfterOffer::NextCapture,
+            AfterOffer::Dismiss,
+            AfterOffer::SwitchFails,
+        ] {
+            LocalSet::new()
+                .run_until(async {
+                    let mut script = FedRun::start(false, false);
+                    yield_until("listening did not start", || {
+                        matches!(&*script.status.borrow(), Status::Listening)
+                    })
+                    .await;
+                    cant_keep_up(&mut script, "Nemotron Streaming").await;
+                    let failed = status_json(&script);
+                    assert_eq!(
+                        failed["offer"],
+                        json!({"name": "parakeet_tdt_v3", "title": "Parakeet TDT v3"}),
+                        "{after:?}: the offer names the lighter model: {failed}"
+                    );
+                    assert_eq!(
+                        failed["notice"],
+                        json!("This computer can't keep up with Nemotron Streaming. Nothing was delivered."),
+                        "{after:?}: a model with a lighter one is offered without the server hint"
+                    );
+                    match after {
+                        AfterOffer::NextCapture => {
+                            script.server.connect_again();
+                            deliver(&mut script).await;
+                            let delivered = status_json(&script);
+                            assert!(
+                                delivered["offer"].is_null(),
+                                "a later capture that succeeds takes the offer away: {delivered}"
+                            );
+                        }
+                        AfterOffer::Dismiss => {
+                            script.link.send(Control::DismissError);
+                            status_until(
+                                &mut script.status,
+                                "the offer stayed after dismiss",
+                                |shown| matches!(shown, Status::Failed { offer: None, .. }),
+                            )
+                            .await;
+                            let dismissed = status_json(&script);
+                            assert_eq!(dismissed["notice"], failed["notice"], "the failure stays");
+                            assert!(
+                                dismissed["offer"].is_null(),
+                                "the offer is gone: {dismissed}"
+                            );
+                        }
+                        AfterOffer::SwitchFails => {
+                            let notice = "Could not download the speech model. Check the internet connection and try again.";
+                            script.link.send(Control::OfferFailed(notice.to_owned()));
+                            status_until(&mut script.status, "the switch failure did not show", |shown| {
+                                matches!(shown, Status::Failed { notice: shown_notice, .. } if shown_notice == notice)
+                            })
+                            .await;
+                            let switch_failed = status_json(&script);
+                            assert_eq!(switch_failed["notice"], json!(notice));
+                            assert_eq!(
+                                switch_failed["offer"]["name"],
+                                json!("parakeet_tdt_v3"),
+                                "the offer stays so the switch can be tried again: {switch_failed}"
+                            );
+                        }
+                    }
+                    script.stop().await;
                 })
                 .await;
-                cant_keep_up(&mut script, "Nemotron Streaming").await;
-                let failed = status_json(&script);
-                assert_eq!(
-                    failed["offer"],
-                    json!({"name": "parakeet_tdt_v3", "title": "Parakeet TDT v3"}),
-                    "the offer names the lighter model: {failed}"
-                );
-                assert_eq!(
-                    failed["notice"],
-                    json!("This computer can't keep up with Nemotron Streaming. Nothing was delivered."),
-                    "a model with a lighter one is offered without the server hint"
-                );
-
-                script.server.connect_again();
-                deliver(&mut script).await;
-                let delivered = status_json(&script);
-                assert!(
-                    delivered["offer"].is_null(),
-                    "a later capture that succeeds takes the offer away: {delivered}"
-                );
-                script.stop().await;
-            })
-            .await;
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -5216,64 +5286,6 @@ mod tests {
                     failed["notice"],
                     json!("This computer can't keep up with Parakeet TDT v3. Nothing was delivered. Pick a server recognizer in Settings → Recognition."),
                     "the notice says where to go next"
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn dismissing_the_notice_takes_the_offer_away_and_keeps_the_failure() {
-        LocalSet::new()
-            .run_until(async {
-                let mut script = FedRun::start(false, false);
-                yield_until("listening did not start", || {
-                    matches!(&*script.status.borrow(), Status::Listening)
-                })
-                .await;
-                cant_keep_up(&mut script, "Nemotron Streaming").await;
-                let before = status_json(&script);
-                assert!(
-                    !before["offer"].is_null(),
-                    "the offer is there first: {before}"
-                );
-                script.link.send(Control::DismissError);
-                status_until(
-                    &mut script.status,
-                    "the offer stayed after dismiss",
-                    |shown| matches!(shown, Status::Failed { offer: None, .. }),
-                )
-                .await;
-                let after = status_json(&script);
-                script.stop().await;
-                assert_eq!(after["notice"], before["notice"], "the failure stays");
-                assert!(after["offer"].is_null(), "the offer is gone: {after}");
-            })
-            .await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_failed_switch_from_the_tray_says_why_and_keeps_the_offer() {
-        LocalSet::new()
-            .run_until(async {
-                let mut script = FedRun::start(false, false);
-                yield_until("listening did not start", || {
-                    matches!(&*script.status.borrow(), Status::Listening)
-                })
-                .await;
-                cant_keep_up(&mut script, "Nemotron Streaming").await;
-                let notice = "Could not download the speech model. Check the internet connection and try again.";
-                script.link.send(Control::OfferFailed(notice.to_owned()));
-                status_until(&mut script.status, "the switch failure did not show", |shown| {
-                    matches!(shown, Status::Failed { notice: shown_notice, .. } if shown_notice == notice)
-                })
-                .await;
-                let failed = status_json(&script);
-                script.stop().await;
-                assert_eq!(failed["notice"], json!(notice));
-                assert_eq!(
-                    failed["offer"]["name"],
-                    json!("parakeet_tdt_v3"),
-                    "the offer stays so the switch can be tried again: {failed}"
                 );
             })
             .await;

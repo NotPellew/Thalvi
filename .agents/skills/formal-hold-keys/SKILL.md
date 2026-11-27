@@ -163,7 +163,7 @@ to make a run pass.
    `take_lost`, the 1 s overtake window (real wall time, not a fake clock), which
    arrivals Hyprland or the hook can produce per mode, and which presses the
    engine refuses. Read the engine's and runner's callers in
-   `crates/thalvi-desktop/src/engine.rs` (`scan`, `on_key`, `on_stop`, `capture`) and
+   `crates/thalvi-desktop/src/engine.rs` (`scan`, `on_key`, `on_release`, `capture`) and
    `crates/thalvi-app/src/runner.rs` if the way presses are looked at changed.
 2. Update `harness.rs` from the code **before** rerunning: a new key, a new mode,
    a new window, or a new way of looking at presses. Keep the bounds; report any

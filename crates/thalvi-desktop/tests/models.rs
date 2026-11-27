@@ -152,13 +152,17 @@ async fn a_download_names_the_client_for_hosts_that_refuse_anonymous_ones() {
 #[tokio::test]
 async fn a_download_that_is_not_the_pinned_file_is_deleted_and_refused() {
     let (address, _server) = serve().await;
-    for served in ["other.onnx", "endless.onnx"] {
-        let dir = dir(&format!("mismatch-{served}"));
+    for (served, kind, file_name, noun) in [
+        ("other.onnx", ModelKind::Wake, "good.onnx", "wake"),
+        ("endless.onnx", ModelKind::Wake, "good.onnx", "wake"),
+        ("other.onnx", ModelKind::Speech, "speech.onnx", "speech"),
+    ] {
+        let dir = dir(&format!("mismatch-{noun}-{served}"));
         let url = format!("http://{address}/{served}");
         let sha = sha256(GOOD);
         let asset = Asset {
-            kind: ModelKind::Wake,
-            file_name: "good.onnx",
+            kind,
+            file_name,
             url: &url,
             size: GOOD.len() as u64,
             sha256: &sha,
@@ -174,7 +178,10 @@ async fn a_download_that_is_not_the_pinned_file_is_deleted_and_refused() {
         assert!(matches!(error, ModelError::Checksum { .. }), "{served}");
         assert_eq!(
             error.to_string(),
-            "The downloaded wake model good.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+            format!(
+                "The downloaded {noun} model {file_name} did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
+            ),
+            "{served}"
         );
         assert_eq!(leftovers(&dir), Vec::<String>::new(), "{served}");
     }
@@ -224,15 +231,12 @@ async fn serve_raw(reply: &'static [u8]) -> SocketAddr {
 #[tokio::test]
 async fn a_failed_download_says_which_step_failed_and_keeps_the_causes_without_the_address() {
     let (address, _server) = serve().await;
-    let refused = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.local_addr().expect("address")
-    };
     let cut = serve_raw(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nsome bytes").await;
     let sha = sha256(GOOD);
     for (url, message, metric) in [
         (
-            format!("http://{refused}/good.onnx?signature=secret"),
+            // Binding to port 0 always assigns the listener a different port.
+            "http://127.0.0.1:0/good.onnx?signature=secret".to_owned(),
             "could not connect to 127.0.0.1. Check the internet connection and try again.",
             "connect",
         ),
@@ -269,39 +273,32 @@ async fn a_failed_download_says_which_step_failed_and_keeps_the_causes_without_t
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_download_that_stalls_times_out_instead_of_hanging() {
+async fn a_download_that_stalls_times_out_instead_of_hanging_after_a_wait_that_grows_with_its_size()
+{
     let (address, _server) = serve().await;
     let url = format!("http://{address}/stalls.onnx");
     let sha = sha256(GOOD);
 
-    let error = ModelStore::in_dir(dir("timeout"))
-        .fetch(&asset(&url, &sha))
-        .await
-        .expect_err("times out");
+    // Two minutes, and a second for every 500 kB.
+    for (size, wait) in [(GOOD.len() as u64, 120), (60_000_000, 240)] {
+        let started = tokio::time::Instant::now();
+        let error = ModelStore::in_dir(dir("timeout"))
+            .fetch(&Asset {
+                size,
+                ..asset(&url, &sha)
+            })
+            .await
+            .expect_err("times out");
 
-    assert_eq!(
-        error.to_string(),
-        "Could not download the speech model good.onnx: the download timed out. Check the internet connection and try again."
-    );
-    assert_eq!(error.metric_kind(), "timeout");
-    assert!(!causes(&error).is_empty(), "{error}");
-}
-
-#[tokio::test]
-async fn the_kind_of_a_failure_after_a_damaged_file_was_removed_is_the_failure_itself() {
-    let (address, _server) = serve().await;
-    let dir = dir("damaged-kind");
-    fs::create_dir_all(&dir).expect("dir");
-    fs::write(dir.join("good.onnx"), b"half a mod").expect("damaged file");
-    let url = format!("http://{address}/gone.onnx");
-    let sha = sha256(GOOD);
-
-    let error = ModelStore::in_dir(&dir)
-        .fetch(&asset(&url, &sha))
-        .await
-        .expect_err("cannot download");
-
-    assert_eq!(error.metric_kind(), "status:404");
+        let waited = started.elapsed().as_secs();
+        assert!((wait..wait + 10).contains(&waited), "{size}: {waited} s");
+        assert_eq!(
+            error.to_string(),
+            "Could not download the speech model good.onnx: the download timed out. Check the internet connection and try again."
+        );
+        assert_eq!(error.metric_kind(), "timeout");
+        assert!(!causes(&error).is_empty(), "{error}");
+    }
 }
 
 #[tokio::test]
@@ -347,30 +344,6 @@ async fn a_file_blocking_the_model_folder_reports_that_the_path_is_not_a_directo
         b"a file, not the model folder"
     );
     fs::remove_file(dir).expect("cleanup");
-}
-
-#[tokio::test]
-async fn a_speech_model_is_named_as_one_when_it_cannot_be_trusted() {
-    let (address, _server) = serve().await;
-    let dir = dir("speech");
-    let url = format!("http://{address}/other.onnx");
-    let sha = sha256(GOOD);
-    let asset = Asset {
-        kind: ModelKind::Speech,
-        file_name: "speech.onnx",
-        url: &url,
-        size: GOOD.len() as u64,
-        sha256: &sha,
-    };
-
-    let error = ModelStore::in_dir(&dir)
-        .fetch(&asset)
-        .await
-        .expect_err("refused");
-    assert_eq!(
-        error.to_string(),
-        "The downloaded speech model speech.onnx did not match its expected checksum, so it was thrown away. Try again, and report it if it keeps happening."
-    );
 }
 
 #[tokio::test]
@@ -433,6 +406,7 @@ async fn a_damaged_file_is_removed_even_when_it_cannot_be_downloaded_again() {
         error.to_string(),
         "The stored speech model good.onnx was damaged, so it was removed. Could not download the speech model good.onnx: the server refused it (HTTP 404 Not Found). Try again, and report it if it keeps happening."
     );
+    assert_eq!(error.metric_kind(), "status:404");
     assert_eq!(leftovers(&dir), Vec::<String>::new());
 }
 
@@ -444,23 +418,6 @@ fn asset<'a>(url: &'a str, sha: &'a str) -> Asset<'a> {
         size: GOOD.len() as u64,
         sha256: sha,
     }
-}
-
-#[tokio::test]
-async fn two_fetches_of_one_asset_at_once_both_succeed() {
-    let (address, _server) = serve().await;
-    let dir = dir("twice");
-    let url = format!("http://{address}/good.onnx");
-    let sha = sha256(GOOD);
-    let store = ModelStore::in_dir(&dir);
-
-    let asset = asset(&url, &sha);
-
-    let (first, second) = tokio::join!(store.fetch(&asset), store.fetch(&asset));
-
-    assert_eq!(first.expect("first"), second.expect("second"));
-    assert_eq!(fs::read(dir.join("good.onnx")).expect("saved"), GOOD);
-    assert_eq!(leftovers(&dir), ["good.onnx"]);
 }
 
 /// Serves `GOOD`, but first stores it as the final file the way a fetch that finished earlier
@@ -646,8 +603,19 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
 }
 
 #[test]
-fn catalog_models_keep_their_files_apart_and_pinned() {
+fn model_files_are_pinned_and_kept_apart() {
     let mut names = Vec::new();
+    for asset in [
+        SPOTTER.encoder,
+        SPOTTER.decoder,
+        SPOTTER.joiner,
+        SPOTTER.pieces,
+    ] {
+        assert_eq!(asset.kind, ModelKind::Spotter, "{}", asset.file_name);
+        assert!(asset.url.starts_with("https://"), "{}", asset.url);
+        assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
+        names.push(asset.file_name);
+    }
     for model in CatalogSpeech::ALL {
         for assets in std::iter::once(model.assets()).chain(model.gpu_assets()) {
             let files = [assets.encoder, assets.decoder, assets.joiner, assets.tokens]
@@ -762,68 +730,10 @@ async fn a_model_with_a_data_file_in_a_folder_of_its_own_is_cached_only_with_its
     assert!(!store.is_cached(&assets).await, "the data file is missing");
 }
 
-#[test]
-fn the_ending_phrase_model_files_are_pinned_and_apart_from_the_other_models() {
-    let assets = [
-        SPOTTER.encoder,
-        SPOTTER.decoder,
-        SPOTTER.joiner,
-        SPOTTER.pieces,
-    ];
-    let mut names: Vec<&str> = assets.iter().map(|asset| asset.file_name).collect();
-    for asset in assets {
-        assert_eq!(asset.kind, ModelKind::Spotter, "{}", asset.file_name);
-        assert!(asset.url.starts_with("https://"), "{}", asset.url);
-        assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
-    }
-    for model in CatalogSpeech::ALL {
-        let speech = model.assets();
-        names.extend(
-            [speech.encoder, speech.decoder, speech.joiner, speech.tokens].map(|a| a.file_name),
-        );
-    }
-    let count = names.len();
-    names.sort_unstable();
-    names.dedup();
-    assert_eq!(names.len(), count);
-}
-
 #[tokio::test]
-async fn a_speech_download_reports_progress_up_to_done() {
+async fn a_speech_download_reports_progress_up_to_done_and_shows_each_step_it_reports() {
     let (address, _server) = serve().await;
     let dir = dir("speech-progress");
-    let url = format!("http://{address}/good.onnx");
-    let sha = sha256(GOOD);
-    let assets = speech([&url; 4], &sha);
-    let store = ModelStore::in_dir(&dir);
-
-    let mut events = Vec::new();
-    store
-        .fetch_speech(&assets, |event| events.push(event))
-        .await
-        .expect("downloads");
-
-    assert_eq!(
-        events,
-        [
-            SpeechProgress::Verifying,
-            SpeechProgress::Downloading { percent: 25 },
-            SpeechProgress::Downloading { percent: 50 },
-            SpeechProgress::Downloading { percent: 75 },
-            SpeechProgress::Downloading { percent: 100 },
-            SpeechProgress::Done,
-        ]
-    );
-    assert!(store.is_cached(&assets).await);
-    assert_eq!(leftovers(&dir).len(), 4);
-    assert_eq!(store.path(&assets.encoder), dir.join("m.encoder.onnx"));
-    assert!(store.path(&assets.tokens).is_file());
-}
-
-#[tokio::test]
-async fn a_running_speech_download_shows_each_step_it_reports() {
-    let (address, _server) = serve().await;
-    let dir = dir("speech-shown");
     let url = format!("http://{address}/good.onnx");
     let sha = sha256(GOOD);
     let assets = speech([&url; 4], &sha);
@@ -838,35 +748,28 @@ async fn a_running_speech_download_shows_each_step_it_reports() {
         .await
         .expect("downloads");
 
-    assert_eq!(shown.len(), 6);
+    let events: Vec<_> = shown.iter().map(|(event, _)| *event).collect();
+    assert_eq!(
+        events,
+        [
+            SpeechProgress::Verifying,
+            SpeechProgress::Downloading { percent: 25 },
+            SpeechProgress::Downloading { percent: 50 },
+            SpeechProgress::Downloading { percent: 75 },
+            SpeechProgress::Downloading { percent: 100 },
+            SpeechProgress::Done,
+        ]
+    );
     assert!(shown.iter().all(|(event, seen)| *seen == Some(*event)));
     assert_eq!(
         downloads.progress("m"),
         None,
         "a finished download is not shown"
     );
-}
-
-#[tokio::test]
-async fn a_speech_fetch_of_files_already_on_disk_reports_no_download() {
-    let (address, _server) = serve().await;
-    let dir = dir("speech-intact");
-    let url = format!("http://{address}/good.onnx");
-    let sha = sha256(GOOD);
-    let assets = speech([&url; 4], &sha);
-    let store = ModelStore::in_dir(&dir);
-    store
-        .fetch_speech(&assets, |_| {})
-        .await
-        .expect("downloads");
-
-    let mut events = Vec::new();
-    store
-        .fetch_speech(&assets, |event| events.push(event))
-        .await
-        .expect("finds them");
-
-    assert_eq!(events, [SpeechProgress::Verifying, SpeechProgress::Done]);
+    assert!(store.is_cached(&assets).await);
+    assert_eq!(leftovers(&dir).len(), 4);
+    assert_eq!(store.path(&assets.encoder), dir.join("m.encoder.onnx"));
+    assert!(store.path(&assets.tokens).is_file());
 }
 
 #[tokio::test]

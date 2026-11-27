@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::agent::{Catalog, Request};
 use crate::startup::LOGIN_ARG;
 
-const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | copy-error | state | status | watch [--json] | show [page] | quit | feed <wav-file> | models | model-download <wake|speech|chat> <name> | speech-check <json> | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
+const USAGE: &str = "Usage: thalvi-desktop [toggle | pause | resume | cancel | hold-start | hold-end | write-start | write-end | key <row> down|up | copy-error | state | status | watch [--json] | show [page] | quit | feed <wav-file> | models | model-download <wake|speech|chat> <name> | speech-check <json> | settings get | settings check <json> | settings set <json> | metrics summary | config-file]";
 
 /// The command line after the program name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +54,10 @@ impl Launch {
             ["hold-end"] => Ok(Self::Ask(Request::HoldEnd)),
             ["write-start"] => Ok(Self::Ask(Request::WriteStart)),
             ["write-end"] => Ok(Self::Ask(Request::WriteEnd)),
+            ["key", row, edge @ ("down" | "up")] => Ok(Self::Ask(Request::Key {
+                row: row.parse().map_err(|_| USAGE.to_owned())?,
+                down: *edge == "down",
+            })),
             ["copy-error"] => Ok(Self::Ask(Request::CopyError)),
             ["settings", "get"] => Ok(Self::Ask(Request::SettingsGet)),
             ["settings", "check", change] => Ok(Self::Ask(Request::SettingsCheck {
@@ -95,7 +99,13 @@ impl Launch {
             [path]
                 if !matches!(
                     *path,
-                    "settings" | "metrics" | "feed" | "model-download" | "speech-check" | "watch"
+                    "settings"
+                        | "metrics"
+                        | "feed"
+                        | "model-download"
+                        | "speech-check"
+                        | "watch"
+                        | "key"
                 ) =>
             {
                 open(false, Some(PathBuf::from(path)))
@@ -160,6 +170,20 @@ mod tests {
             (&["hold-end"][..], ask(Request::HoldEnd)),
             (&["write-start"][..], ask(Request::WriteStart)),
             (&["write-end"][..], ask(Request::WriteEnd)),
+            (
+                &["key", "0", "down"][..],
+                ask(Request::Key { row: 0, down: true }),
+            ),
+            (
+                &["key", "3", "up"][..],
+                ask(Request::Key {
+                    row: 3,
+                    down: false,
+                }),
+            ),
+            (&["key"][..], Err(USAGE.to_owned())),
+            (&["key", "-1", "down"][..], Err(USAGE.to_owned())),
+            (&["key", "0", "start"][..], Err(USAGE.to_owned())),
             (&["copy-error"][..], ask(Request::CopyError)),
             (&["status"][..], ask(Request::Status)),
             (&["state"][..], ask(Request::State)),

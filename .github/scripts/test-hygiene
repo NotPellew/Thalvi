@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Fails on tests that never run, tests that pass by returning early, and duplicate test bodies.
+
+1. A tracked *.test.sh, *.test.py, *.test.ps1, *.test.ts or test_*.py file must be named (by path
+   or basename) in another tracked non-Markdown file, or sit where a runner collects it: vitest
+   runs crates/thalvi-app/ui/src/**/*.test.ts (npm test) and pytest runs speech/asr/test_*.py.
+2. A Rust #[test] or #[tokio::test] function under crates/ must not skip itself with `return`: a
+   return whose block holds nothing else but prints, or a match arm `=> return`. A return inside a
+   closure, async block or nested fn, or after real work (a test re-running itself in a child
+   process), does not count.
+3. No two Rust test bodies, or TypeScript it()/test() callbacks in *.test.ts, are identical once
+   comments and whitespace are dropped. The test name does not count.
+"""
+
+import importlib.machinery
+import importlib.util
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+TEST_FILE = re.compile(r"(\.test\.(sh|py|ps1|ts)|(^|/)test_[^/]*\.py)$")
+UI_TESTS = ("crates/thalvi-app/ui/src/", ".test.ts")
+ASR_TESTS = "speech/asr/"
+RUST_TEST = re.compile(r"#\s*\[\s*(?:tokio\s*::\s*)?test\s*(?:\([^\]]*\))?\s*\]")
+FN_NAME = re.compile(r"\bfn\s+(\w+)")
+RETURN = re.compile(r"\breturn\b")
+RUST_BOUNDARY = re.compile(r"(\basync(\s+move)?|\|(\s*->[^|{};]*)?)\s*$")
+TS_CALL = re.compile(r"(?<![\w.$])(?:it|test)\s*\(")
+TS_CALLBACK = re.compile(r"=>|\bfunction\b[^{]*(?=\{)")
+
+HINT_UNRUN = "name it in a gate or workflow, or move it where a runner collects it"
+HINT_RETURN = 'mark it #[ignore = "<how to run it>"] and fail when its inputs are missing'
+HINT_DUPLICATE = "delete one of them, or give them different inputs"
+
+
+def load_lint_exceptions():
+    path = str(Path(__file__).resolve().with_name("lint-exceptions"))
+    loader = importlib.machinery.SourceFileLoader("lint_exceptions", path)
+    spec = importlib.util.spec_from_loader("lint_exceptions", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+LEX = load_lint_exceptions()
+
+
+def blank(text: str) -> str:
+    return "".join(c if c == "\n" else " " for c in text)
+
+
+def rust_views(text: str) -> tuple[str, str]:
+    """Same-length copies of text: comments blanked, and comments plus string and char literals blanked."""
+    code: list[str] = []
+    masked: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith(("//", "/*"), index):
+            end = LEX.skip_one_comment(text, index)
+            code.append(blank(text[index:end]))
+            masked.append(blank(text[index:end]))
+            index = end
+            continue
+        end = LEX.try_skip_literal(text, index) if not text[index].isdigit() else None
+        if end is not None and end > index:
+            code.append(text[index:end])
+            masked.append(blank(text[index:end]))
+            index = end
+            continue
+        if LEX.is_ident_start(text[index]):
+            end = index + 1
+            while end < len(text) and LEX.is_ident_continue(text[end]):
+                end += 1
+        else:
+            end = index + 1
+        code.append(text[index:end])
+        masked.append(text[index:end])
+        index = end
+    return "".join(code), "".join(masked)
+
+
+def ts_views(text: str) -> tuple[str, str]:
+    """Same-length copies of text: comments blanked, and comments plus string and template literals blanked."""
+    code: list[str] = []
+    masked: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            end = len(text) if end < 0 else end
+            code.append(blank(text[index:end]))
+            masked.append(blank(text[index:end]))
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            end = len(text) if end < 0 else end + 2
+            code.append(blank(text[index:end]))
+            masked.append(blank(text[index:end]))
+        elif text[index] in "'\"`":
+            quote = text[index]
+            end = index + 1
+            while end < len(text) and text[end] != quote:
+                end += 2 if text[end] == "\\" else 1
+            end = min(end + 1, len(text))
+            code.append(text[index:end])
+            masked.append(blank(text[index:end]))
+        else:
+            end = index + 1
+            code.append(text[index:end])
+            masked.append(text[index:end])
+        index = end
+    return "".join(code), "".join(masked)
+
+
+def match_close(masked: str, index: int) -> int:
+    """index is an opening ( or {; returns the index after its closer."""
+    depth = 0
+    while index < len(masked):
+        if masked[index] in "({[":
+            depth += 1
+        elif masked[index] in ")}]":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return len(masked)
+
+
+def line_of(text: str, index: int) -> int:
+    return text.count("\n", 0, index) + 1
+
+
+def rust_tests(text: str) -> list[tuple[str, int, int, int, str, str]]:
+    """Each test as (name, line, body start, body end, code, masked)."""
+    code, masked = rust_views(text)
+    tests = []
+    for attribute in RUST_TEST.finditer(masked):
+        name = FN_NAME.search(masked, attribute.end())
+        if name is None:
+            continue
+        start = masked.find("{", name.end())
+        if start < 0:
+            continue
+        tests.append((name.group(1), line_of(text, name.start()), start, match_close(masked, start), code, masked))
+    return tests
+
+
+PRINT_MACRO = re.compile(r"\be?print(?:ln)?\s*!\s*[(\[{]")
+RETURN_STATEMENT = re.compile(r"\breturn\b[^;]*;?")
+
+
+def only_returns(block: str) -> bool:
+    """True when a block holds nothing but return statements and prints, so it skips the test."""
+    while (found := PRINT_MACRO.search(block)) is not None:
+        end = match_close(block, found.end() - 1)
+        block = block[: found.start()] + block[end:]
+    return not RETURN_STATEMENT.sub("", block).strip(" \t\n;")
+
+
+def early_returns(masked: str, start: int, end: int) -> list[int]:
+    """Indexes of a `return` that skips the rest of the test whose body is masked[start:end].
+
+    A return after real work, such as a test that re-runs itself in a child process, is not a skip.
+    """
+    found = []
+    stack: list[tuple[bool, int]] = []
+    boundaries = 0
+    pending_fn = False
+    index = start
+    while index < end:
+        char = masked[index]
+        if char == "{":
+            boundary = bool(stack) and (pending_fn or bool(RUST_BOUNDARY.search(masked[start:index])))
+            pending_fn = False
+            stack.append((boundary, index))
+            boundaries += boundary
+        elif char == "}":
+            boundaries -= stack.pop()[0]
+        elif char == "f" and FN_NAME.match(masked, index) and not LEX.is_ident_continue(masked[index - 1]):
+            pending_fn = True
+        elif char == "r" and not boundaries and RETURN.match(masked, index) and not LEX.is_ident_continue(masked[index - 1]):
+            block_start = stack[-1][1]
+            block = masked[block_start + 1 : match_close(masked, block_start) - 1]
+            if only_returns(block) or masked[:index].rstrip().endswith("=>"):
+                found.append(index)
+        index += 1
+    return found
+
+
+def tracked_files() -> list[str]:
+    out = subprocess.run(["git", "ls-files", "-z"], capture_output=True, check=True).stdout
+    return [name for name in out.decode().split("\0") if name and Path(name).is_file()]
+
+
+def unrun_tests(files: list[str]) -> list[str]:
+    findings = []
+    candidates = []
+    for name in files:
+        if not TEST_FILE.search(name):
+            continue
+        if name.startswith(UI_TESTS[0]) and name.endswith(UI_TESTS[1]):
+            continue
+        if name.startswith(ASR_TESTS) and Path(name).name.startswith("test_") and name.endswith(".py"):
+            continue
+        candidates.append(name)
+    if not candidates:
+        return findings
+    sources = {name: Path(name).read_bytes() for name in files if not name.endswith(".md")}
+    for name in candidates:
+        base = re.compile(rb"(?<![\w.-])" + re.escape(Path(name).name.encode()))
+        if not any(other != name and base.search(data) for other, data in sources.items()):
+            findings.append(f"{name}:1: no gate, workflow or script runs this test file; {HINT_UNRUN}")
+    return findings
+
+
+def scan_rust(files: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+    findings = []
+    bodies: dict[str, list[str]] = {}
+    for name in files:
+        if not (name.startswith("crates/") and name.endswith(".rs")):
+            continue
+        text = Path(name).read_text(encoding="utf-8")
+        for test, line, start, end, code, masked in rust_tests(text):
+            for index in early_returns(masked, start, end):
+                findings.append(f"{name}:{line_of(text, index)}: test {test} passes by returning early; {HINT_RETURN}")
+            key = re.sub(r"\s+", "", code[start:end])
+            bodies.setdefault(key, []).append(f"{name}:{line} {test}")
+    return findings, bodies
+
+
+def scan_ts(files: list[str]) -> dict[str, list[str]]:
+    bodies: dict[str, list[str]] = {}
+    for name in files:
+        if not name.endswith(".test.ts"):
+            continue
+        text = Path(name).read_text(encoding="utf-8")
+        code, masked = ts_views(text)
+        for call in TS_CALL.finditer(masked):
+            end = match_close(masked, call.end() - 1)
+            callback = TS_CALLBACK.search(masked, call.end(), end)
+            if callback is None:
+                continue
+            key = re.sub(r"\s+", "", code[callback.end():end])
+            title = re.search(r"""["'`]([^"'`]*)["'`]""", code[call.end():end])
+            bodies.setdefault(key, []).append(f"{name}:{line_of(text, call.start())} {title.group(1) if title else ''}")
+    return bodies
+
+
+def duplicates(bodies: dict[str, list[str]]) -> list[str]:
+    findings = []
+    for sites in bodies.values():
+        for site in sites[1:]:
+            findings.append(f"{site.split(' ', 1)[0]}: same body as {sites[0]}; {HINT_DUPLICATE}")
+    return findings
+
+
+def main() -> int:
+    if len(sys.argv) > 1:
+        sys.exit("test-hygiene: no arguments; run it from the repository root")
+    files = tracked_files()
+    rust_findings, rust_bodies = scan_rust(files)
+    ts_bodies = scan_ts(files)
+    findings = [*unrun_tests(files), *rust_findings, *duplicates(rust_bodies), *duplicates(ts_bodies)]
+    if findings:
+        print("\n".join(findings))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

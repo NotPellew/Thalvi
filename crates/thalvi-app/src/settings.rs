@@ -53,10 +53,10 @@ impl Store {
     /// Why the file cannot be read or is not valid, or why the defaults cannot be written.
     pub fn start(&self) -> Result<(DesktopConfig, bool, bool), String> {
         let first_start = !self.path.exists();
-        let config = self.load()?;
+        let (config, legacy_keys) = self.load_with_legacy_keys()?;
         let removed_entry = config.stt.entries.dropped_legacy_server();
         let removed_active_entry = config.stt.entries.dropped_active_legacy_server();
-        if first_start || removed_entry {
+        if first_start || removed_entry || legacy_keys {
             self.write(&config)?;
         }
         Ok((config, first_start, removed_active_entry))
@@ -66,11 +66,16 @@ impl Store {
     ///
     /// # Errors
     /// Fails when the file cannot be read or is not valid.
+    #[cfg(test)]
     pub fn load(&self) -> Result<DesktopConfig, String> {
+        self.load_with_legacy_keys().map(|(config, _)| config)
+    }
+
+    fn load_with_legacy_keys(&self) -> Result<(DesktopConfig, bool), String> {
         if self.required || self.path.exists() {
-            DesktopConfig::load(&self.path)
+            DesktopConfig::load_with_legacy_keys(&self.path)
         } else {
-            DesktopConfig::from_json_str("{}")
+            DesktopConfig::from_json_str("{}").map(|config| (config, false))
         }
         .map_err(|error| error.to_string())
     }
@@ -222,7 +227,7 @@ fn load(settings: &Value) -> Result<DesktopConfig, String> {
             let position = format!(" at line {} column {}", error.line(), error.column());
             text.strip_suffix(&position).unwrap_or(&text).to_owned()
         }
-        error @ (ConfigError::Read { .. } | ConfigError::InvalidFile { .. }) => error.to_string(),
+        error => error.to_string(),
     })
 }
 
@@ -622,50 +627,72 @@ mod tests {
     }
 
     #[test]
-    fn an_unrelated_save_keeps_a_newer_themes_version_exactly() {
-        let (store, dir) = store("theme-newer");
-        let raw = r##"{"look":"holo","themes":{"version":2,"holo":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##;
-        std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
-        std::fs::write(&store.path, raw).unwrap();
-        let current = store.load().unwrap();
-        assert_eq!(current.themes.notices().len(), 1);
-        assert!(current.themes.notices()[0].contains("newer"));
-        assert!(!current.themes.notices()[0].contains("Holo"));
-        let mut form = settings_json(&current).unwrap();
-        form["overlay"]["draft"] = json!(false);
-        let saved = store.save(form, &current).unwrap();
-        let written = std::fs::read_to_string(&store.path).unwrap();
-        let file: Value = serde_json::from_str(&written).unwrap();
-        let again = store.load().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(!saved.overlay.draft);
-        assert_eq!(file["themes"]["version"], 2);
-        assert_eq!(
-            file["themes"]["holo"]["colors"]["dark"]["accent"],
-            "#ffffff"
-        );
-        assert_eq!(again.themes.to_value()["version"], 2);
-        assert_eq!(again.themes.notices(), current.themes.notices());
+    fn an_unrelated_save_keeps_a_newer_a_non_object_or_a_malformed_themes_value_verbatim() {
+        type Check = fn(&DesktopConfig, &DesktopConfig);
+        type Row<'a> = (&'a str, &'a str, &'a [(&'a str, Value)], Check);
+        let rows: [Row; 3] = [
+            (
+                "newer",
+                r##"{"look":"holo","themes":{"version":2,"holo":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##,
+                &[
+                    ("/themes/version", json!(2)),
+                    ("/themes/holo/colors/dark/accent", json!("#ffffff")),
+                ],
+                |current, again| {
+                    assert_eq!(current.themes.notices().len(), 1);
+                    assert!(current.themes.notices()[0].contains("newer"));
+                    assert!(!current.themes.notices()[0].contains("Holo"));
+                    assert_eq!(again.themes.to_value()["version"], 2);
+                    assert_eq!(again.themes.notices(), current.themes.notices());
+                },
+            ),
+            (
+                "non-object",
+                r#"{"look":"holo","themes":"bad"}"#,
+                &[("/themes", json!("bad"))],
+                |current, _| {
+                    assert_eq!(
+                        current.themes.notices(),
+                        ["Your look customizations could not be read (themes must be an object)."]
+                    );
+                    assert!(current.themes.of(Look::Gunmetal).is_none());
+                },
+            ),
+            (
+                "malformed",
+                r##"{"look":"holo","themes":{"version":1,"holo":{"colors":{"dark":{"accent":"red"}}},"gunmetal":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##,
+                &[
+                    ("/themes/holo/colors/dark/accent", json!("red")),
+                    ("/themes/gunmetal/colors/dark/accent", json!("#ffffff")),
+                ],
+                |_, _| {},
+            ),
+        ];
+        for (name, raw, kept, check) in rows {
+            let (store, dir) = store(name);
+            std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
+            std::fs::write(&store.path, raw).unwrap();
+            let current = store.load().unwrap();
+            let mut form = settings_json(&current).unwrap();
+            form["overlay"]["draft"] = json!(false);
+            form["microphone"] = json!("USB Mic");
+            let saved = store.save(form, &current).unwrap();
+            let file: Value =
+                serde_json::from_str(&std::fs::read_to_string(&store.path).unwrap()).unwrap();
+            let again = store.load().unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(!saved.overlay.draft, "{name}");
+            assert_eq!(saved.microphone.as_deref(), Some("USB Mic"), "{name}");
+            for (pointer, expected) in kept {
+                assert_eq!(file.pointer(pointer), Some(expected), "{name} {pointer}");
+            }
+            check(&current, &again);
+        }
     }
 
     #[test]
-    fn a_non_object_themes_value_is_kept_and_an_empty_object_is_omitted() {
+    fn an_empty_themes_object_is_omitted() {
         let (store, dir) = store("theme-shape");
-        std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
-        std::fs::write(&store.path, r#"{"look":"holo","themes":"bad"}"#).unwrap();
-        let current = store.load().unwrap();
-        assert_eq!(
-            current.themes.notices(),
-            ["Your look customizations could not be read (themes must be an object)."]
-        );
-        assert!(current.themes.of(Look::Gunmetal).is_none());
-        let mut form = settings_json(&current).unwrap();
-        form["overlay"]["draft"] = json!(false);
-        store.save(form, &current).unwrap();
-        let file: Value =
-            serde_json::from_str(&std::fs::read_to_string(&store.path).unwrap()).unwrap();
-        assert_eq!(file["themes"], "bad");
-
         let empty = DesktopConfig::from_json_str(r#"{"look":"holo","themes":{}}"#).unwrap();
         assert!(empty.themes.is_empty());
         store.write(&empty).unwrap();
@@ -675,11 +702,20 @@ mod tests {
     }
 
     #[test]
-    fn a_first_theme_patch_without_a_version_defaults_to_1_and_any_other_version_is_refused() {
+    fn a_first_theme_patch_without_a_version_defaults_to_1_and_an_invalid_theme_or_any_other_version_is_refused()
+     {
         let (store, dir) = store("theme-version");
         let start = store
             .save(settings_json(&store_defaults()).unwrap(), &store_defaults())
             .unwrap();
+        let mut settings = settings_json(&start).unwrap();
+        settings["themes"] = json!({"version": 1, "holo": {"colors": {"dark": {"accent": "red"}}}});
+        let error = Store::check(settings, &start).unwrap_err();
+        assert!(
+            error.contains("themes.holo.colors.dark.accent: use a colour like #6bf8ff"),
+            "{error}"
+        );
+        assert!(store.load().unwrap().themes.is_empty());
         let form = merged(
             &start,
             &json!({"themes": {"holo": {"font": {"scale": 0.85}}}}),
@@ -718,24 +754,6 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_invalid_theme_is_refused_and_the_last_saved_value_stays() {
-        let (store, dir) = store("theme-refuse");
-        let start = store
-            .save(settings_json(&store_defaults()).unwrap(), &store_defaults())
-            .unwrap();
-        let mut settings = settings_json(&start).unwrap();
-        settings["themes"] = json!({"version": 1, "holo": {"colors": {"dark": {"accent": "red"}}}});
-        let error = Store::check(settings, &start).unwrap_err();
-        let kept = store.load().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            error.contains("themes.holo.colors.dark.accent: use a colour like #6bf8ff"),
-            "{error}"
-        );
-        assert!(kept.themes.is_empty());
-    }
-
-    #[test]
     fn a_property_and_a_look_reset_leave_the_rest() {
         let (store, dir) = store("theme-reset");
         let current = DesktopConfig::from_json_str(
@@ -769,27 +787,6 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(saved.microphone.as_deref(), Some("USB Mic"));
-    }
-
-    #[test]
-    fn an_unrelated_save_keeps_a_malformed_theme_verbatim() {
-        let (store, dir) = store("theme-keep");
-        let raw = r##"{"look":"holo","themes":{"version":1,"holo":{"colors":{"dark":{"accent":"red"}}},"gunmetal":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##;
-        std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
-        std::fs::write(&store.path, raw).unwrap();
-        let current = store.load().unwrap();
-        let mut form = settings_json(&current).unwrap();
-        form["microphone"] = json!("USB Mic");
-        let saved = store.save(form, &current).unwrap();
-        let written = std::fs::read_to_string(&store.path).unwrap();
-        let file: Value = serde_json::from_str(&written).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(saved.microphone.as_deref(), Some("USB Mic"));
-        assert_eq!(file["themes"]["holo"]["colors"]["dark"]["accent"], "red");
-        assert_eq!(
-            file["themes"]["gunmetal"]["colors"]["dark"]["accent"],
-            "#ffffff"
-        );
     }
 
     #[test]
@@ -932,6 +929,20 @@ mod tests {
         assert!(!first, "the written file ends the first start");
         assert!(!removed);
         assert_eq!(again, config);
+
+        std::fs::write(&path, r#"{"hold_key": "F8", "write_key": null}"#).unwrap();
+        let (migrated, first, removed) = store.start().unwrap();
+        assert!(!first);
+        assert!(!removed);
+        let written = std::fs::read_to_string(&path).unwrap();
+        let file: Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            file["keys"][0],
+            json!({"action": "dictate", "mode": "hold", "key": "F8"})
+        );
+        assert!(file.get("hold_key").is_none());
+        assert!(file.get("write_key").is_none());
+        assert_eq!(store.start().unwrap().0, migrated);
 
         let server = r#"{"stt": {"entries": [{"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"}]}}"#;
         std::fs::write(&path, server).unwrap();

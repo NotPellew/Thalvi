@@ -606,9 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn the_oldest_entries_go_first_when_the_limit_is_passed_or_lowered() {
+    fn the_oldest_entries_go_first_when_the_limit_is_passed_or_lowered_unless_history_is_off() {
         let dir = TempDir::new("rotation");
         let store = Store::at(dir.file());
+        store.trim(config(r#"{"limit": 1}"#)).unwrap();
+        assert!(!dir.0.exists(), "trimming nothing creates nothing");
         let three = config(r#"{"limit": 3}"#);
         for text in ["a", "b", "c"] {
             store.record(three, capture(text)).unwrap();
@@ -620,7 +622,14 @@ mod tests {
         );
         store.record(three, capture("d")).unwrap();
         assert_eq!(texts(&store), ["d", "c", "b"]);
-
+        store.trim(config(r#"{"limit": 10}"#)).unwrap();
+        assert_eq!(texts(&store), ["d", "c", "b"], "within the limit");
+        store
+            .trim(config(r#"{"enabled": false, "limit": 1}"#))
+            .unwrap();
+        assert_eq!(texts(&store), ["d", "c", "b"], "off deletes nothing");
+        store.trim(config(r#"{"limit": 2}"#)).unwrap();
+        assert_eq!(texts(&store), ["d", "c"], "a lowered limit trims at once");
         store
             .record(config(r#"{"limit": 1}"#), capture("e"))
             .unwrap();
@@ -629,27 +638,6 @@ mod tests {
             ["e"],
             "a lower limit applies on the next write"
         );
-    }
-
-    #[test]
-    fn a_lowered_limit_trims_at_once_but_a_switched_off_history_keeps_everything() {
-        let dir = TempDir::new("trim");
-        let store = Store::at(dir.file());
-        store.trim(config(r#"{"limit": 1}"#)).unwrap();
-        assert!(!dir.0.exists(), "trimming nothing creates nothing");
-        for text in ["a", "b", "c", "d"] {
-            store
-                .record(HistoryConfig::default(), capture(text))
-                .unwrap();
-        }
-        store.trim(config(r#"{"limit": 10}"#)).unwrap();
-        assert_eq!(texts(&store), ["d", "c", "b", "a"], "within the limit");
-        store
-            .trim(config(r#"{"enabled": false, "limit": 1}"#))
-            .unwrap();
-        assert_eq!(texts(&store), ["d", "c", "b", "a"], "off deletes nothing");
-        store.trim(config(r#"{"limit": 2}"#)).unwrap();
-        assert_eq!(texts(&store), ["d", "c"]);
     }
 
     #[test]
@@ -735,6 +723,20 @@ mod tests {
         assert_eq!(texts(&store), ["fresh"]);
     }
 
+    #[test]
+    fn a_history_that_cannot_be_read_or_removed_is_reported() {
+        let dir = TempDir::new("unreadable");
+        std::fs::create_dir_all(dir.file()).unwrap();
+        let store = Store::at(dir.file());
+        for error in [store.list().unwrap_err(), store.clear().unwrap_err()] {
+            assert!(
+                matches!(&error, HistoryError::Io { path, .. } if *path == dir.file()),
+                "{error}"
+            );
+        }
+        assert!(dir.file().is_dir(), "nothing in its place is removed");
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_history_is_readable_by_its_owner_only() {
@@ -756,7 +758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recording_in_the_background_lands_in_the_file() {
+    async fn recording_and_trimming_in_the_background_land_in_the_file() {
         let dir = TempDir::new("background");
         let store = Arc::new(Store::at(dir.file()));
         store.record_in_background(HistoryConfig::default(), capture("later"));
@@ -768,5 +770,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(texts(&store), ["later"]);
+        store
+            .record(HistoryConfig::default(), capture("latest"))
+            .unwrap();
+        store.trim_in_background(config(r#"{"limit": 1}"#));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while texts(&store) != ["latest"] {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the background trim keeps only the newest entry");
     }
 }

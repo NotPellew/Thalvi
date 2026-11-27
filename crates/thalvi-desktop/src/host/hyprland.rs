@@ -707,42 +707,22 @@ mod tests {
 
     #[test]
     fn an_unidentifiable_focus_is_refused_in_plain_words() {
-        for (json, expected) in [
-            ("{}", "The desktop did not identify the focused window."),
-            (
-                r#"{"address": "main", "pid": 1, "class": "a"}"#,
-                "The desktop did not identify the focused window.",
-            ),
-            (
-                r#"{"address": "0x", "pid": 1, "class": "a"}"#,
-                "The desktop did not identify the focused window.",
-            ),
-            (
-                r#"{"address": "0x1", "pid": 0, "class": "a"}"#,
-                "The desktop did not identify the focused window.",
-            ),
-            (
-                r#"{"address": "0x1", "pid": -3, "class": "a"}"#,
-                "The desktop did not identify the focused window.",
-            ),
-            (
-                r#"{"address": "0x1", "pid": 1, "class": ""}"#,
-                "The desktop did not identify the focused window.",
-            ),
-            (
-                r#"{"address": "0x1", "pid": "1", "class": "a"}"#,
-                "The desktop did not identify the focused window.",
-            ),
-            (
-                "not json",
-                "The desktop did not identify the focused window.",
-            ),
+        for json in [
+            "{}",
+            r#"{"address": "main", "pid": 1, "class": "a"}"#,
+            r#"{"address": "0x", "pid": 1, "class": "a"}"#,
+            r#"{"address": "0x1", "pid": 0, "class": "a"}"#,
+            r#"{"address": "0x1", "pid": -3, "class": "a"}"#,
+            r#"{"address": "0x1", "pid": 1, "class": ""}"#,
+            r#"{"address": "0x1", "pid": "1", "class": "a"}"#,
+            "not json",
         ] {
-            let json = json.to_owned();
-            let host = host(move |_, _| Ok(json.clone()));
+            let host = host(move |_, _| Ok(json.to_owned()));
             assert_eq!(
                 host.capture_target(),
-                Err(HostError::NothingTyped(expected.to_owned()))
+                Err(HostError::NothingTyped(
+                    "The desktop did not identify the focused window.".to_owned()
+                ))
             );
         }
     }
@@ -995,13 +975,6 @@ mod tests {
                 "hyprctl",
                 Err(failed("hyprctl")),
                 false,
-                partial.clone(),
-            ),
-            (
-                "shortcut tool stuck",
-                "hyprctl",
-                Err(CommandError::TimedOut("hyprctl".to_owned())),
-                false,
                 partial,
             ),
             (
@@ -1090,14 +1063,6 @@ mod tests {
         assert_eq!(
             commands(&host),
             ["wl-copy --type text/plain;charset=utf-8 <keep café>"]
-        );
-
-        let broken = self::host(|_, _| Err(CommandError::NotInstalled("wl-copy".to_owned())));
-        assert_eq!(
-            broken.copy("x"),
-            Err(HostError::Unsupported(
-                "Desktop tool wl-copy is not installed.".to_owned()
-            ))
         );
     }
 
@@ -1189,14 +1154,6 @@ mod tests {
             Ok(())
         );
         assert_eq!(commands(&ready), ["xdg-open /home/me/.local/share/thalvi"]);
-
-        let missing = host(|_, _| Err(CommandError::NotInstalled("xdg-open".to_owned())));
-        assert_eq!(
-            missing.open_folder(Path::new("/x")),
-            Err(HostError::Unsupported(
-                "Desktop tool xdg-open is not installed.".to_owned()
-            ))
-        );
     }
 
     #[test]

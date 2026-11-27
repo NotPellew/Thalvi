@@ -60,10 +60,11 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
     settings_json(&state.config())
 }
 
-/// The look model resolved for Settings, so the window can wear the look before it is shown.
+/// Resolves the looks for the Settings webview's preferred scheme and updates the overlay to match.
 #[tauri::command]
-pub fn get_look_styles(state: State<'_, AppState>) -> Value {
-    crate::look_styles::response(&state.config())
+pub fn get_look_styles(dark: bool, state: State<'_, AppState>) -> Value {
+    state.set_dark(dark);
+    crate::look_styles::response(&state.config(), dark)
 }
 
 /// Draws the real overlay for a synthetic state, as framed raw RGBA bytes for the preview canvas.

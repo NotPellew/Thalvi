@@ -2,13 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use tauri::{AppHandle, Manager};
-
+use crate::appimage;
 use crate::update::RELEASES_PAGE;
 
 /// Why the running app cannot update itself, in words that say what to do instead.
-pub fn unsupported(app: &AppHandle) -> Option<String> {
-    Install::of(app.env().appimage.map(PathBuf::from)).unsupported(can_write)
+pub fn unsupported() -> Option<String> {
+    Install::of(appimage::path()).unsupported(can_write)
 }
 
 /// How this copy of Thalvi was installed, which decides whether it can replace itself.
@@ -64,7 +63,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_an_appimage_in_a_writable_folder_updates_itself() {
+    fn the_install_is_the_appimage_it_runs_from_and_only_one_in_a_writable_folder_updates_itself() {
+        let from = Some(PathBuf::from("/home/me/Thalvi.AppImage"));
+        assert_eq!(
+            Install::of(from),
+            Install::AppImage(PathBuf::from("/home/me/Thalvi.AppImage"))
+        );
+        assert_eq!(Install::of(None), Install::Loose);
+
         let image = || Install::AppImage(PathBuf::from("/opt/thalvi/Thalvi.AppImage"));
         assert_eq!(
             image().unsupported(|folder| folder == Path::new("/opt/thalvi")),
@@ -82,16 +88,6 @@ mod tests {
         assert!(locked.contains("/opt/thalvi/Thalvi.AppImage"), "{locked}");
         assert!(locked.contains("cannot write to its folder"), "{locked}");
         assert!(locked.contains(RELEASES_PAGE), "{locked}");
-    }
-
-    #[test]
-    fn the_install_is_the_appimage_it_runs_from_or_a_loose_build() {
-        let image = || Some(PathBuf::from("/home/me/Thalvi.AppImage"));
-        assert_eq!(
-            Install::of(image()),
-            Install::AppImage(PathBuf::from("/home/me/Thalvi.AppImage"))
-        );
-        assert_eq!(Install::of(None), Install::Loose);
     }
 
     #[test]

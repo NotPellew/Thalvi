@@ -24,9 +24,10 @@ use ::windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetThreadDpiAwarenessContext,
 };
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, MA_NOACTIVATE, MSG,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, HWND_TOPMOST, MA_NOACTIVATE, MSG,
     MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, PostMessageW, QS_ALLINPUT, RegisterClassW,
-    SPI_GETWORKAREA, SW_HIDE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow,
+    SPI_GETWORKAREA, SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, ShowWindow,
     SystemParametersInfoW, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WM_APP,
     WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -224,15 +225,28 @@ impl OverlaySurface {
         self.scale
     }
 
-    /// Shows `frame` on a window that was hidden.
+    /// Shows `frame` on a window that was hidden, re-asserting topmost Z-order without taking
+    /// focus.
     ///
     /// # Errors
-    /// Why Windows did not take the frame.
+    /// Why Windows did not take the frame or show the window.
     pub fn show(&mut self, frame: &OverlayFrame) -> Result<(), HostError> {
         self.present(frame)?;
-        // SAFETY: this thread's own window; SW_SHOWNOACTIVATE leaves the focus where it is.
-        let _ = unsafe { ShowWindow(self.window, SW_SHOWNOACTIVATE) };
-        Ok(())
+        // Windows can leave a hidden WS_EX_TOPMOST window behind normal windows after lock, sleep
+        // or display changes; SWP_NOOWNERZORDER lets SetWindowPos promote it without taking focus.
+        // SAFETY: this thread's own window; SWP_NOACTIVATE leaves the focus where it is.
+        unsafe {
+            SetWindowPos(
+                self.window,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
+            )
+        }
+        .map_err(failed)
     }
 
     /// Replaces what the window shows.
@@ -345,4 +359,112 @@ unsafe extern "system" fn procedure(
 
 fn push(event: OverlayEvent) {
     EVENTS.with(|events| events.borrow_mut().push_back(event));
+}
+
+#[cfg(test)]
+mod tests {
+    use ::windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+    use ::windows::Win32::UI::WindowsAndMessaging::{
+        DestroyWindow, GW_HWNDNEXT, GWL_EXSTYLE, GetWindow, GetWindowLongW, HWND_NOTOPMOST,
+        IsWindowVisible, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE,
+    };
+
+    use super::*;
+
+    /// Whether `upper` sits ahead of `lower` in Windows' Z-order.
+    fn above(upper: HWND, lower: HWND) -> bool {
+        let mut cursor = upper;
+        // SAFETY: GetWindow walks the live Z-order and returns Err at its end.
+        while let Ok(next) = unsafe { GetWindow(cursor, GW_HWNDNEXT) } {
+            if next == lower {
+                return true;
+            }
+            cursor = next;
+        }
+        false
+    }
+
+    #[test]
+    fn showing_reasserts_topmost_without_activating_after_demotion() {
+        let mut surface = OverlayPlan.open(10.0, 10.0, true).expect("overlay opens");
+        let width = u32::try_from(surface.size.cx).expect("positive width");
+        let height = u32::try_from(surface.size.cy).expect("positive height");
+        let bytes = usize::try_from(width * height * 4).expect("frame bytes");
+        let frame = OverlayFrame {
+            width,
+            height,
+            bgra: vec![0; bytes],
+        };
+        // SAFETY: STATIC is a system window class, so no module handle or registration is needed.
+        let other = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("Thalvi overlay test"),
+                WS_POPUP,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("normal test window is created");
+        // SAFETY: `other` belongs to this thread.
+        let _ = unsafe { ShowWindow(other, SW_SHOWNOACTIVATE) };
+        // SAFETY: both windows belong to this thread; demote the hidden overlay behind `other`.
+        unsafe {
+            SetWindowPos(
+                surface.window,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+            .expect("overlay demotes");
+            SetWindowPos(
+                surface.window,
+                Some(other),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+            .expect("overlay moves behind normal window");
+        }
+        assert!(!above(surface.window, other));
+
+        surface.show(&frame).expect("overlay shows");
+
+        // SAFETY: reads state of windows owned by this thread.
+        let (visible, active, topmost) = unsafe {
+            (
+                IsWindowVisible(surface.window).as_bool(),
+                GetActiveWindow() == surface.window,
+                GetWindowLongW(surface.window, GWL_EXSTYLE).cast_unsigned() & WS_EX_TOPMOST.0 != 0,
+            )
+        };
+        let raised = above(surface.window, other);
+
+        surface.hide();
+        // SAFETY: reads visibility of the window owned by this thread.
+        let hidden = unsafe { !IsWindowVisible(surface.window).as_bool() };
+        // SAFETY: both windows belong to this thread and are not used afterwards.
+        unsafe {
+            DestroyWindow(surface.window).expect("overlay window is destroyed");
+            DestroyWindow(other).expect("normal window is destroyed");
+        }
+
+        assert!(visible, "overlay must be visible after show");
+        assert!(!active, "overlay must not take focus on show");
+        assert!(topmost, "overlay must regain WS_EX_TOPMOST on show");
+        assert!(raised, "overlay must rise above normal windows on show");
+        assert!(hidden, "overlay must hide when asked");
+    }
 }

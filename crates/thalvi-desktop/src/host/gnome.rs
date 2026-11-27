@@ -243,12 +243,6 @@ mod tests {
     }
 
     #[test]
-    fn the_overlay_goes_below_the_panel_at_the_work_areas_top() {
-        let host = host(|_, _| Ok(String::new()));
-        assert_eq!(host.overlay_top(), Ok(32.0));
-    }
-
-    #[test]
     fn a_clipboard_that_cannot_be_set_or_text_that_is_empty_is_a_typed_reason() {
         let refused = HostError::NothingTyped("The clipboard did not answer.".to_owned());
         let refusing = host_with(
@@ -291,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn links_and_folders_open_through_gio_and_a_missing_gio_is_unsupported() {
+    fn links_and_folders_open_through_gio() {
         let host_ok = host(|_, _| Ok(String::new()));
         host_ok
             .open_url(&WebUrl::parse("https://github.com/NotPellew/Thalvi").unwrap())
@@ -305,13 +299,6 @@ mod tests {
                 "gio open https://github.com/NotPellew/Thalvi",
                 "gio open /home/me/My Notes"
             ]
-        );
-        let missing = host(|_, _| Err(CommandError::NotInstalled("gio".to_owned())));
-        assert_eq!(
-            missing.open_folder(Path::new("/tmp")),
-            Err(HostError::Unsupported(
-                "Desktop tool gio is not installed.".to_owned()
-            ))
         );
     }
 

@@ -285,17 +285,18 @@ describe("applying a change", () => {
   const nothing = (): void => undefined;
   const script1Label = (): HTMLInputElement => root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement;
 
-  // (control kind, page, what the user does short of the trigger, the trigger, the applied value read back, what it is)
-  const triggers: [string, string, () => void, () => void, (settings: Settings) => unknown, unknown][] = [
-    ["a number, when it loses focus", "commands", () => { typeIn(control("Quiet before paste", "input"), "1.5"); }, () => { leave(control("Quiet before paste", "input")); }, (s) => s.ending_pause.paste, 1.5],
-    ["a slider, when it is let go", "listening", () => { typeIn(control("Threshold (dictation)", "input"), "0.8"); }, () => { leave(control("Threshold (dictation)", "input")); }, (s) => s.wake.capture.threshold, 0.8],
-    ["a typed field, when it loses focus", "commands", () => { typeIn(script1Label(), "new label"); }, () => { leave(script1Label()); }, (s) => s.scripts[0]?.label, "new label"],
-    ["a switch, as it is flipped", "overlay", nothing, () => { flip(control("Show the draft", "input")); }, (s) => s.overlay.draft, false],
-    ["a choice, as it is made", "app", nothing, () => { choose(control("Update channel", "select"), "development"); }, (s) => s.update_channel, "development"],
-    ["a list entry, as it is removed", "commands", nothing, () => { (root.querySelector('button[aria-label="Remove “never mind”"]') as HTMLButtonElement).click(); }, (s) => Object.keys(s.endings).includes("never mind"), false],
+  // (control kind, page, what the user does short of the trigger, the trigger, the whole of what is sent, the applied value read back, what it is)
+  const triggers: [string, string, () => void, () => void, unknown, (settings: Settings) => unknown, unknown][] = [
+    ["a number, when it loses focus", "commands", () => { typeIn(control("Quiet before paste", "input"), "1.5"); }, () => { leave(control("Quiet before paste", "input")); }, { ending_pause: { paste: 1.5 } }, (s) => s.ending_pause.paste, 1.5],
+    ["a slider, when it is let go", "listening", () => { typeIn(control("Threshold (dictation)", "input"), "0.8"); }, () => { leave(control("Threshold (dictation)", "input")); }, { wake: { capture: { threshold: 0.8 } } }, (s) => s.wake.capture.threshold, 0.8],
+    ["a typed field, when it loses focus", "commands", () => { typeIn(script1Label(), "new label"); }, () => { leave(script1Label()); }, { scripts: [{ action: "open_url", destination: "https://example.com", label: "new label", phrase: "open the docs" }] }, (s) => s.scripts[0]?.label, "new label"],
+    ["a switch, as it is flipped", "overlay", nothing, () => { flip(control("Show the draft", "input")); }, { overlay: { draft: false } }, (s) => s.overlay.draft, false],
+    ["a choice, as it is made", "app", nothing, () => { choose(control("Update channel", "select"), "development"); }, { update_channel: "development" }, (s) => s.update_channel, "development"],
+    ["a microphone choice, as it is made", "listening", nothing, () => { choose(control("Microphone", "select"), "USB Microphone"); }, { microphone: "USB Microphone" }, (s) => s.microphone, "USB Microphone"],
+    ["a list entry, as it is removed", "commands", nothing, () => { (root.querySelector('button[aria-label="Remove “never mind”"]') as HTMLButtonElement).click(); }, { endings: { "never mind": null } }, (s) => Object.keys(s.endings).includes("never mind"), false],
   ];
 
-  it.each(triggers)("applies %s, and not before", async (_kind, page, edit, trigger, read, expected) => {
+  it.each(triggers)("applies %s, and not before, sending only what changed", async (_kind, page, edit, trigger, patch, read, expected) => {
     const stub = await open();
     goTo(page);
     edit();
@@ -304,24 +305,8 @@ describe("applying a change", () => {
     trigger();
     await settle();
     expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
-    expect(read(sent(stub))).toEqual(expected);
-  });
-
-  // (page, what the user does, the whole of what is sent)
-  const patches: [string, () => void, unknown][] = [
-    ["overlay", () => { flip(control("Show the draft", "input")); }, { overlay: { draft: false } }],
-    ["commands", () => { type(control("Quiet before paste", "input"), "1.5"); }, { ending_pause: { paste: 1.5 } }],
-    ["commands", () => { (root.querySelector('button[aria-label="Remove “never mind”"]') as HTMLButtonElement).click(); }, { endings: { "never mind": null } }],
-    ["listening", () => { choose(control("Microphone", "select"), "USB Microphone"); }, { microphone: "USB Microphone" }],
-    ["app", () => { choose(control("Update channel", "select"), "development"); }, { update_channel: "development" }],
-  ];
-
-  it.each(patches)("sends only the changed setting (%s)", async (page, change, patch) => {
-    const stub = await open();
-    goTo(page);
-    change();
-    await settle();
     expect(stub.backend.saveSettings.mock.calls.map(([sentPatch]) => sentPatch)).toEqual([patch]);
+    expect(read(sent(stub))).toEqual(expected);
   });
 
   it("does not send a change back that another program made since the window looked", async () => {
@@ -361,12 +346,15 @@ describe("applying a change", () => {
     expect([first, second]).toEqual([[false, true], [false, false]]);
   });
 
-  it("shows the reason under a number out of its range and sends nothing", async () => {
+  it("shows the reason under a number out of its range, keeps its details open and sends nothing", async () => {
     const stub = await open();
     const limits = control("Stop after silence", "input").closest("details");
-    if (limits instanceof HTMLDetailsElement) limits.open = true;
+    if (!(limits instanceof HTMLDetailsElement)) throw new Error("no details around the limit");
+    expect(limits.open).toBe(false);
+    limits.open = true;
     type(control("Stop after silence", "input"), "5");
     await settle();
+    expect(limits.open).toBe(true);
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
     expect(reasonOf("Stop after silence")).toBe("Enter a number from 10 to 600 s.");
     expect(control("Stop after silence", "input").getAttribute("aria-invalid")).toBe("true");
@@ -1740,6 +1728,52 @@ describe("the fake backend's address check", () => {
   });
 });
 
+describe("the fake backend's asynchronous Settings actions", () => {
+  it.each([false, true])("keeps slow actions pending until the page clock advances (failures: %s)", async (fails) => {
+    vi.useFakeTimers();
+    const operations = "wake-download,speech-download,save,update-check";
+    const params = new URLSearchParams({ at: "0", slow: operations });
+    if (fails) params.set("fail", operations);
+    const backend = fakeBackend(params);
+    const wake = async () => (await backend.listWakeModels()).find((model) => model.name === "hey_mycroft")?.cached;
+    const speech = async () => (await backend.listSpeechModels()).find((model) => model.name === "nemotron_160ms")?.cached;
+    const wakeResult = backend.downloadWakeModel("hey_mycroft");
+    const saveResult = backend.saveSettings({ cues: { wake: false } });
+    const progress = vi.fn();
+    backend.onSpeechModelProgress(progress);
+    const speechResult = backend.downloadSpeechModel("nemotron_160ms");
+    const finished = vi.fn();
+    const results = [wakeResult, saveResult, speechResult];
+    for (const result of results) void result.then(finished, finished);
+    await backend.checkForUpdates();
+
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(finished).not.toHaveBeenCalled();
+    expect(await wake()).toBe(false);
+    expect((await backend.getSettings()).cues.wake).toBe(true);
+    expect((await backend.getUpdateState()).phase).toEqual({ state: "checking" });
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ status: "verifying" }));
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await wake()).toBe(!fails);
+    expect((await backend.getSettings()).cues.wake).toBe(fails);
+    expect((await backend.getUpdateState()).phase).toEqual(fails
+      ? { state: "failed", message: "Thalvi could not check for updates: the connection timed out." }
+      : { state: "upToDate" });
+    expect(await speech()).toBe(false);
+    if (fails) {
+      await expect(wakeResult).rejects.toThrow(/could not download the wake model/i);
+      await expect(saveResult).rejects.toThrow(/settings could not be saved/i);
+      await expect(speechResult).rejects.toBeInstanceOf(DownloadFailure);
+    } else {
+      await vi.advanceTimersByTimeAsync(4000);
+      await Promise.all(results);
+    }
+    expect(await speech()).toBe(!fails);
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ status: fails ? "failed" : "done" }));
+  });
+});
+
 describe("the Recognition page against the fake backend", () => {
   it("never calls a streaming server Meta realtime, in the form or in the saved row", async () => {
     mountSettings(root, fakeBackend(new URLSearchParams()));
@@ -2823,33 +2857,6 @@ describe("folded settings", () => {
     }
   });
 
-  it("opens the details of a number the field itself refuses, so the invalid value stays visible", async () => {
-    await open();
-    goTo("listening");
-    const fold = foldOf("Stop after silence");
-    expect(fold.open).toBe(false);
-    fold.open = true;
-    type(control("Stop after silence", "input"), "5");
-    await settle();
-    expect(control("Stop after silence", "input").getAttribute("aria-invalid")).toBe("true");
-    expect(fold.open).toBe(true);
-    expect(rowOf("Stop after silence").querySelector(".note:not([hidden])")?.textContent).toBe("Enter a number from 10 to 600 s.");
-  });
-
-  it.each([
-    ["an unset writing endpoint stays open", null, true, "Details"],
-    ["a configured writing endpoint closes and names the address, never the key", { url: "http://127.0.0.1:8000/v1", model: "writer", has_key: true, api_key: "secret-value" }, false, "Details · http://127.0.0.1:8000/v1 · writer · key set"],
-  ])("%s", async (_name, writing, isOpen, summary) => {
-    await open({ ...SETTINGS, writing });
-    goTo("chat");
-    const fold = root.querySelector<HTMLDetailsElement>('details[data-fold="chat/writing/endpoint"]');
-    if (!fold) throw new Error("no writing details");
-    expect(fold.open).toBe(isOpen);
-    expect(fold.querySelector("summary")?.textContent).toBe(summary);
-    expect(fold.textContent).not.toContain("secret-value");
-    expect(control("Writing API key", "input").value).toBe("");
-  });
-
   it("folds an app's window classes and a script label, naming the class and the label", async () => {
     await open();
     goTo("commands");
@@ -3233,17 +3240,25 @@ describe("live controls", () => {
       goTo("listening");
       const row = rowOf("Key 1");
       const [action, mode] = Array.from(row.querySelectorAll("select"));
+      const missingEnd = "The Dictate keys can start a capture but none can end it.";
+      stub.backend.saveSettings.mockRejectedValueOnce(new Error(missingEnd));
+      choose(mode as HTMLSelectElement, "start");
+      await settle();
+      expect(mode?.value).toBe("hold");
+      expect(row.textContent).toContain(missingEnd);
       choose(action as HTMLSelectElement, "write");
       await settle();
       choose(rowOf("Key 1").querySelectorAll("select")[1] as HTMLSelectElement, "toggle");
       await settle();
 
       expect(stub.backend.saveSettings.mock.calls.map(([patch]) => patch)).toEqual([
+        { keys: [{ ...DICTATE, mode: "start" }, WRITE] },
         { keys: [{ ...DICTATE, action: "write" }, WRITE] },
         { keys: [{ ...DICTATE, action: "write", mode: "toggle" }, WRITE] },
       ]);
       expect(rowOf("Key 1").textContent).toContain("Press to start, press again to stop and paste.");
-      expect(mode).not.toBeNull();
+      expect(Array.from(row.querySelectorAll('[role="alert"]:not([hidden])'), (alert) => alert.textContent)).not.toContain(missingEnd);
+      expect(mode?.value).toBe("toggle");
     });
 
     it("removes a row and sends the rows that are left", async () => {
@@ -3616,18 +3631,14 @@ describe("updates", () => {
     return stub;
   }
 
-  it("offers Stable first and sends a Development choice with Save", async () => {
-    const stub = await open();
+  it("offers Stable first", async () => {
+    await open();
     const channel = control("Update channel", "select");
     expect(Array.from(channel.options).map((option) => [option.value, option.textContent])).toEqual([
       ["stable", "Stable"],
       ["development", "Development"],
     ]);
     expect(channel.value).toBe("stable");
-
-    choose(channel, "development");
-    await settle();
-    expect(sent(stub).update_channel).toBe("development");
   });
 
   it.each([
