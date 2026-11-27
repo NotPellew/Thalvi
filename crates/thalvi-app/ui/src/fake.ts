@@ -1,5 +1,6 @@
-// Dev-only fake backend for `npm run dev` with `?fake`; `?at=<n>` pins the status to the n-th of the script and `?look=holo` or `?look=gunmetal` picks the look.
+// Dev-only backend for `?fake`. `at` pins status, `look` picks the look, and `fail` and `slow` take comma-separated Settings operations.
 
+import { DownloadFailure } from "./contract.ts";
 import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatModelInfo, type Draft, type HistoryEntry, type LookStyles, type OverlayPreviewState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 import fixture from "./look-styles.json";
@@ -73,6 +74,8 @@ const SETTINGS: Settings = {
 };
 
 const SENTENCE = "Hey, I'm running a few minutes late, can we push the call to half past?";
+const SLOW_MS = 2000;
+type Operation = "wake-download" | "speech-download" | "save" | "update-check";
 
 function script(): Status[] {
   const words = SENTENCE.split(" ");
@@ -107,6 +110,10 @@ function script(): Status[] {
 }
 
 export function fakeBackend(params: URLSearchParams): Backend {
+  const fail = new Set(params.get("fail")?.split(","));
+  const slow = new Set(params.get("slow")?.split(","));
+  const complete = (operation: Operation, run: () => Promise<void>): Promise<void> =>
+    slow.has(operation) ? new Promise<void>((resolve) => { setTimeout(resolve, SLOW_MS); }).then(run) : run();
   const statuses = script();
   const pinned = params.get("at");
   let index = 0;
@@ -245,7 +252,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
       return Promise.resolve(bytes.buffer);
     },
     settingsReady: () => Promise.resolve(),
-    saveSettings: (patch) => {
+    saveSettings: (patch) => complete("save", () => {
+      if (fail.has("save")) return Promise.reject(new Error("The settings could not be saved: permission denied."));
       // A setting the patch removed is back at its default.
       const next: Settings = Object.assign({ writing: null, microphone: null }, applyPatch(saved, patch));
       if (next.stt.entries.filter((entry) => entry.active).length !== 1) {
@@ -254,7 +262,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
       saved = structuredClone(next);
       emitAudio({ selected: next.microphone, active: audioState.paused ? null : activeFor(next.microphone), paused: audioState.paused, problem: null });
       return Promise.resolve();
-    },
+    }),
     setListening: (on) => {
       emitAudio({ selected: audioState.selected, active: on ? activeFor(audioState.selected) : null, paused: !on, problem: null });
       emit(on ? { state: "listening" } : { state: "paused" });
@@ -322,11 +330,12 @@ export function fakeBackend(params: URLSearchParams): Backend {
       }
       return Promise.resolve();
     },
-    downloadWakeModel: (name) => {
+    downloadWakeModel: (name) => complete("wake-download", () => {
+      if (fail.has("wake-download")) return Promise.reject(new Error("Thalvi could not download the wake model: the connection timed out."));
       const model = wakeModels.find((candidate) => candidate.name === name);
       if (model) model.cached = true;
       return Promise.resolve();
-    },
+    }),
     pickWakeModelFile: () => Promise.resolve("/models/custom.onnx"),
     getChatModel: (build) => Promise.resolve({ ...chatModel, ...(build ? { build, build_label: build === "cpu" ? "CPU" : "Vulkan" } : {}) }),
     downloadChatModel: (build) => {
@@ -340,23 +349,31 @@ export function fakeBackend(params: URLSearchParams): Backend {
     removeChatModel: () => { chatModel.model_installed = false; return Promise.resolve(); },
     onChatModelProgress: (listener) => chatListeners.push(listener),
     listSpeechModels: () => Promise.resolve(structuredClone(speechModels)),
-    downloadSpeechModel: (name) =>
-      new Promise((resolve) => {
-        speak({ name, percent: 0, status: "verifying", message: null, causes: [] });
-        let percent = 0;
-        const timer = setInterval(() => {
-          percent += 10;
-          if (percent < 100) {
-            speak({ name, percent, status: "downloading", message: null, causes: [] });
-            return;
-          }
-          clearInterval(timer);
-          const model = speechModels.find((candidate) => candidate.name === name);
-          if (model) model.cached = true;
-          speak({ name, percent: 100, status: "done", message: null, causes: [] });
-          resolve();
-        }, 400);
-      }),
+    downloadSpeechModel: (name) => {
+      speak({ name, percent: 0, status: "verifying", message: null, causes: [] });
+      return complete("speech-download", () => {
+        if (fail.has("speech-download")) {
+          const failure = new DownloadFailure("Thalvi could not download the speech model.", ["The connection timed out."]);
+          speak({ name, percent: 0, status: "failed", message: failure.message, causes: failure.causes });
+          return Promise.reject(failure);
+        }
+        return new Promise((resolve) => {
+          let percent = 0;
+          const timer = setInterval(() => {
+            percent += 10;
+            if (percent < 100) {
+              speak({ name, percent, status: "downloading", message: null, causes: [] });
+              return;
+            }
+            clearInterval(timer);
+            const model = speechModels.find((candidate) => candidate.name === name);
+            if (model) model.cached = true;
+            speak({ name, percent: 100, status: "done", message: null, causes: [] });
+            resolve();
+          }, 400);
+        });
+      });
+    },
     useLighterModel: (name) => {
       const entry = SETTINGS.stt.entries.find((candidate) => candidate.kind === "on_device" && candidate.active);
       if (entry) entry.model = name;
@@ -380,8 +397,11 @@ export function fakeBackend(params: URLSearchParams): Backend {
     checkForUpdates: () => {
       tell({ phase: { state: "checking" }, notes: null, notice: null });
       setTimeout(() => {
-        tell({ phase: { state: "upToDate" }, notes: null, notice: null });
-      }, 800);
+        const phase: UpdateState["phase"] = fail.has("update-check")
+          ? { state: "failed", message: "Thalvi could not check for updates: the connection timed out." }
+          : { state: "upToDate" };
+        tell({ phase, notes: null, notice: null });
+      }, slow.has("update-check") ? SLOW_MS : 800);
       return Promise.resolve();
     },
     openReleaseNotes: () => Promise.resolve(),

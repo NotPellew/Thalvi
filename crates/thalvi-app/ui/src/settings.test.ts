@@ -1728,6 +1728,52 @@ describe("the fake backend's address check", () => {
   });
 });
 
+describe("the fake backend's asynchronous Settings actions", () => {
+  it.each([false, true])("keeps slow actions pending until the page clock advances (failures: %s)", async (fails) => {
+    vi.useFakeTimers();
+    const operations = "wake-download,speech-download,save,update-check";
+    const params = new URLSearchParams({ at: "0", slow: operations });
+    if (fails) params.set("fail", operations);
+    const backend = fakeBackend(params);
+    const wake = async () => (await backend.listWakeModels()).find((model) => model.name === "hey_mycroft")?.cached;
+    const speech = async () => (await backend.listSpeechModels()).find((model) => model.name === "nemotron_160ms")?.cached;
+    const wakeResult = backend.downloadWakeModel("hey_mycroft");
+    const saveResult = backend.saveSettings({ cues: { wake: false } });
+    const progress = vi.fn();
+    backend.onSpeechModelProgress(progress);
+    const speechResult = backend.downloadSpeechModel("nemotron_160ms");
+    const finished = vi.fn();
+    const results = [wakeResult, saveResult, speechResult];
+    for (const result of results) void result.then(finished, finished);
+    await backend.checkForUpdates();
+
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(finished).not.toHaveBeenCalled();
+    expect(await wake()).toBe(false);
+    expect((await backend.getSettings()).cues.wake).toBe(true);
+    expect((await backend.getUpdateState()).phase).toEqual({ state: "checking" });
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ status: "verifying" }));
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await wake()).toBe(!fails);
+    expect((await backend.getSettings()).cues.wake).toBe(fails);
+    expect((await backend.getUpdateState()).phase).toEqual(fails
+      ? { state: "failed", message: "Thalvi could not check for updates: the connection timed out." }
+      : { state: "upToDate" });
+    expect(await speech()).toBe(false);
+    if (fails) {
+      await expect(wakeResult).rejects.toThrow(/could not download the wake model/i);
+      await expect(saveResult).rejects.toThrow(/settings could not be saved/i);
+      await expect(speechResult).rejects.toBeInstanceOf(DownloadFailure);
+    } else {
+      await vi.advanceTimersByTimeAsync(4000);
+      await Promise.all(results);
+    }
+    expect(await speech()).toBe(!fails);
+    expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ status: fails ? "failed" : "done" }));
+  });
+});
+
 describe("the Recognition page against the fake backend", () => {
   it("never calls a streaming server Meta realtime, in the form or in the saved row", async () => {
     mountSettings(root, fakeBackend(new URLSearchParams()));
