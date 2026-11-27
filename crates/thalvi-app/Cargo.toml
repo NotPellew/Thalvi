@@ -8,6 +8,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+update-fixture = []
+update-fixture-b = ["update-fixture", "thalvi-desktop/update-fixture-b"]
+
 [[bin]]
 name = "thalvi-desktop"
 path = "src/main.rs"
