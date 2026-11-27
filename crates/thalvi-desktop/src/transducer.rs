@@ -1271,11 +1271,16 @@ impl<B: Backend> Replayed<B> {
         words
     }
 
-    /// A phrase in the shared audio can land several frames later or earlier in the tail.
-    fn overlap(shown: &[ReplayWord], heard: &[ReplayWord]) -> Option<(WordStart, WordStart)> {
+    /// Uses the words after the cut to distinguish repeated words in the shared audio.
+    fn overlap(
+        shown: &[ReplayWord],
+        heard: &[ReplayWord],
+        cut: usize,
+    ) -> Option<(WordStart, WordStart)> {
+        let through_cut = shown.partition_point(|word| word.start.frame <= cut);
         let mut best = None;
         let mut best_score = (0, Reverse(usize::MAX));
-        for (left, shown_word) in shown.iter().enumerate().rev() {
+        for (left, shown_word) in shown[..through_cut].iter().enumerate().rev() {
             for (right, heard_word) in heard.iter().enumerate() {
                 let distance = shown_word.start.frame.abs_diff(heard_word.start.frame);
                 if heard_word.start.frame > shown_word.start.frame + Self::LEFT {
@@ -1322,9 +1327,7 @@ impl<B: Backend> Replayed<B> {
         let live = self.words(&self.shown[offset..]);
         let tail = self.words(&frames);
         let cut = start - offset;
-        let (earlier, at_cut) = live.split_at(live.partition_point(|word| word.start.frame < cut));
-        let overlap = Self::overlap(earlier, &tail).or_else(|| Self::overlap(&at_cut[..1], &tail));
-        let (left, right) = if let Some(pair) = overlap {
+        let (left, right) = if let Some(pair) = Self::overlap(&live, &tail, cut) {
             pair
         } else if let Some(word) = tail.iter().find(|word| word.start.frame >= cut) {
             (
@@ -2364,7 +2367,7 @@ mod tests {
         const END: usize = 160;
         const OFFSET: usize = 128;
         type Script = &'static [(usize, &'static str)];
-        let cases: [(&str, Script, Script, &str); 7] = [
+        let cases: [(&str, Script, Script, &str); 8] = [
             (
                 "cut word",
                 &[(131, "▁the"), (136, "▁region")],
@@ -2407,6 +2410,23 @@ mod tests {
                 &[(133, "▁moves")],
                 "the",
             ),
+            (
+                "repeated word after the cut",
+                &[
+                    (132, "▁the"),
+                    (136, "▁region"),
+                    (137, "▁of"),
+                    (139, "▁the"),
+                    (142, "▁hills"),
+                ],
+                &[
+                    (135, "▁region"),
+                    (137, "▁of"),
+                    (139, "▁the"),
+                    (142, "▁hills"),
+                ],
+                "the region of the hills",
+            ),
         ];
         let pieces = Arc::new(
             [
@@ -2421,6 +2441,7 @@ mod tests {
                 "▁side",
                 "▁of",
                 "▁hill",
+                "▁hills",
             ]
             .map(String::from)
             .to_vec(),
