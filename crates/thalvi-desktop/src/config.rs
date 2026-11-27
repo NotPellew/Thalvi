@@ -932,6 +932,14 @@ mod tests {
                 "writing.model must be",
             ),
             (
+                r#"{"writing": {"url": "http://x", "prompt": "Be brief."}}"#,
+                "writing.model must be",
+            ),
+            (
+                r#"{"writing": {"prompt": " \n"}}"#,
+                "writing.prompt must not be blank",
+            ),
+            (
                 r#"{"writing": {"url": "http://x", "model": "m", "tone": 1}}"#,
                 "unknown field `tone`",
             ),
