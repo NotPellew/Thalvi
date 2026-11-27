@@ -42,6 +42,8 @@ fn resolved(property: &Descriptor, scheme: &Scheme) -> Value {
         "colors.muted" => scheme.muted.to_hex().into(),
         "colors.border" => scheme.border.to_hex().into(),
         "colors.accent" => scheme.accent.to_hex().into(),
+        #[cfg(feature = "update-fixture-b")]
+        "colors.heading_rule" => scheme.heading_rule.to_hex().into(),
         "colors.on_accent" => scheme.on_accent.to_hex().into(),
         "colors.secondary" => scheme.secondary.to_hex().into(),
         "colors.state.pending" => scheme.pending.to_hex().into(),
@@ -800,6 +802,10 @@ impl SettingsStyle {
     fn headings(&self, tokens: &mut Tokens) {
         let look = self.look;
         let s = &self.style.dark;
+        #[cfg(feature = "update-fixture-b")]
+        let rule = s.heading_rule;
+        #[cfg(not(feature = "update-fixture-b"))]
+        let rule = s.accent;
         tokens.set(
             "--brand-color",
             pick(
@@ -843,7 +849,7 @@ impl SettingsStyle {
                 "none".to_owned(),
                 format!(
                     "linear-gradient(90deg, {} 0 48px, {} 48px) bottom / 100% 1px no-repeat",
-                    s.accent.to_hex(),
+                    rule.to_hex(),
                     self.border_tint(0.5)
                 ),
                 "none".to_owned(),

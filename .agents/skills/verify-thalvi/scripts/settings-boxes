@@ -15,6 +15,7 @@ node --input-type=module - "$@" <<'EOF'
 import { createServer } from "vite";
 import { chromium } from "playwright-core";
 import { writeFileSync } from "node:fs";
+import { measureSettingsBoxes } from "./explore/settings-boxes.ts";
 
 const [path, sizes, out, ...specs] = process.argv.slice(2);
 const [page, ...clicks] = path.split(">");
@@ -35,50 +36,21 @@ try {
     await tab.goto(`${server.resolvedUrls.local[0]}settings.html?fake&at=0&look=${process.env.LOOK ?? "gunmetal"}`);
     await tab.getByRole("navigation", { name: "Settings pages" }).getByRole("button", { name: page, exact: true }).click();
     for (const name of clicks) await tab.getByRole("button", { name, exact: true }).click();
-    const locators = wanted.map((w) => tab.getByRole(w.role, { name: w.name, exact: true }).first());
-    await locators.at(-1).waitFor({ state: "attached", timeout: 10_000 });
-    const boxes = [];
-    for (const [i, loc] of locators.entries()) {
-      const label = `${wanted[i].role}=${wanted[i].name}`;
-      if ((await loc.count()) === 0) { boxes.push({ label, problems: ["missing"] }); continue; }
-      await loc.scrollIntoViewIfNeeded();
-      // Only vertical scrolling is legitimate: undo any sideways scroll before measuring.
-      const seen = await loc.evaluate((el) => {
-        const scrolled = [document.scrollingElement, ...document.querySelectorAll("*")].filter((e) => e && e.scrollLeft !== 0);
-        for (const e of scrolled) e.scrollLeft = 0;
-        const r = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-        return { x: r.x, y: r.y, w: r.width, h: r.height, visible: style.visibility !== "hidden" && style.display !== "none" && r.width > 0 && r.height > 0,
-          unoccluded: hit !== null && (el.contains(hit) || hit.contains(el) || (el.labels ?? []).length > 0 && [...el.labels].some((l) => l.contains(hit))) };
-      });
-      const problems = [];
-      if (!seen.visible) problems.push("not visible");
-      if (seen.x < 0 || seen.y < 0 || seen.x + seen.w > width + 0.5 || seen.y + seen.h > height + 0.5) problems.push("outside the window");
-      if (!seen.unoccluded) problems.push("covered at its centre");
-      boxes.push({ label, ...seen, problems });
-    }
-    // Overlap is judged in page coordinates, with every element measured at the same scroll.
-    await tab.evaluate(() => document.querySelectorAll("*").forEach((e) => { if (e.scrollTop) e.scrollTop = 0; }));
-    const rects = [];
-    for (const loc of locators) rects.push((await loc.count()) ? await loc.evaluate((el) => {
-      const r = el.getBoundingClientRect();
-      return { x: r.x, y: r.y, w: r.width, h: r.height };
-    }) : null);
-    const handles = await Promise.all(locators.map(async (l) => ((await l.count()) ? l.elementHandle() : null)));
-    for (let a = 0; a < rects.length; a++) for (let b = a + 1; b < rects.length; b++) {
-      const p = rects[a], q = rects[b];
-      if (!p || !q) continue;
-      const nested = await tab.evaluate(([x, y]) => x.contains(y) || y.contains(x), [handles[a], handles[b]]);
-      if (nested) continue;
-      if (p.x < q.x + q.w - 0.5 && q.x < p.x + p.w - 0.5 && p.y < q.y + q.h - 0.5 && q.y < p.y + p.h - 0.5) {
-        boxes[a].problems.push(`overlaps ${boxes[b].label}`);
-      }
-    }
-    for (const b of boxes) if (b.problems.length) failed = true;
-    report.push({ size, boxes });
+    await tab.evaluate(() => document.fonts.ready.then(() => undefined));
+    const handles = await Promise.all(wanted.map(async ({ role, name }) => {
+      const [handle] = await tab.getByRole(role, { name, exact: true }).first().elementHandles();
+      return handle;
+    }));
+    const { boxes: measured, overflow } = await tab.evaluate(measureSettingsBoxes, handles.filter(Boolean));
+    const boxes = wanted.map(({ role, name }, i) => ({
+      ...(handles[i] ? measured.shift() : { problems: ["missing"] }),
+      label: `${role}=${name}`,
+    }));
+    if (overflow.length || boxes.some((b) => b.problems.length)) failed = true;
+    report.push({ size, boxes, overflow });
     console.log(`${size}: ${boxes.filter((b) => !b.problems.length).length}/${boxes.length} pass`);
     for (const b of boxes) if (b.problems.length) console.log(`  FAIL ${b.label}: ${b.problems.join("; ")}`);
+    for (const problem of overflow) console.log(`  FAIL ${problem}`);
     await tab.close();
   }
 } finally {
