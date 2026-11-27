@@ -693,10 +693,9 @@ mod tests {
         live(&mut sink, &block(2));
         assert_eq!(next(&mut frames).await.map(|frame| frame[0]), Ok(1));
         assert_eq!(next(&mut frames).await.map(|frame| frame[0]), Ok(2));
-        for _ in 0..=QUEUE_FRAMES {
+        for _ in 0..=QUEUE_FRAMES + 2 {
             live(&mut sink, &block(3));
         }
-        live(&mut sink, &block(3));
         recorder.finish().await;
 
         let written = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
