@@ -164,7 +164,7 @@ fn replacement(
         return None;
     }
     // A word that cannot begin a number ends the attempt here, so plain text is not scanned.
-    if kept_in_context(tongue, tokens, at) || !starts_number(tongue, &first.lower) {
+    if !starts_number(tongue, &first.lower) {
         return None;
     }
     let mut end = at + 1;
@@ -185,6 +185,9 @@ fn replacement(
         Tongue::Other => return None,
     };
     let last = at + used.checked_sub(1)?;
+    if kept_in_context(tongue, text, tokens, at, last) {
+        return None;
+    }
     if !stands_alone(text, &tokens[last]) {
         return None;
     }
@@ -220,9 +223,9 @@ fn whitespace_between(text: &str, before: &Word, after: &Word) -> bool {
         .all(char::is_whitespace)
 }
 
-/// Whether the number word at `at` belongs to a phrase where it stays a word: "half past three",
-/// "quarter to three", "the other one", "no one", "halb drei", "fünf vor drei", "gegen fünf Uhr".
-fn kept_in_context(tongue: Tongue, tokens: &[Word], at: usize) -> bool {
+/// Whether the number phrase from `at` to `last` stays words: a lone English "one" outside a
+/// "to" range, or a phrase the grammar keeps in either language ("the other two", "halb drei").
+fn kept_in_context(tongue: Tongue, text: &str, tokens: &[Word], at: usize, last: usize) -> bool {
     let word = |index: Option<usize>| {
         index
             .and_then(|index| tokens.get(index))
@@ -235,8 +238,48 @@ fn kept_in_context(tongue: Tongue, tokens: &[Word], at: usize) -> bool {
     let current = tokens.get(at).map(|word| word.lower.as_str());
     match tongue {
         Tongue::English => {
-            // "one" as a pronoun or determiner stays; as a count before a noun it becomes 1.
-            (current == Some("one") && next.is_none_or(|next| matches!(next, "of" | "day")))
+            // A lone "one" stays a word unless "to" joins it to a number without a sentence break,
+            // or it precedes "am" or "pm". A bare "a" is an article, not the number one.
+            let ends_number = |word: &str| {
+                word != "a"
+                    && (english_starts_number(word)
+                        || word == "hundred"
+                        || english_scale(word).is_some())
+            };
+            let range_after = next == Some("to") && {
+                let to = &tokens[at + 1];
+                let following: Vec<&str> = tokens[at + 2..]
+                    .iter()
+                    .take(2)
+                    .map(|word| word.lower.as_str())
+                    .collect();
+                whitespace_between(text, &tokens[at], to)
+                    && (text[to.end..]
+                        .trim_start()
+                        .starts_with(|character: char| character.is_ascii_digit())
+                        || (tokens
+                            .get(at + 2)
+                            .is_some_and(|word| whitespace_between(text, to, word))
+                            && english_prefix(&following).is_some()))
+            };
+            let range_before = previous == Some("to") && {
+                let to = &tokens[at - 1];
+                whitespace_between(text, to, &tokens[at])
+                    && (text[..to.start]
+                        .trim_end()
+                        .ends_with(|character: char| character.is_ascii_digit())
+                        || at
+                            .checked_sub(2)
+                            .and_then(|index| tokens.get(index))
+                            .is_some_and(|word| {
+                                whitespace_between(text, word, to) && ends_number(&word.lower)
+                            }))
+            };
+            (current == Some("one")
+                && at == last
+                && next.is_none_or(|next| !matches!(next, "am" | "pm"))
+                && !range_after
+                && !range_before)
                 || matches!(previous, Some("other" | "no"))
                 || (matches!(previous, Some("past" | "to"))
                     && matches!(before, Some("half" | "quarter")))
@@ -737,7 +780,7 @@ mod tests {
             ("five pm", "5 pm"),
             ("zero", "0"),
             ("two drives", "2 drives"),
-            ("one drive", "1 drive"),
+            ("one drive", "one drive"),
             ("text (two) and [three].", "text (2) and [3]."),
             // Kept as words: pronouns, idioms and ordinals.
             ("the other one", "the other one"),
@@ -763,6 +806,45 @@ mod tests {
             // A pronoun or determiner "one" stays a word, whatever follows it.
             ("the other one is enough", "the other one is enough"),
             ("no one knows", "no one knows"),
+            ("a different one is fine", "a different one is fine"),
+            (
+                "the thinking one, then the fast one",
+                "the thinking one, then the fast one",
+            ),
+            ("one thing I noticed", "one thing I noticed"),
+            ("this one and that one", "this one and that one"),
+            ("which one do you mean", "which one do you mean"),
+            ("One thing first.", "One thing first."),
+            ("I talked to one person", "I talked to one person"),
+            ("give one to a friend", "give one to a friend"),
+            (
+                "Use the larger one. To 2 places.",
+                "Use the larger one. To 2 places.",
+            ),
+            ("Pick two. To one friend.", "Pick 2. To one friend."),
+            (
+                "Who did you give one to? Two people.",
+                "Who did you give one to? 2 people.",
+            ),
+            (
+                "What did you add two to? One of them.",
+                "What did you add 2 to? One of them.",
+            ),
+            ("quarter to one", "quarter to one"),
+            // "one" still takes digits in a longer number, a range or before a unit.
+            ("version one point five", "version 1.5"),
+            ("about one to three billion", "about 1 to 3,000,000,000"),
+            ("meet at one thirty", "meet at 1:30"),
+            ("one percent", "1%"),
+            ("twenty one", "21"),
+            ("one to two pages", "1 to 2 pages"),
+            ("one pm", "1 pm"),
+            ("three to one odds", "3 to 1 odds"),
+            ("one or two", "one or 2"),
+            ("one to a hundred pages", "1 to 100 pages"),
+            ("one to 2 pages", "1 to 2 pages"),
+            ("two hundred to one odds", "200 to 1 odds"),
+            ("from 2 to one", "from 2 to 1"),
         ]
     }
 
