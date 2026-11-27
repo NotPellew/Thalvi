@@ -855,10 +855,13 @@ mod tests {
         );
     }
 
+    /// Consecutive reads of one field.
+    type Reads = Vec<Result<String, FieldEnd>>;
+
     #[test]
     fn the_field_reports_why_its_text_cannot_be_read() {
         let now = Instant::now() + Duration::from_secs(10);
-        let cases: Vec<(&str, FakeObject, bool, Vec<Result<String, FieldEnd>>)> = vec![
+        let cases: Vec<(&str, FakeObject, bool, Reads)> = vec![
             (
                 "a password field is protected",
                 FakeObject {
