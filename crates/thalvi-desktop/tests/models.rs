@@ -224,15 +224,12 @@ async fn serve_raw(reply: &'static [u8]) -> SocketAddr {
 #[tokio::test]
 async fn a_failed_download_says_which_step_failed_and_keeps_the_causes_without_the_address() {
     let (address, _server) = serve().await;
-    let refused = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        listener.local_addr().expect("address")
-    };
     let cut = serve_raw(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nsome bytes").await;
     let sha = sha256(GOOD);
     for (url, message, metric) in [
         (
-            format!("http://{refused}/good.onnx?signature=secret"),
+            // Binding to port 0 always assigns the listener a different port.
+            "http://127.0.0.1:0/good.onnx?signature=secret".to_owned(),
             "could not connect to 127.0.0.1. Check the internet connection and try again.",
             "connect",
         ),
