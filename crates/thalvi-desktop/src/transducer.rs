@@ -1305,10 +1305,10 @@ impl<B: Backend> Replayed<B> {
         let Some(start) = self.tail_start(end) else {
             return Ok(None);
         };
-        let mut padded = audio.to_vec();
-        padded.resize(padded.len() + 12_800, 0.0);
         let offset = start.saturating_sub(Self::LEFT);
-        let heard = self.hear(&padded[offset * Self::FRAME..])?;
+        let mut padded = audio[offset * Self::FRAME..].to_vec();
+        padded.resize(padded.len() + 12_800, 0.0);
+        let heard = self.hear(&padded)?;
         let to = (end - offset).min(heard.count);
         let mut frames = self.backend.decode(
             &heard.values,
@@ -1316,15 +1316,17 @@ impl<B: Backend> Replayed<B> {
             0..to,
             &mut ReplayState::default().decoding(),
         )?;
-        let live = self.words(&self.shown[offset..start]);
+        if frames.iter().all(Vec::is_empty) {
+            return Ok(None);
+        }
+        let live = self.words(&self.shown[offset..]);
         let tail = self.words(&frames);
         let cut = start - offset;
-        let (left, right) = if let Some(pair) = Self::overlap(&live, &tail) {
+        let (earlier, at_cut) = live.split_at(live.partition_point(|word| word.start.frame < cut));
+        let overlap = Self::overlap(earlier, &tail).or_else(|| Self::overlap(&at_cut[..1], &tail));
+        let (left, right) = if let Some(pair) = overlap {
             pair
-        } else {
-            let Some(word) = tail.iter().find(|word| word.start.frame >= cut) else {
-                return Ok(None);
-            };
+        } else if let Some(word) = tail.iter().find(|word| word.start.frame >= cut) {
             (
                 WordStart {
                     frame: cut,
@@ -1332,6 +1334,10 @@ impl<B: Backend> Replayed<B> {
                 },
                 word.start,
             )
+        } else {
+            let mut all = self.shown[..start].to_vec();
+            all.resize_with(offset + frames.len(), Vec::new);
+            return Ok(Some(all));
         };
         let keep = offset + left.frame;
         let join = offset + right.frame;
@@ -2341,7 +2347,15 @@ mod tests {
             range: std::ops::Range<usize>,
             _carried: &mut Decoding<'_>,
         ) -> Result<Vec<Vec<usize>>, RecognizerError> {
-            Ok(self.frames[range].to_vec())
+            let mut frames: Vec<_> = self
+                .frames
+                .iter()
+                .skip(range.start)
+                .take(range.len())
+                .cloned()
+                .collect();
+            frames.resize_with(range.len(), Vec::new);
+            Ok(frames)
         }
     }
 
@@ -2350,7 +2364,7 @@ mod tests {
         const END: usize = 160;
         const OFFSET: usize = 128;
         type Script = &'static [(usize, &'static str)];
-        let cases: [(&str, Script, Script, &str); 5] = [
+        let cases: [(&str, Script, Script, &str); 7] = [
             (
                 "cut word",
                 &[(131, "▁the"), (136, "▁region")],
@@ -2380,6 +2394,18 @@ mod tests {
                 &[(130, "▁other"), (133, "▁side"), (135, "▁of"), (136, "▁the")],
                 &[(137, "▁side"), (139, "▁of"), (140, "▁the"), (141, "▁hill")],
                 "other side of the hill",
+            ),
+            (
+                "cut word without an earlier match",
+                &[(126, "▁the"), (136, "▁region"), (140, "▁moves")],
+                &[(135, "▁region"), (140, "▁moves")],
+                "the region moves",
+            ),
+            (
+                "tail has words only before the cut",
+                &[(126, "▁the"), (136, "▁region")],
+                &[(133, "▁moves")],
+                "the",
             ),
         ];
         let pieces = Arc::new(
