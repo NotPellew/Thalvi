@@ -1,6 +1,7 @@
 //! Thalvi desktop app: the Tauri tray, overlay and settings window around the capture engine.
 
 mod agent;
+mod announcement;
 mod app;
 #[cfg(target_os = "linux")]
 mod appimage;

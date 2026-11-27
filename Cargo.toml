@@ -30,6 +30,9 @@ redundant_clone = "warn"
 
 [workspace.dependencies]
 getrandom = "0.4.3"
+# Thalvi's status reaches Linux screen readers as one AT-SPI live region.
+accesskit = "0.25"
+accesskit_unix = "0.24"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23"
 jiff = "0.2.39"
