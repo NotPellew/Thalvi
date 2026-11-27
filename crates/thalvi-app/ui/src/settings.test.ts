@@ -3852,9 +3852,9 @@ describe("updates", () => {
 
 describe("history", () => {
   const ENTRIES: HistoryEntry[] = [
-    { id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted", corrected: null },
-    { id: 20, timestamp_ms: Date.UTC(2026, 10, 2, 18, 5), text: "The window was gone.", target: null, outcome: "failed", corrected: null },
-    { id: 10, timestamp_ms: Date.UTC(2026, 10, 1, 7, 0), text: "Never mind this one", target: "Firefox", outcome: "cancelled", corrected: null },
+    { id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted" },
+    { id: 20, timestamp_ms: Date.UTC(2026, 10, 2, 18, 5), text: "The window was gone.", target: null, outcome: "failed" },
+    { id: 10, timestamp_ms: Date.UTC(2026, 10, 1, 7, 0), text: "Never mind this one", target: "Firefox", outcome: "cancelled" },
   ];
 
   async function openHistory(...lists: (HistoryEntry[] | Error)[]) {
@@ -4234,7 +4234,7 @@ describe("last dictation", () => {
     ["Discard", section, "Discard the last dictation? This cannot be undone.", "Yes, discard", /^Discard$/, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it."],
   ] as const)("%s asks first: Keep changes nothing and returns to it, the yes acts once", async (action, scope, question, yes, name, after) => {
     const stub = stubBackend();
-    let entries: HistoryEntry[] = [{ id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted", corrected: null }];
+    let entries: HistoryEntry[] = [{ id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted" }];
     let draft: Draft | null = DRAFT;
     stub.backend.getHistory.mockImplementation(() => Promise.resolve(structuredClone(entries)));
     stub.backend.deleteHistoryEntry.mockImplementation(() => { entries = []; return Promise.resolve(); });

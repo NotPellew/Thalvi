@@ -44,7 +44,6 @@ pub struct DraftView {
     /// The words as recognized, when a cleanup pasted something else; absent when they are `original`.
     pub raw: Option<String>,
     /// The user's cleanup of the pasted span; Copy uses it when there are no edits of their own.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corrected: Option<String>,
 }
 
@@ -365,6 +364,8 @@ mod tests {
             .0
             .expect("the pasted dictation has a draft");
         let id = drafts.offer(draft);
+        let unfixed = serde_json::to_value(drafts.view().expect("the draft is shown")).unwrap();
+        assert_eq!(unfixed.get("corrected"), Some(&serde_json::Value::Null));
         drafts.set_corrected(id, "Cybrex2".to_owned());
         let view = drafts.view().expect("the draft is still shown");
         assert_eq!(

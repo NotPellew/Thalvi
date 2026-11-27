@@ -202,8 +202,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
   const now = Date.now();
   let history: HistoryEntry[] = [
     { id: 3, timestamp_ms: now - 60_000, text: "Remind me to call the dentist tomorow morning.", target: "Slack", outcome: "accepted", corrected: "Remind me to call the dentist tomorrow morning." },
-    { id: 2, timestamp_ms: now - 3_600_000, text: "Thalvi could not reach the window that was open when you started.", target: null, outcome: "failed", corrected: null },
-    { id: 1, timestamp_ms: now - 86_400_000, text: "Hey, I'm running a few minutes late", target: "Firefox", outcome: "cancelled", corrected: null },
+    { id: 2, timestamp_ms: now - 3_600_000, text: "Thalvi could not reach the window that was open when you started.", target: null, outcome: "failed" },
+    { id: 1, timestamp_ms: now - 86_400_000, text: "Hey, I'm running a few minutes late", target: "Firefox", outcome: "cancelled" },
   ];
   let draft: Draft | null = {
     id: 1,

@@ -2841,7 +2841,7 @@ function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: str
   copy.setAttribute("aria-label", `Copy the entry from ${time.textContent}`);
   const [deleting, del] = confirmed("Delete", "Delete this entry? This cannot be undone.", "Yes, delete", "Keep", remove, `Delete the entry from ${time.textContent}`);
   del.classList.add("quiet");
-  const kept = entry.corrected === null ? [] : [el("p", { class: "corrected" }, `Heard: ${entry.text}`)];
+  const kept = entry.corrected === undefined ? [] : [el("p", { class: "corrected" }, `Heard: ${entry.text}`)];
   return [el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, body), ...kept, result, el("span", { class: "trow" }, copy, deleting)), del];
 }
 

@@ -257,8 +257,8 @@ export interface HistoryEntry {
   text: string;
   target: string | null;
   outcome: HistoryOutcome;
-  /** The user's cleanup of the pasted span, or null when none was kept. */
-  corrected: string | null;
+  /** The user's cleanup of the pasted span; absent when none was kept. */
+  corrected?: string;
 }
 
 export type DraftOutcome = "delivered" | "cancelled" | "failed" | "maybePartial";
