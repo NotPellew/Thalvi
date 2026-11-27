@@ -2378,7 +2378,7 @@ mod tests {
     fn a_queued_rebuild_is_published_while_the_capture_keeps_its_status() {
         let (out, status) = watch::channel(Status::Paused);
         let publisher = Publisher::new(out, EndingPauses::default());
-        let queued = publisher.rebuilding.subscribe();
+        let mut queued = publisher.rebuilding.subscribe();
         publisher.mode(Mode::Idle);
         publisher.update(|view| {
             view.engine = EngineState::Capturing {
@@ -2388,15 +2388,28 @@ mod tests {
             };
         });
         assert!(!*queued.borrow());
+        assert!(!queued.has_changed().unwrap(), "no rebuild was queued");
 
         publisher.queue_rebuild();
-        assert!(*queued.borrow(), "the next dictation waits for the rebuild");
+        assert!(queued.has_changed().unwrap(), "the rebuild was queued");
+        assert!(
+            *queued.borrow_and_update(),
+            "the next dictation waits for the rebuild"
+        );
         assert!(
             matches!(&*status.borrow(), Status::Capturing { .. }),
             "the running capture is not loading"
         );
 
-        publisher.finish_apply(publisher.start_apply());
+        let seq = publisher.start_apply();
+        publisher.set_applying(true);
+        assert!(
+            !queued.has_changed().unwrap(),
+            "the rebuild is still pending"
+        );
+
+        publisher.finish_apply(seq);
+        assert!(queued.has_changed().unwrap(), "the rebuild finished");
         assert!(!*queued.borrow(), "the rebuild is done");
     }
 
