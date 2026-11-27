@@ -285,17 +285,18 @@ describe("applying a change", () => {
   const nothing = (): void => undefined;
   const script1Label = (): HTMLInputElement => root.querySelector<HTMLInputElement>('input[aria-label="Label of script 1"]') as HTMLInputElement;
 
-  // (control kind, page, what the user does short of the trigger, the trigger, the applied value read back, what it is)
-  const triggers: [string, string, () => void, () => void, (settings: Settings) => unknown, unknown][] = [
-    ["a number, when it loses focus", "commands", () => { typeIn(control("Quiet before paste", "input"), "1.5"); }, () => { leave(control("Quiet before paste", "input")); }, (s) => s.ending_pause.paste, 1.5],
-    ["a slider, when it is let go", "listening", () => { typeIn(control("Threshold (dictation)", "input"), "0.8"); }, () => { leave(control("Threshold (dictation)", "input")); }, (s) => s.wake.capture.threshold, 0.8],
-    ["a typed field, when it loses focus", "commands", () => { typeIn(script1Label(), "new label"); }, () => { leave(script1Label()); }, (s) => s.scripts[0]?.label, "new label"],
-    ["a switch, as it is flipped", "overlay", nothing, () => { flip(control("Show the draft", "input")); }, (s) => s.overlay.draft, false],
-    ["a choice, as it is made", "app", nothing, () => { choose(control("Update channel", "select"), "development"); }, (s) => s.update_channel, "development"],
-    ["a list entry, as it is removed", "commands", nothing, () => { (root.querySelector('button[aria-label="Remove “never mind”"]') as HTMLButtonElement).click(); }, (s) => Object.keys(s.endings).includes("never mind"), false],
+  // (control kind, page, what the user does short of the trigger, the trigger, the whole of what is sent, the applied value read back, what it is)
+  const triggers: [string, string, () => void, () => void, unknown, (settings: Settings) => unknown, unknown][] = [
+    ["a number, when it loses focus", "commands", () => { typeIn(control("Quiet before paste", "input"), "1.5"); }, () => { leave(control("Quiet before paste", "input")); }, { ending_pause: { paste: 1.5 } }, (s) => s.ending_pause.paste, 1.5],
+    ["a slider, when it is let go", "listening", () => { typeIn(control("Threshold (dictation)", "input"), "0.8"); }, () => { leave(control("Threshold (dictation)", "input")); }, { wake: { capture: { threshold: 0.8 } } }, (s) => s.wake.capture.threshold, 0.8],
+    ["a typed field, when it loses focus", "commands", () => { typeIn(script1Label(), "new label"); }, () => { leave(script1Label()); }, { scripts: [{ action: "open_url", destination: "https://example.com", label: "new label", phrase: "open the docs" }] }, (s) => s.scripts[0]?.label, "new label"],
+    ["a switch, as it is flipped", "overlay", nothing, () => { flip(control("Show the draft", "input")); }, { overlay: { draft: false } }, (s) => s.overlay.draft, false],
+    ["a choice, as it is made", "app", nothing, () => { choose(control("Update channel", "select"), "development"); }, { update_channel: "development" }, (s) => s.update_channel, "development"],
+    ["a microphone choice, as it is made", "listening", nothing, () => { choose(control("Microphone", "select"), "USB Microphone"); }, { microphone: "USB Microphone" }, (s) => s.microphone, "USB Microphone"],
+    ["a list entry, as it is removed", "commands", nothing, () => { (root.querySelector('button[aria-label="Remove “never mind”"]') as HTMLButtonElement).click(); }, { endings: { "never mind": null } }, (s) => Object.keys(s.endings).includes("never mind"), false],
   ];
 
-  it.each(triggers)("applies %s, and not before", async (_kind, page, edit, trigger, read, expected) => {
+  it.each(triggers)("applies %s, and not before, sending only what changed", async (_kind, page, edit, trigger, patch, read, expected) => {
     const stub = await open();
     goTo(page);
     edit();
@@ -304,24 +305,8 @@ describe("applying a change", () => {
     trigger();
     await settle();
     expect(stub.backend.saveSettings).toHaveBeenCalledTimes(1);
-    expect(read(sent(stub))).toEqual(expected);
-  });
-
-  // (page, what the user does, the whole of what is sent)
-  const patches: [string, () => void, unknown][] = [
-    ["overlay", () => { flip(control("Show the draft", "input")); }, { overlay: { draft: false } }],
-    ["commands", () => { type(control("Quiet before paste", "input"), "1.5"); }, { ending_pause: { paste: 1.5 } }],
-    ["commands", () => { (root.querySelector('button[aria-label="Remove “never mind”"]') as HTMLButtonElement).click(); }, { endings: { "never mind": null } }],
-    ["listening", () => { choose(control("Microphone", "select"), "USB Microphone"); }, { microphone: "USB Microphone" }],
-    ["app", () => { choose(control("Update channel", "select"), "development"); }, { update_channel: "development" }],
-  ];
-
-  it.each(patches)("sends only the changed setting (%s)", async (page, change, patch) => {
-    const stub = await open();
-    goTo(page);
-    change();
-    await settle();
     expect(stub.backend.saveSettings.mock.calls.map(([sentPatch]) => sentPatch)).toEqual([patch]);
+    expect(read(sent(stub))).toEqual(expected);
   });
 
   it("does not send a change back that another program made since the window looked", async () => {
@@ -361,12 +346,15 @@ describe("applying a change", () => {
     expect([first, second]).toEqual([[false, true], [false, false]]);
   });
 
-  it("shows the reason under a number out of its range and sends nothing", async () => {
+  it("shows the reason under a number out of its range, keeps its details open and sends nothing", async () => {
     const stub = await open();
     const limits = control("Stop after silence", "input").closest("details");
-    if (limits instanceof HTMLDetailsElement) limits.open = true;
+    if (!(limits instanceof HTMLDetailsElement)) throw new Error("no details around the limit");
+    expect(limits.open).toBe(false);
+    limits.open = true;
     type(control("Stop after silence", "input"), "5");
     await settle();
+    expect(limits.open).toBe(true);
     expect(stub.backend.saveSettings).not.toHaveBeenCalled();
     expect(reasonOf("Stop after silence")).toBe("Enter a number from 10 to 600 s.");
     expect(control("Stop after silence", "input").getAttribute("aria-invalid")).toBe("true");
@@ -2823,33 +2811,6 @@ describe("folded settings", () => {
     }
   });
 
-  it("opens the details of a number the field itself refuses, so the invalid value stays visible", async () => {
-    await open();
-    goTo("listening");
-    const fold = foldOf("Stop after silence");
-    expect(fold.open).toBe(false);
-    fold.open = true;
-    type(control("Stop after silence", "input"), "5");
-    await settle();
-    expect(control("Stop after silence", "input").getAttribute("aria-invalid")).toBe("true");
-    expect(fold.open).toBe(true);
-    expect(rowOf("Stop after silence").querySelector(".note:not([hidden])")?.textContent).toBe("Enter a number from 10 to 600 s.");
-  });
-
-  it.each([
-    ["an unset writing endpoint stays open", null, true, "Details"],
-    ["a configured writing endpoint closes and names the address, never the key", { url: "http://127.0.0.1:8000/v1", model: "writer", has_key: true, api_key: "secret-value" }, false, "Details · http://127.0.0.1:8000/v1 · writer · key set"],
-  ])("%s", async (_name, writing, isOpen, summary) => {
-    await open({ ...SETTINGS, writing });
-    goTo("chat");
-    const fold = root.querySelector<HTMLDetailsElement>('details[data-fold="chat/writing/endpoint"]');
-    if (!fold) throw new Error("no writing details");
-    expect(fold.open).toBe(isOpen);
-    expect(fold.querySelector("summary")?.textContent).toBe(summary);
-    expect(fold.textContent).not.toContain("secret-value");
-    expect(control("Writing API key", "input").value).toBe("");
-  });
-
   it("folds an app's window classes and a script label, naming the class and the label", async () => {
     await open();
     goTo("commands");
@@ -3601,18 +3562,14 @@ describe("updates", () => {
     return stub;
   }
 
-  it("offers Stable first and sends a Development choice with Save", async () => {
-    const stub = await open();
+  it("offers Stable first", async () => {
+    await open();
     const channel = control("Update channel", "select");
     expect(Array.from(channel.options).map((option) => [option.value, option.textContent])).toEqual([
       ["stable", "Stable"],
       ["development", "Development"],
     ]);
     expect(channel.value).toBe("stable");
-
-    choose(channel, "development");
-    await settle();
-    expect(sent(stub).update_channel).toBe("development");
   });
 
   it.each([

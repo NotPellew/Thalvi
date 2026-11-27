@@ -1042,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn an_artifact_final_does_not_revive_a_cancelled_ending() {
+    fn an_artifact_final_does_not_revive_a_cancelled_ending_or_whole_text_task() {
         let base = Instant::now();
         let mut session = session();
         session
@@ -1055,6 +1055,23 @@ mod tests {
         assert_eq!(session.pending(), None);
         assert_eq!(session.poll_ready(ms(base, 20_000)), None);
         assert_eq!(session.text(), "hello submit");
+        let scripts = crate::config::DesktopConfig::from_json_str("{}")
+            .unwrap()
+            .scripts;
+        let mut task_session =
+            CaptureSession::new(Endings::default(), EndingPauses::default(), scripts);
+        let now = Instant::now();
+        let armed_task = task_session
+            .on_final("open google.com", now, false)
+            .unwrap();
+        assert!(
+            matches!(&armed_task, FinalStep::Armed(pending) if pending.without_ending),
+            "{armed_task:?}"
+        );
+        assert!(task_session.on_partial("and also"));
+        assert_eq!(task_session.pending(), None);
+        task_session.on_final("[noise]", now, false).unwrap();
+        assert_eq!(task_session.pending(), None);
     }
 
     #[test]
@@ -1085,24 +1102,6 @@ mod tests {
                 None => assert!(matches!(step, FinalStep::Cancelled { .. }), "{finals:?}"),
             }
         }
-    }
-
-    #[test]
-    fn an_artifact_final_does_not_revive_a_cancelled_whole_text_task() {
-        let scripts = crate::config::DesktopConfig::from_json_str("{}")
-            .unwrap()
-            .scripts;
-        let mut session = CaptureSession::new(Endings::default(), EndingPauses::default(), scripts);
-        let now = Instant::now();
-        let armed = session.on_final("open google.com", now, false).unwrap();
-        assert!(
-            matches!(&armed, FinalStep::Armed(pending) if pending.without_ending),
-            "{armed:?}"
-        );
-        assert!(session.on_partial("and also"));
-        assert_eq!(session.pending(), None);
-        session.on_final("[noise]", now, false).unwrap();
-        assert_eq!(session.pending(), None);
     }
 
     #[test]
@@ -1190,24 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn scratch_discards_only_the_latest_piece_and_cancel_discards_everything() {
-        let mut session = session();
-        feed(&mut session, &["Keep the first thought."]);
-        feed(&mut session, &["Throw this away scratch that."]);
-        assert_eq!(session.text(), "Keep the first thought.");
-        assert!(session.scratched());
-        feed(&mut session, &["Second thought."]);
-        feed(&mut session, &["scratch that"]);
-        assert_eq!(session.text(), "Keep the first thought.");
-        assert_eq!(
-            feed(&mut session, &["never mind"]),
-            cancelled("Keep the first thought.")
-        );
-        assert_eq!(session.text(), "");
-    }
-
-    #[test]
-    fn scratch_across_finals_keeps_earlier_piece_boundaries() {
+    fn scratch_discards_the_latest_piece_and_never_mind_discards_everything() {
         for (finals, expected) in [
             (vec!["scratch that"], "First"),
             (vec!["scratch.", "that"], "First"),
@@ -1225,6 +1207,19 @@ mod tests {
             );
             assert_eq!(session.text(), expected, "{finals:?}");
         }
+        let mut session = session();
+        feed(&mut session, &["Keep the first thought."]);
+        feed(&mut session, &["Throw this away scratch that."]);
+        assert_eq!(session.text(), "Keep the first thought.");
+        assert!(session.scratched());
+        feed(&mut session, &["Second thought."]);
+        feed(&mut session, &["scratch that"]);
+        assert_eq!(session.text(), "Keep the first thought.");
+        assert_eq!(
+            feed(&mut session, &["never mind"]),
+            cancelled("Keep the first thought.")
+        );
+        assert_eq!(session.text(), "");
     }
 
     #[test]

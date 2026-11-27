@@ -1003,59 +1003,51 @@ mod tests {
     }
 
     #[test]
-    fn a_state_machine_boosts_phrases_and_recognises_them_through_shared_prefixes() {
+    fn a_state_machine_boosts_phrases_and_recognises_them_through_shared_and_overlapping_prefixes()
+    {
         // Tokens 1 2 3 and 1 2 4 share a prefix; 9 is a phrase by itself.
-        let graph = Graph::new(&[vec![1, 2, 3], vec![1, 2, 4], vec![9]]);
-        let walk = |tokens: &[usize]| {
-            let mut state = ROOT;
-            let mut total = 0.0;
-            for &token in tokens {
-                let (score, next) = graph.step(state, token);
-                total += score;
-                state = next;
-            }
-            (total, graph.matched(state))
-        };
-        // Each token earns the boost, and finishing a phrase also pays out what it earned.
-        assert_eq!(walk(&[1, 2, 3]), (6.0, Some((0, 3))));
-        assert_eq!(walk(&[1, 2, 4]), (6.0, Some((1, 3))));
-        assert_eq!(walk(&[9]), (2.0, Some((2, 1))));
-        // A wrong turn takes back the boost the prefix earned, and the phrase is not matched.
-        assert_eq!(walk(&[1, 2, 7]), (0.0, None));
-        // A phrase that starts inside a failed one is still found.
-        assert_eq!(walk(&[1, 1, 2, 3]), (6.0, Some((0, 3))));
-    }
-
-    #[test]
-    fn overlapping_phrases_keep_their_suffix_matches_and_scores_after_a_wrong_turn() {
+        let shared = || vec![vec![1, 2, 3], vec![1, 2, 4], vec![9]];
         let cases = [
-            (vec![vec![1, 2, 3], vec![2, 4]], vec![1, 2, 4], 4.0, (1, 2)),
+            // Each token earns the boost, and finishing a phrase also pays out what it earned.
+            (shared(), vec![1, 2, 3], 6.0, Some((0, 3))),
+            (shared(), vec![1, 2, 4], 6.0, Some((1, 3))),
+            (shared(), vec![9], 2.0, Some((2, 1))),
+            // A wrong turn takes back the boost the prefix earned, and the phrase is not matched.
+            (shared(), vec![1, 2, 7], 0.0, None),
+            // A phrase that starts inside a failed one is still found.
+            (shared(), vec![1, 1, 2, 3], 6.0, Some((0, 3))),
+            (
+                vec![vec![1, 2, 3], vec![2, 4]],
+                vec![1, 2, 4],
+                4.0,
+                Some((1, 2)),
+            ),
             (
                 vec![vec![1, 2, 3, 4], vec![2, 3]],
                 vec![1, 2, 3],
                 5.0,
-                (1, 2),
+                Some((1, 2)),
             ),
             (
                 vec![vec![1, 2, 3, 5], vec![2, 3, 4], vec![3, 5]],
                 vec![1, 2, 3, 5],
                 10.0,
-                (0, 4),
+                Some((0, 4)),
             ),
         ];
         for (phrases, tokens, expected_score, expected_match) in cases {
             let graph = Graph::new(&phrases);
             let mut state = ROOT;
             let mut score = 0.0;
-            for token in tokens {
+            for &token in &tokens {
                 let (gained, next) = graph.step(state, token);
                 score += gained;
                 state = next;
             }
             assert_eq!(
                 (score, graph.matched(state)),
-                (expected_score, Some(expected_match)),
-                "{phrases:?}"
+                (expected_score, expected_match),
+                "{phrases:?} {tokens:?}"
             );
         }
     }
@@ -1440,68 +1432,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encoder_chunks_must_be_nonzero_whole_steps_that_fit_the_window() {
-        let (files, vocab) = network_fixture().await;
-        let network = Network::load(files, vocab).unwrap();
-        let oversized = (network.window / SUBSAMPLING + 1) * SUBSAMPLING;
-        let dir =
-            std::env::temp_dir().join(format!("thalvi-spotter-chunks-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        for shift in [0, 1, oversized] {
-            let encoder = dir.join(format!("encoder-{shift}.onnx"));
-            std::fs::write(
-                &encoder,
-                model_metadata(
-                    &std::fs::read(&files.encoder).unwrap(),
-                    "decode_chunk_len",
-                    &shift.to_string(),
-                ),
-            )
-            .unwrap();
-            let candidate = Files {
-                encoder,
-                decoder: files.decoder.clone(),
-                joiner: files.joiner.clone(),
-            };
-            match Network::load(&candidate, vocab) {
-                Err(SpotterError::Unsupported { reason, .. }) => assert!(
-                    reason.contains("chunk length does not fit its window"),
-                    "{shift}: {reason}"
-                ),
-                Err(error) => panic!("{shift}: wrong refusal: {error}"),
-                Ok(_) => panic!("invalid chunk length {shift} was accepted"),
-            }
-        }
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn an_encoder_that_leaves_its_mel_bins_open_is_refused_before_capture() {
-        let (files, vocab) = network_fixture().await;
-        let dir = std::env::temp_dir().join(format!("thalvi-spotter-bins-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let encoder = dir.join("encoder.onnx");
-        std::fs::write(
-            &encoder,
-            model_with_open_mel_bins(&std::fs::read(&files.encoder).unwrap()),
-        )
-        .unwrap();
-        let candidate = Files {
-            encoder,
-            decoder: files.decoder.clone(),
-            joiner: files.joiner.clone(),
-        };
-        match Network::load(&candidate, vocab) {
-            Err(SpotterError::Unsupported { reason, .. }) => {
-                assert!(reason.contains("needs 80 mel bins"), "{reason}");
-            }
-            Err(error) => panic!("wrong refusal: {error}"),
-            Ok(_) => panic!("an encoder with open mel bins was accepted"),
-        }
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[tokio::test]
     async fn the_network_normalizes_scores_and_refuses_inconsistent_models_before_capture() {
         let (files, vocab) = network_fixture().await;
         let mut network = Network::load(files, vocab).unwrap();
@@ -1521,68 +1451,63 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("thalvi-spotter-models-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let encoder = dir.join("encoder.onnx");
-        std::fs::write(
-            &encoder,
-            model_without_last_output(&std::fs::read(&files.encoder).unwrap()),
-        )
-        .unwrap();
-        let decoder = dir.join("decoder.onnx");
-        std::fs::write(
-            &decoder,
-            model_metadata(&std::fs::read(&files.decoder).unwrap(), "context_size", "3"),
-        )
-        .unwrap();
-        let joiner = dir.join("joiner.onnx");
-        std::fs::write(
-            &joiner,
-            model_metadata(
-                &std::fs::read(&files.joiner).unwrap(),
-                "joiner_dim",
-                &(network.dim + 1).to_string(),
-            ),
-        )
-        .unwrap();
-        let extra_input = dir.join("joiner-extra-input.onnx");
-        std::fs::write(
-            &extra_input,
-            model_with_extra_input(&std::fs::read(&files.joiner).unwrap()),
-        )
-        .unwrap();
-        for (encoder, decoder, joiner, reason) in [
-            (
+        // A copy of the files with one part (0 encoder, 1 decoder, 2 joiner) changed.
+        let replace = |part: usize, name: &str, change: &dyn Fn(&[u8]) -> Vec<u8>| {
+            let mut paths = [&files.encoder, &files.decoder, &files.joiner].map(Clone::clone);
+            let path = dir.join(name);
+            std::fs::write(&path, change(&std::fs::read(&paths[part]).unwrap())).unwrap();
+            paths[part] = path;
+            let [encoder, decoder, joiner] = paths;
+            Files {
                 encoder,
-                files.decoder.clone(),
-                files.joiner.clone(),
+                decoder,
+                joiner,
+            }
+        };
+        // Encoder chunks must be nonzero whole steps that fit the window.
+        let oversized = (network.window / SUBSAMPLING + 1) * SUBSAMPLING;
+        let mut cases: Vec<(Files, &str)> = [0, 1, oversized]
+            .into_iter()
+            .map(|shift| {
+                let chunk =
+                    |bytes: &[u8]| model_metadata(bytes, "decode_chunk_len", &shift.to_string());
+                let name = format!("encoder-{shift}.onnx");
+                (
+                    replace(0, &name, &chunk),
+                    "chunk length does not fit its window",
+                )
+            })
+            .collect();
+        let context = |bytes: &[u8]| model_metadata(bytes, "context_size", "3");
+        let joiner_dim = (network.dim + 1).to_string();
+        let dim = |bytes: &[u8]| model_metadata(bytes, "joiner_dim", &joiner_dim);
+        cases.extend([
+            (
+                replace(0, "encoder-bins.onnx", &model_with_open_mel_bins),
+                "needs 80 mel bins",
+            ),
+            (
+                replace(0, "encoder.onnx", &model_without_last_output),
                 "cached states do not match",
             ),
+            (replace(1, "decoder.onnx", &context), "tokens do not match"),
             (
-                files.encoder.clone(),
-                decoder,
-                files.joiner.clone(),
-                "tokens do not match",
-            ),
-            (
-                files.encoder.clone(),
-                files.decoder.clone(),
-                joiner,
+                replace(2, "joiner.onnx", &dim),
                 "encoder returned an unexpected shape",
             ),
             (
-                files.encoder.clone(),
-                files.decoder.clone(),
-                extra_input,
+                replace(2, "joiner-extra-input.onnx", &model_with_extra_input),
                 "not a transducer predictor and joiner",
             ),
-        ] {
-            let candidate = Files {
-                encoder,
-                decoder,
-                joiner,
-            };
+        ]);
+        for (candidate, reason) in cases {
             match Network::load(&candidate, vocab) {
                 Err(SpotterError::Unsupported { reason: got, .. }) => {
-                    assert!(got.contains(reason), "{got}");
+                    assert!(
+                        got.contains(reason),
+                        "{}: {got}",
+                        candidate.encoder.display()
+                    );
                 }
                 Err(error) => panic!("wrong refusal: {error}"),
                 Ok(_) => panic!("inconsistent model was accepted: {reason}"),

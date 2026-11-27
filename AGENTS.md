@@ -57,7 +57,9 @@ directing you.
   as that takes: one test per behavior, not per function, and table-driven
   cases instead of near-copies. Test what a caller can observe, not
   internals, and only failures that can really happen, not invented or
-  far-fetched ones. A bug fix adds a test that fails without it. Never sleep
+  far-fetched ones. A fix or feature first extends the existing test of that
+  behavior with a row or an assertion that fails without it, and adds a test
+  only when none covers it. Never sleep
   for a fixed time: drive time with a paused or fake clock, or wait for an
   observable event under a bounded timeout.
 - Rust lint exceptions use a narrow `#[expect(..., reason = "...")]` for a

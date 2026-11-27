@@ -612,6 +612,26 @@ mod tests {
                     again: true,
                 },
             ),
+            (
+                EngineState::Finishing {
+                    route: CaptureRoute::Write,
+                },
+                Status::Finishing {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Write,
+                    cancellable: true,
+                },
+            ),
+            (
+                EngineState::TranscribingLive {
+                    route: CaptureRoute::Paste,
+                },
+                Status::Transcribing {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Paste,
+                    cancellable: true,
+                },
+            ),
         ];
         for (engine, expected) in cases {
             let label = format!("{engine:?}");
@@ -640,44 +660,6 @@ mod tests {
                 "{route:?}",
             );
         }
-    }
-
-    #[test]
-    fn a_hold_that_is_finishing_keeps_its_delivery_route_and_cancel_state() {
-        let status = view(
-            Mode::Idle,
-            EngineState::Finishing {
-                route: CaptureRoute::Write,
-            },
-        )
-        .status();
-        assert_eq!(
-            status,
-            Status::Finishing {
-                target: Some(kitty()),
-                route: CaptureRoute::Write,
-                cancellable: true,
-            }
-        );
-    }
-
-    #[test]
-    fn live_transcription_keeps_its_delivery_route_and_cancel_state() {
-        let status = view(
-            Mode::Idle,
-            EngineState::TranscribingLive {
-                route: CaptureRoute::Paste,
-            },
-        )
-        .status();
-        assert_eq!(
-            status,
-            Status::Transcribing {
-                target: Some(kitty()),
-                route: CaptureRoute::Paste,
-                cancellable: true,
-            }
-        );
     }
 
     #[test]

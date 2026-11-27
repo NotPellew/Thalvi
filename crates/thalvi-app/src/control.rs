@@ -108,14 +108,16 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_shows_the_state_the_app_shares() {
+    fn the_bar_shows_the_state_the_app_shares_whether_or_not_an_error_can_be_copied() {
         for icon in ICONS {
             let (word, tooltip) = describe(icon);
             assert_eq!(
                 answered(word, false),
                 json!({"text": "", "alt": word, "class": word, "tooltip": tooltip}),
             );
+            assert_eq!(answered(word, true), answered(word, false), "{word}");
         }
+        assert_eq!(answered("loading", true), answered("loading", false));
     }
 
     #[test]
@@ -175,12 +177,5 @@ mod tests {
         assert_eq!(state(), "keyboard");
         drop(sender);
         assert_eq!(state(), "error", "an engine that stopped confirms nothing");
-    }
-
-    #[test]
-    fn the_bar_ignores_whether_an_error_can_be_copied() {
-        for word in ["paused", "loading", "listening", "keyboard"] {
-            assert_eq!(answered(word, true), answered(word, false));
-        }
     }
 }

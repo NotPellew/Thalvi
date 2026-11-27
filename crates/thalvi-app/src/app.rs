@@ -1732,7 +1732,7 @@ mod tests {
         use serde_json::json;
         type Holds = fn(&DesktopConfig) -> bool;
         // (what an agent saved first, what Settings then sends, built before that save, and what both leave)
-        let cases: [(&str, serde_json::Value, serde_json::Value, Holds); 3] = [
+        let cases: [(&str, serde_json::Value, serde_json::Value, Holds); 4] = [
             (
                 "a different setting",
                 json!({"microphone": "USB Mic"}),
@@ -1754,6 +1754,21 @@ mod tests {
                 json!({"look": "neon"}),
                 |config| {
                     config.microphone.is_none() && config.look == thalvi_desktop::config::Look::Neon
+                },
+            ),
+            (
+                "the theme of another look",
+                json!({"themes": {"version": 1, "holo": {"font": {"scale": 1.1}}}}),
+                json!({"themes": {"version": 1, "gunmetal": {"font": {"scale": 1.2}}}}),
+                |config| {
+                    let scale = |look| match config.themes.of(look) {
+                        Some(thalvi_desktop::theme::LookOverrides::Usable(overrides)) => {
+                            overrides.font.scale.unwrap().get()
+                        }
+                        other => panic!("{other:?}"),
+                    };
+                    (scale(thalvi_desktop::config::Look::Holo) - 1.1).abs() < 1e-6
+                        && (scale(thalvi_desktop::config::Look::Gunmetal) - 1.2).abs() < 1e-6
                 },
             ),
         ];
@@ -1876,36 +1891,6 @@ mod tests {
         assert_eq!(error, "F7 is already bound in Hyprland.");
         assert!(!written, "nothing is written");
         assert_eq!(saves.config(), start, "the running config is unchanged");
-    }
-
-    #[test]
-    fn an_agent_settings_set_and_a_settings_patch_keep_both_theme_changes() {
-        let dir = std::env::temp_dir().join(format!("thalvi-app-both-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("desktop.json");
-        let start = DesktopConfig::from_json_str(r#"{"look":"holo"}"#).unwrap();
-        let saves = SyncedConfig::new(Store::new(Some(path)).unwrap(), start);
-        let agent = serde_json::json!({"themes": {"version": 1, "holo": {"font": {"scale": 1.1}}}});
-        save_over(&saves, |current| {
-            let merged = crate::settings::merged(current, &agent)?;
-            Ok(((), Some(merged)))
-        })
-        .unwrap();
-        let window =
-            serde_json::json!({"themes": {"version": 1, "gunmetal": {"font": {"scale": 1.2}}}});
-        save_over(&saves, crate::commands::settings_patch(&window)).unwrap();
-        let running = saves.config();
-        let file = saves.store.load().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        let scale = |look| match running.themes.of(look) {
-            Some(thalvi_desktop::theme::LookOverrides::Usable(overrides)) => {
-                overrides.font.scale.unwrap().get()
-            }
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(scale(thalvi_desktop::config::Look::Holo), 1.1);
-        assert_eq!(scale(thalvi_desktop::config::Look::Gunmetal), 1.2);
-        assert_eq!(file.themes, running.themes);
     }
 
     #[test]
@@ -2065,87 +2050,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quitting_cancels_active_command_downloads_and_waits_for_cleanup() {
+    async fn quitting_or_cancelling_a_command_download_drops_it_and_says_why_it_stopped() {
         struct DropFlag(Arc<AtomicBool>);
         impl Drop for DropFlag {
             fn drop(&mut self) {
                 self.0.store(true, Ordering::SeqCst);
             }
         }
-        let downloads = Arc::new(ActiveDownloads::new());
-        let dropped = Arc::new(AtomicBool::new(false));
-        let (entered_tx, entered) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn({
-            let downloads = Arc::clone(&downloads);
-            let dropped = Arc::clone(&dropped);
-            async move {
-                downloads
-                    .run("wake", async move {
-                        let _flag = DropFlag(dropped);
-                        let _ = entered_tx.send(());
-                        std::future::pending::<()>().await;
-                    })
-                    .await
+        for (name, quit, expected) in [
+            ("wake", true, Stopped::Quitting),
+            ("parakeet_tdt_v3", false, Stopped::Cancelled),
+        ] {
+            let downloads = Arc::new(ActiveDownloads::new());
+            let dropped = Arc::new(AtomicBool::new(false));
+            let (entered_tx, entered) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn({
+                let downloads = Arc::clone(&downloads);
+                let dropped = Arc::clone(&dropped);
+                async move {
+                    downloads
+                        .run(name, async move {
+                            let _flag = DropFlag(dropped);
+                            let _ = entered_tx.send(());
+                            std::future::pending::<()>().await;
+                        })
+                        .await
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(2), entered)
+                .await
+                .expect("download entered")
+                .expect("entered sender");
+
+            if quit {
+                downloads.begin_quit();
+                tokio::task::spawn_blocking({
+                    let downloads = Arc::clone(&downloads);
+                    move || downloads.wait_drained(Duration::from_secs(2))
+                })
+                .await
+                .expect("wait_drained returned");
+            } else {
+                downloads.cancel("nemotron_160ms");
+                downloads.cancel(name);
             }
-        });
-        tokio::time::timeout(Duration::from_secs(2), entered)
-            .await
-            .expect("download entered")
-            .expect("entered sender");
 
-        downloads.begin_quit();
-        tokio::task::spawn_blocking({
-            let downloads = Arc::clone(&downloads);
-            move || downloads.wait_drained(Duration::from_secs(2))
-        })
-        .await
-        .expect("wait_drained returned");
-
-        assert!(dropped.load(Ordering::SeqCst), "download future dropped");
-        assert_eq!(task.await.expect("task finished"), Err(Stopped::Quitting));
-        assert_eq!(
-            downloads.run("other", async { 1 }).await,
-            Err(Stopped::Quitting)
-        );
-    }
-
-    #[tokio::test]
-    async fn cancelling_a_command_download_drops_it_and_says_the_user_cancelled_it() {
-        struct DropFlag(Arc<AtomicBool>);
-        impl Drop for DropFlag {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
+            assert_eq!(task.await.expect("task finished"), Err(expected), "{name}");
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "{name}: download future dropped"
+            );
+            if quit {
+                assert_eq!(
+                    downloads.run("other", async { 1 }).await,
+                    Err(Stopped::Quitting)
+                );
             }
         }
-        let downloads = Arc::new(ActiveDownloads::new());
-        let dropped = Arc::new(AtomicBool::new(false));
-        let (entered_tx, entered) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn({
-            let downloads = Arc::clone(&downloads);
-            let dropped = Arc::clone(&dropped);
-            async move {
-                downloads
-                    .run("parakeet_tdt_v3", async move {
-                        let _flag = DropFlag(dropped);
-                        let _ = entered_tx.send(());
-                        std::future::pending::<()>().await;
-                    })
-                    .await
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(2), entered)
-            .await
-            .expect("download entered")
-            .expect("entered sender");
-
-        downloads.cancel("nemotron_160ms");
-        downloads.cancel("parakeet_tdt_v3");
-
-        assert_eq!(
-            task.await.expect("task finished"),
-            Err(Stopped::Cancelled),
-            "the cancelled download stops without quitting"
-        );
-        assert!(dropped.load(Ordering::SeqCst), "download future dropped");
     }
 }
