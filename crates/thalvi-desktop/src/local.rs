@@ -141,12 +141,20 @@ pub trait SpeechModel: Send + Sync + 'static {
         RELEASE_LIMIT
     }
 
-    /// A stream with fresh state; the model's weights are shared.
+    /// Whether streams of this model keep the end of their audio back until they are told the
+    /// input ended, so their partials alone would drop the last words.
+    fn holds_text_for_end(&self) -> bool {
+        false
+    }
+
+    /// A stream with fresh state; the model's weights are shared. Called on the recognition
+    /// worker, so the stream may hold handles that cannot cross threads.
     fn stream(&self) -> Self::Stream;
 }
 
-/// One recognition in progress.
-pub trait SpeechStream: Send + 'static {
+/// One recognition in progress. The worker builds it and owns it for the whole capture, so it
+/// may hold handles, like the voice detector's, that cannot cross threads.
+pub trait SpeechStream: 'static {
     /// Takes the next 80 ms frame and returns the text it produced, if any. A `Partial` replaces
     /// the previous one; a `Final` ends a stretch of speech and the next text starts afresh.
     ///
@@ -180,12 +188,6 @@ pub trait SpeechStream: Send + 'static {
     /// Fails when the model cannot continue; the stream is then abandoned.
     fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
         Ok(Vec::new())
-    }
-
-    /// Whether the stream keeps the end of its audio back until it is told the input ended, so its
-    /// partials alone would drop the last words.
-    fn holds_text_for_end(&self) -> bool {
-        false
     }
 }
 
@@ -380,15 +382,14 @@ impl<S: ModelSource> Recognizer for LocalRecognizer<S> {
         let (frames_tx, frames_rx) = mpsc::channel();
         let (events_tx, events_rx) = events::unbounded_channel();
         let cancelled = Arc::new(AtomicBool::new(false));
-        let stream = model.stream();
         let backlog = Arc::new(Backlog {
-            holds_text_for_end: stream.holds_text_for_end(),
+            holds_text_for_end: model.holds_text_for_end(),
             ..Backlog::default()
         });
         let cache = Arc::clone(&self.shared.model);
         let work = Work {
-            stream,
             device: model.device(),
+            model,
             frames: frames_rx,
             events: events_tx,
             cancelled: Arc::clone(&cancelled),
@@ -491,8 +492,8 @@ impl RecognizerSession for LocalSession {
     }
 }
 
-struct Work<S> {
-    stream: S,
+struct Work<M: SpeechModel> {
+    model: Arc<M>,
     device: Device,
     frames: mpsc::Receiver<Order>,
     events: events::UnboundedSender<Result<RecognizerEvent, RecognizerError>>,
@@ -514,9 +515,9 @@ struct Tally {
     late: Duration,
 }
 
-impl<S: SpeechStream> Work<S> {
-    fn end_input(&mut self) -> bool {
-        match self.stream.end_input() {
+impl<M: SpeechModel> Work<M> {
+    fn end_input(&self, stream: &mut M::Stream) -> bool {
+        match stream.end_input() {
             Ok(texts) => {
                 for text in texts {
                     let _ = self.events.send(Ok(text));
@@ -532,17 +533,18 @@ impl<S: SpeechStream> Work<S> {
         }
     }
 
-    fn run(mut self) {
+    fn run(self) {
+        let mut stream = self.model.stream();
         let mut tally = Tally::default();
         let mut outcome = "ok";
-        let batches = self.stream.batches_frames();
+        let batches = stream.batches_frames();
         while let Ok(order) = self.frames.recv() {
             if self.cancelled.load(Ordering::Relaxed) {
                 outcome = "cancelled";
                 break;
             }
             let Order::Frame(sent, frame) = order else {
-                if !self.end_input() {
+                if !self.end_input(&mut stream) {
                     outcome = "error";
                     break;
                 }
@@ -564,9 +566,9 @@ impl<S: SpeechStream> Work<S> {
             }
             let started = Instant::now();
             let result = if let [only] = batch.as_slice() {
-                self.stream.accept(only)
+                stream.accept(only)
             } else {
-                self.stream.accept_batch(&batch)
+                stream.accept_batch(&batch)
             };
             let took = started.elapsed();
             let count = batch.len();
@@ -595,7 +597,7 @@ impl<S: SpeechStream> Work<S> {
                     outcome = "cancelled";
                     break;
                 }
-                if !self.end_input() {
+                if !self.end_input(&mut stream) {
                     outcome = "error";
                     break;
                 }
