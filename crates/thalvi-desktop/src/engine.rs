@@ -91,9 +91,9 @@ const LEVEL_SPAN: Duration = Duration::from_secs(2);
 /// Frames of microphone audio kept for the wake clip, 2 s.
 const WAKE_CLIP_FRAMES: usize = 25;
 
-/// Pre-roll frames kept from `wake_clip` on an immediate hold press (2 × 80 ms = 160 ms),
-/// so starting to speak as the key goes down does not clip the first consonant.
-const HOLD_PREROLL_FRAMES: usize = 2;
+/// Pre-roll frames kept from `wake_clip` on an immediate hold press (6 × 80 ms = 480 ms),
+/// so starting to speak as the key goes down does not lose the first word.
+const HOLD_PREROLL_FRAMES: usize = 6;
 
 /// The sample peak from which a wake level window counts as activity.
 const ACTIVITY_PEAK: u16 = 1_000;
