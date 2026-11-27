@@ -3253,12 +3253,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_busy_start_shows_its_notice_until_words_arrive_and_does_not_restart_finishing() {
-        let released = Rc::new(std::cell::Cell::new(0));
-        let releases = Rc::clone(&released);
+        let releases = Rc::new(std::cell::Cell::new(0));
+        let feedback_count = Rc::clone(&releases);
         let (mut engine, mut frames, _feed, keys, mut server) =
             hotkey_engine(Box::new(move |feedback| {
                 if matches!(feedback, Feedback::StreamingHoldReleased) {
-                    releases.set(releases.get() + 1);
+                    feedback_count.set(feedback_count.get() + 1);
                 }
             }));
         keys.set(true);
@@ -3296,7 +3296,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(server.input_ended_calls(), 1);
-        assert_eq!(released.get(), 1);
+        assert_eq!(releases.get(), 1);
         let finishing = engine.state.borrow().clone();
 
         let stop = KeyBind::new(Action::Dictate, KeyMode::Stop, KeyName::f9());
@@ -3312,7 +3312,7 @@ mod tests {
             assert_eq!(engine.take_ignored(), [Refusal::Capturing]);
             assert_eq!(*engine.state.borrow(), finishing);
             assert_eq!(server.input_ended_calls(), 1);
-            assert_eq!(released.get(), 1);
+            assert_eq!(releases.get(), 1);
         }
         assert!(matches!(
             engine.on_tail(&mut live, Some(&held)),
