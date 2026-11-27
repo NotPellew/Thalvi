@@ -124,27 +124,18 @@ mod tests {
     }
 
     #[test]
-    fn tokens_and_durations_advance_encoder_frames() {
-        for (rows, expected) in [
+    fn durations_advance_encoder_frames_a_zero_duration_blank_still_advances_one_and_the_symbol_cap_forces_progress()
+     {
+        let mut cases = vec![
             (
                 vec![(0, 0, 2), (2, 2, 3), (5, 1, 1)],
                 vec![vec![0], vec![], vec![], vec![], vec![], vec![1]],
             ),
             (vec![(0, 0, 0), (0, 1, 0), (0, 2, 1)], vec![vec![0, 1]]),
-        ] {
-            check(rows, &expected);
-        }
-    }
-
-    #[test]
-    fn a_zero_duration_blank_still_advances_one_frame() {
+        ];
         for duration in [0, 1] {
-            check(vec![(0, 2, duration), (1, 0, 1)], &[vec![], vec![0]]);
+            cases.push((vec![(0, 2, duration), (1, 0, 1)], vec![vec![], vec![0]]));
         }
-    }
-
-    #[test]
-    fn the_symbol_cap_forces_progress_on_zero_duration_tokens() {
         for bursts in [1, 2] {
             let rows = (0..bursts)
                 .flat_map(|frame| std::iter::repeat_n((frame, 0, 0), 10))
@@ -152,6 +143,9 @@ mod tests {
                 .collect();
             let mut expected = vec![vec![0; 10]; bursts];
             expected.push(vec![1]);
+            cases.push((rows, expected));
+        }
+        for (rows, expected) in cases {
             check(rows, &expected);
         }
     }

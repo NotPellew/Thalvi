@@ -803,16 +803,14 @@ mod tests {
     }
 
     #[test]
-    fn english_number_words_become_digits_as_the_rules_say() {
-        for (said, expected) in english_cases() {
-            assert_eq!(english(said), expected, "{said}");
-        }
-    }
-
-    #[test]
-    fn german_number_words_become_digits_as_the_rules_say() {
-        for (said, expected) in german_cases() {
-            assert_eq!(german(said), expected, "{said}");
+    fn english_and_german_number_words_become_digits_as_the_rules_say() {
+        for (language, convert, cases) in [
+            ("English", english as fn(&str) -> String, english_cases()),
+            ("German", german, german_cases()),
+        ] {
+            for (said, expected) in cases {
+                assert_eq!(convert(said), expected, "{language}: {said}");
+            }
         }
     }
 

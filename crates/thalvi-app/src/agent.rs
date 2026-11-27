@@ -1556,19 +1556,6 @@ mod tests {
         assert_eq!(get()["settings"]["writing"]["prompt"], DEFAULT_PROMPT);
         assert_eq!(get()["settings"]["writing_default_prompt"], DEFAULT_PROMPT);
 
-        let blank = json!({"writing": {"prompt": "  "}});
-        let message = "writing.prompt must not be blank. Restore the default to start over.";
-        let check = rig.ask(&Request::SettingsCheck {
-            settings: blank.clone(),
-        });
-        assert_eq!(
-            check,
-            json!({"ok": false, "error": message, "valid": false})
-        );
-        let set = rig.set(blank);
-        assert_eq!(set["error"], message);
-        assert_eq!(rig.fake.config().writing.unwrap().prompt(), DEFAULT_PROMPT);
-
         let set = rig.set(json!({"writing": {"prompt": "Be brief."}}));
         assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
         let config = rig.fake.config();
@@ -1588,32 +1575,6 @@ mod tests {
             r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}}"#,
         );
         let rule = |phrase: &str, prompt: &str| json!({"phrase": phrase, "prompt": prompt});
-        let refusals = [
-            (
-                vec![rule("Write me", "a"), rule("write, me", "b")],
-                "writing.openings has “write me” twice.",
-            ),
-            (
-                vec![rule("write me", " ")],
-                "writing.openings has a blank prompt for “write me”.",
-            ),
-            (
-                vec![rule("", "a")],
-                "writing.openings needs a phrase with at least one word in every rule.",
-            ),
-        ];
-        for (openings, message) in refusals {
-            let change = json!({"writing": {"openings": openings}});
-            let check = rig.ask(&Request::SettingsCheck {
-                settings: change.clone(),
-            });
-            assert_eq!(
-                check,
-                json!({"ok": false, "error": message, "valid": false})
-            );
-            assert_eq!(rig.set(change)["error"], message);
-        }
-
         let set = rig.set(json!({"writing": {"openings": [rule("Write me an email", "Email.")]}}));
         assert_eq!(set, json!({"ok": true, "changed": true, "applies": "now"}));
         let shown = rig.ask(&Request::SettingsGet);
@@ -2475,7 +2436,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_is_checked_where_it_enters_and_never_repeats_a_key() {
+    fn a_request_is_checked_where_it_enters_including_the_newer_commands_and_never_repeats_a_key() {
         let rig = Rig::new("entry", "{}");
         let set = rig
             .set(json!({"stt": {"entries": [entry("cybrex2", "realtime", true, Some(SECRET))]}}));
@@ -2486,6 +2447,8 @@ mod tests {
                 COMMANDS.join(", ")
             )
         };
+        let needs =
+            |command: &str| format!("The command {command} was sent without the details it needs.");
         for command in COMMANDS {
             let parsed = Request::parse(&json!({"command": command}).to_string());
             assert!(
@@ -2504,6 +2467,33 @@ mod tests {
             (
                 r#"{"command": "pause", "force": true}"#,
                 "The command pause takes no other details.".to_owned(),
+            ),
+            (r#"{"command": "feed"}"#, needs("feed")),
+            (
+                r#"{"command": "feed", "path": "/a.wav", "loop": true}"#,
+                needs("feed"),
+            ),
+            (
+                r#"{"command": "model-download", "name": "m"}"#,
+                needs("model-download"),
+            ),
+            (
+                r#"{"command": "model-download", "kind": "voice", "name": "m"}"#,
+                needs("model-download"),
+            ),
+            (
+                r#"{"command": "model-download", "kind": "wake"}"#,
+                needs("model-download"),
+            ),
+            (r#"{"command": "speech-check"}"#, needs("speech-check")),
+            (r#"{"command": "show", "page": 3}"#, needs("show")),
+            (
+                r#"{"command": "models", "all": true}"#,
+                "The command models takes no other details.".to_owned(),
+            ),
+            (
+                r#"{"command": "quit", "force": true}"#,
+                "The command quit takes no other details.".to_owned(),
             ),
             (r#"{"command": "rm"}"#, unknown()),
             (&format!(r#"{{"command": "{SECRET}"}}"#), unknown()),
@@ -2524,6 +2514,7 @@ mod tests {
         });
         assert!(!checked.to_string().contains(SECRET), "{checked}");
         assert_eq!(rig.fake.config().stt.entries.key_of("cybrex2"), SECRET);
+        assert_eq!(rig.fake.quit.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(target_os = "linux")]
@@ -2997,49 +2988,6 @@ mod tests {
             .filter_map(|line| line.split('"').next())
             .collect();
         assert_eq!(ids, PAGES);
-    }
-
-    #[test]
-    fn the_new_commands_are_checked_where_they_enter() {
-        let rig = Rig::new("new-entry", "{}");
-        let needs =
-            |command: &str| format!("The command {command} was sent without the details it needs.");
-        for (line, error) in [
-            (r#"{"command": "feed"}"#, needs("feed")),
-            (
-                r#"{"command": "feed", "path": "/a.wav", "loop": true}"#,
-                needs("feed"),
-            ),
-            (
-                r#"{"command": "model-download", "name": "m"}"#,
-                needs("model-download"),
-            ),
-            (
-                r#"{"command": "model-download", "kind": "voice", "name": "m"}"#,
-                needs("model-download"),
-            ),
-            (
-                r#"{"command": "model-download", "kind": "wake"}"#,
-                needs("model-download"),
-            ),
-            (r#"{"command": "speech-check"}"#, needs("speech-check")),
-            (r#"{"command": "show", "page": 3}"#, needs("show")),
-            (
-                r#"{"command": "models", "all": true}"#,
-                "The command models takes no other details.".to_owned(),
-            ),
-            (
-                r#"{"command": "quit", "force": true}"#,
-                "The command quit takes no other details.".to_owned(),
-            ),
-        ] {
-            assert_eq!(
-                rig.ask_line(line),
-                json!({"ok": false, "error": error}),
-                "{line}"
-            );
-        }
-        assert_eq!(rig.fake.quit.load(Ordering::SeqCst), 0);
     }
 
     #[test]

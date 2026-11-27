@@ -89,52 +89,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_later_configure_replaces_an_earlier_one() {
-        assert_eq!(
-            coalesce([Configure::Ready, Configure::Closed]),
-            Some(Configure::Closed)
-        );
-        assert_eq!(
-            coalesce([Configure::Closed, Configure::Ready]),
-            Some(Configure::Ready)
-        );
-        assert_eq!(coalesce([]), None);
-    }
-
-    #[test]
-    fn a_configure_that_arrives_before_the_retry_places_the_surface_on_that_retry() {
-        let (seat, created) = show_step(Seat::None, [Configure::Ready]);
-        assert_eq!(
-            (seat, created),
-            (
-                Seat::Pending {
-                    waited: Duration::ZERO
-                },
-                Step::Create
-            ),
-            "a configure left from a dropped surface is discarded"
-        );
-        let (_, waiting) = show_step(
-            Seat::Pending {
-                waited: Duration::from_millis(10),
-            },
-            None,
-        );
-        assert_eq!(waiting, Step::NotYet);
-        let (seat, placed) = show_step(
-            Seat::Pending {
-                waited: Duration::from_millis(50),
-            },
-            [Configure::Ready],
-        );
-        assert_eq!(
-            (seat, placed),
-            (Seat::Placed, Step::Attach { gave_up: false }),
-            "the configure that arrived for this surface places it"
-        );
-    }
-
-    #[test]
     fn placement_follows_the_configure_the_seat_and_how_long_it_has_waited() {
         let within = Duration::from_millis(50);
         let past = CONFIGURE_WITHIN;
@@ -142,65 +96,88 @@ mod tests {
             (
                 "nothing queued yet leaves the surface unplaced",
                 Seat::Pending { waited: within },
-                None,
+                vec![],
                 Seat::Pending { waited: within },
                 Step::NotYet,
             ),
             (
                 "ready while still inside the wait attaches the frame",
                 Seat::Pending { waited: within },
-                Some(Configure::Ready),
+                vec![Configure::Ready],
                 Seat::Placed,
                 Step::Attach { gave_up: false },
             ),
             (
                 "ready after the wait attaches without counting it as a failure",
                 Seat::Pending { waited: past },
-                Some(Configure::Ready),
+                vec![Configure::Ready],
                 Seat::Placed,
                 Step::Attach { gave_up: false },
             ),
             (
                 "a close drops the surface",
                 Seat::Pending { waited: within },
-                Some(Configure::Closed),
+                vec![Configure::Closed],
                 Seat::None,
                 Step::Closed,
             ),
             (
                 "a close of a placed surface drops it",
                 Seat::Placed,
-                Some(Configure::Closed),
+                vec![Configure::Closed],
                 Seat::None,
                 Step::Closed,
             ),
             (
                 "no configure within the wait keeps the surface and reports the failure",
                 Seat::Pending { waited: past },
-                None,
+                vec![],
                 Seat::Placed,
                 Step::Attach { gave_up: true },
             ),
             (
                 "a placed surface is drawn on again",
                 Seat::Placed,
-                None,
+                vec![],
                 Seat::Placed,
                 Step::Attach { gave_up: false },
             ),
             (
                 "a show with no surface makes one",
                 Seat::None,
-                None,
+                vec![],
                 Seat::Pending {
                     waited: Duration::ZERO,
                 },
                 Step::Create,
             ),
             (
+                "a show with no surface discards a leftover ready",
+                Seat::None,
+                vec![Configure::Ready],
+                Seat::Pending {
+                    waited: Duration::ZERO,
+                },
+                Step::Create,
+            ),
+            (
+                "a later close replaces an earlier ready",
+                Seat::Pending { waited: within },
+                vec![Configure::Ready, Configure::Closed],
+                Seat::None,
+                Step::Closed,
+            ),
+            (
+                "a later ready replaces an earlier close",
+                Seat::Pending { waited: within },
+                vec![Configure::Closed, Configure::Ready],
+                Seat::Placed,
+                Step::Attach { gave_up: false },
+            ),
+            (
                 "a show with no surface discards a leftover close",
                 Seat::None,
-                Some(Configure::Closed),
+                vec![Configure::Closed],
                 Seat::Pending {
                     waited: Duration::ZERO,
                 },

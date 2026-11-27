@@ -361,32 +361,35 @@ mod tests {
         format!("heard {request}")
     }
 
-    /// Waits for the kernel to refuse a connection to the stale socket.
-    fn wait_until_refused(socket: PathBuf) {
-        let (probe, result) = std::sync::mpsc::channel();
-        // A connect can block if the listener's accept queue fills.
-        std::thread::spawn(move || {
-            let error = loop {
-                match UnixStream::connect(&socket) {
-                    Ok(_) => std::thread::yield_now(),
-                    Err(error) => break error,
-                }
-            };
-            let _ = probe.send(error);
-        });
-        let error = result
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the stale socket did not refuse a connection within five seconds");
-        assert_eq!(error.kind(), ErrorKind::ConnectionRefused, "{error}");
-    }
-
     #[test]
-    fn a_client_is_answered_for_its_request_until_the_app_stops_serving() {
+    fn one_app_answers_until_it_stops_serving_after_replacing_a_stale_socket_and_refusing_a_second()
+    {
         for socket_exists in [true, false] {
             let dir = Dir::new("serve", 0o700);
+            assert_eq!(ask(&dir, "state"), Ok(None), "no socket");
+            let stale = UnixListener::bind(dir.socket()).unwrap();
+            // A child another test forks meanwhile holds a copy of the listener until it execs.
+            shutdown(stale.as_raw_fd(), Shutdown::Both).unwrap();
+            drop(stale);
+            assert!(dir.socket().exists());
+            assert_eq!(ask(&dir, "state"), Ok(None), "a socket nothing listens on");
             let server = serve_in(&dir.0, me(), SHORT, echo).unwrap();
-            assert_eq!(ask(&dir, "state").unwrap(), Some("heard state".to_owned()));
+            assert_eq!(
+                ask(&dir, "state").unwrap(),
+                Some("heard state".to_owned()),
+                "a new app replaces the stale file"
+            );
             assert_eq!(ask(&dir, "pause").unwrap(), Some("heard pause".to_owned()));
+            let second = serve_in(&dir.0, me(), SHORT, |_| "second".to_owned());
+            assert_eq!(
+                second.err(),
+                Some(unsupported("Another Thalvi is already running."))
+            );
+            assert_eq!(
+                ask(&dir, "state").unwrap(),
+                Some("heard state".to_owned()),
+                "a second app leaves the live socket alone"
+            );
             if !socket_exists {
                 std::fs::remove_file(dir.socket()).unwrap();
             }
@@ -401,36 +404,6 @@ mod tests {
             assert_eq!(ask(&dir, "state"), Ok(None));
             assert!(!dir.socket().exists(), "the socket is removed");
         }
-    }
-
-    #[test]
-    fn nothing_answers_when_no_app_runs_or_it_died_leaving_its_socket() {
-        let dir = Dir::new("stale", 0o700);
-        assert_eq!(ask(&dir, "state"), Ok(None), "no socket");
-        let socket = dir.socket();
-        drop(UnixListener::bind(&socket).unwrap());
-        assert!(socket.exists());
-        wait_until_refused(socket);
-        assert_eq!(ask(&dir, "state"), Ok(None), "a socket nothing listens on");
-        let server = serve_in(&dir.0, me(), SHORT, echo).unwrap();
-        assert_eq!(
-            ask(&dir, "state").unwrap(),
-            Some("heard state".to_owned()),
-            "a new app replaces the stale file"
-        );
-        drop(server);
-    }
-
-    #[test]
-    fn a_second_app_leaves_a_live_socket_alone() {
-        let dir = Dir::new("live", 0o700);
-        let _first = serve_in(&dir.0, me(), SHORT, |_| "first".to_owned()).unwrap();
-        let second = serve_in(&dir.0, me(), SHORT, |_| "second".to_owned());
-        assert_eq!(
-            second.err(),
-            Some(unsupported("Another Thalvi is already running."))
-        );
-        assert_eq!(ask(&dir, "state").unwrap(), Some("first".to_owned()));
     }
 
     #[test]
@@ -485,6 +458,7 @@ mod tests {
             .args([
                 "--exact",
                 "host::channel::tests::sandboxed_peer",
+                "--ignored",
                 "--nocapture",
             ])
             .env(SANDBOX_ROLE, role)
@@ -497,10 +471,9 @@ mod tests {
 
     /// The body of the two processes `a_server_and_client_of_one_user_in_separate_sandboxes_reach_each_other` starts.
     #[test]
+    #[ignore = "a_server_and_client_of_one_user_in_separate_sandboxes_reach_each_other runs it"]
     fn sandboxed_peer() {
-        let Ok(role) = std::env::var(SANDBOX_ROLE) else {
-            return;
-        };
+        let role = std::env::var(SANDBOX_ROLE).unwrap();
         let dir = PathBuf::from(std::env::var("THALVI_TEST_SANDBOX_DIR").unwrap());
         match role.as_str() {
             "serve" => {
@@ -512,21 +485,22 @@ mod tests {
                 let answer = ask_in(&dir, me(), "state", Duration::from_secs(5)).unwrap();
                 assert_eq!(answer, Some("heard state".to_owned()));
             }
-            _ => {}
+            "probe" => {}
+            other => panic!("unknown sandbox role {other}"),
         }
     }
 
     #[test]
     fn a_server_and_client_of_one_user_in_separate_sandboxes_reach_each_other() {
         let dir = Dir::new("sandboxes", 0o700);
-        let Ok(mut probe) = in_new_namespaces("probe", &dir.0) else {
-            eprintln!("skipped: no `unshare`");
-            return;
-        };
-        if !probe.wait().is_ok_and(|status| status.success()) {
-            eprintln!("skipped: this machine does not allow user namespaces");
-            return;
-        }
+        let probe = in_new_namespaces("probe", &dir.0)
+            .expect("this test needs `unshare` from util-linux")
+            .wait();
+        assert!(
+            probe.is_ok_and(|status| status.success()),
+            "this test needs unprivileged user namespaces; on Ubuntu, \
+             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+        );
         let mut server = in_new_namespaces("serve", &dir.0).unwrap();
         let socket = dir.socket();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);

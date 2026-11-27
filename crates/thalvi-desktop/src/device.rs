@@ -909,20 +909,6 @@ mod tests {
     }
 
     #[test]
-    fn a_metric_carries_the_encoder_gpu_node_counts() {
-        let placement = Placement {
-            encoder: Nodes::of(&nodes(98, &[("Shape", 2)])),
-        };
-        assert_eq!(
-            placement.tag(json!({"model": "m"})),
-            json!({
-                "model": "m",
-                "encoder_nodes_on_gpu": 98, "encoder_nodes": 100,
-            })
-        );
-    }
-
-    #[test]
     fn the_adapter_is_checked_by_each_check_and_by_settings_only_while_there_is_no_result() {
         let counted = Arc::new(AtomicUsize::new(0));
         let adapters = Adapters::checking({

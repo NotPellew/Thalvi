@@ -81,7 +81,8 @@ bundle() {
 
 # Needs the Rust toolchain, Node pinned in .node-version, Python pinned in .python-version and, on Linux,
 # libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev. The package also needs what
-# whisper-helper builds with: git, cmake, a C++ compiler and libvulkan-dev glslc spirv-headers.
+# whisper-helper builds with: git, cmake, a C++ compiler and libvulkan-dev glslc spirv-headers. The tests
+# need `unshare` and unprivileged user namespaces.
 gate_server() {
   desktop_ui
   step cargo fmt --all -- --check
@@ -89,6 +90,9 @@ gate_server() {
   step .github/scripts/rust-layout.test.sh
   step .github/scripts/lint-exceptions
   step python3 .github/scripts/lint-exceptions.test.py
+  step python3 .github/scripts/test-hygiene
+  step python3 .github/scripts/test-hygiene.test.py
+  step bash .agents/skills/verify-thalvi/scripts/thalvi-desktop-rig.test.sh
   step cargo lint
   tests --workspace
   RUSTDOCFLAGS="-D warnings" step cargo docs

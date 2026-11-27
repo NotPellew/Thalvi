@@ -80,16 +80,6 @@ fn recognize(model: &Transducer, frames: &[Frame]) -> (Vec<String>, usize) {
 
 #[test]
 #[ignore = "needs THALVI_SPEECH_MODEL and THALVI_TEST_WAVS local folders"]
-fn english_is_live_and_finalizes_in_full() {
-    let wavs = PathBuf::from(std::env::var("THALVI_TEST_WAVS").expect("THALVI_TEST_WAVS"));
-    let (finals, partials) = recognize(&model(), &wav_frames(&wavs.join("en.wav")));
-    assert_eq!(finals.join(" "), ENGLISH);
-    assert!(partials > 0, "text appears before the final");
-    println!("en.wav: 0/17 word errors; {partials} nonempty partials");
-}
-
-#[test]
-#[ignore = "needs THALVI_SPEECH_MODEL and THALVI_TEST_WAVS local folders"]
 fn the_multilingual_samples_are_recognized_in_full() {
     let wavs = PathBuf::from(std::env::var("THALVI_TEST_WAVS").expect("THALVI_TEST_WAVS"));
     let model = model();

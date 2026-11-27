@@ -1452,6 +1452,46 @@ mod tests {
         .expect("the second fetch joined the download in flight");
     }
 
+    /// Waits until the download of `path` in flight has received `bytes`.
+    async fn leader_received(path: &Path, bytes: u64) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let received = FETCHING
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(path)
+                    .is_some_and(|in_flight| *in_flight.progress.borrow() == bytes);
+                if received {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the leading fetch received the first part");
+    }
+
+    /// Fetches the wake file of `size` bytes from `url` into `store`, with the byte counts it was told.
+    async fn fetch_counting(
+        store: ModelStore,
+        url: String,
+        sha256: String,
+        size: usize,
+    ) -> (Result<PathBuf, ModelError>, Vec<u64>) {
+        let asset = Asset {
+            kind: ModelKind::Wake,
+            file_name: "wake.onnx",
+            url: &url,
+            size: u64::try_from(size).expect("body size fits"),
+            sha256: &sha256,
+        };
+        let mut told = Vec::new();
+        let result = store
+            .fetch_reporting(&asset, |bytes| told.push(bytes))
+            .await;
+        (result, told)
+    }
+
     #[tokio::test]
     async fn two_fetches_of_one_corrupt_file_share_one_download_and_a_later_retry_fetches_again() {
         use std::net::Ipv4Addr;
@@ -1497,42 +1537,43 @@ mod tests {
                         let mut head = [0; 1024];
                         let _ = socket.read(&mut head).await;
                         requested.notify_one();
+                        let reply = response(CORRUPT);
+                        let (part, rest) = reply.split_at(reply.len() - CORRUPT.len() / 2);
+                        let _ = socket.write_all(part).await;
                         if first {
                             release.notified().await;
                         }
-                        let _ = socket.write_all(&response(CORRUPT)).await;
+                        let _ = socket.write_all(rest).await;
                     });
                 }
             }
         });
-        let fetch = |store: ModelStore| {
-            let url = url.clone();
-            let sha256 = sha256.clone();
-            async move {
-                let asset = Asset {
-                    kind: ModelKind::Wake,
-                    file_name: "wake.onnx",
-                    url: &url,
-                    size: u64::try_from(GOOD.len()).expect("body size fits"),
-                    sha256: &sha256,
-                };
-                store.fetch(&asset).await
-            }
-        };
+        let fetch = |store| fetch_counting(store, url.clone(), sha256.clone(), GOOD.len());
         let first = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
         tokio::time::timeout(Duration::from_secs(10), requested.notified())
             .await
             .expect("the first fetch asked the server for the file");
-        let second = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
         let path = dir.join("wake.onnx");
+        let part = (CORRUPT.len() - CORRUPT.len() / 2) as u64;
+        leader_received(&path, part).await;
+        let second = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
         follower_joined(&path).await;
         release.notify_one();
-        for fetch in [first, second] {
-            let err = tokio::time::timeout(Duration::from_secs(10), fetch)
-                .await
-                .expect("a fetch returned")
-                .expect("the fetch ran")
-                .expect_err("corrupt file fails checksum");
+        let (second, told) = tokio::time::timeout(Duration::from_secs(10), second)
+            .await
+            .expect("the second fetch returned")
+            .expect("the fetch ran");
+        assert_eq!(
+            told.first(),
+            Some(&part),
+            "a fetch that joins is told at once how far the download is"
+        );
+        let (first, _) = tokio::time::timeout(Duration::from_secs(10), first)
+            .await
+            .expect("the first fetch returned")
+            .expect("the fetch ran");
+        for result in [first, second] {
+            let err = result.expect_err("corrupt file fails checksum");
             assert!(matches!(err, ModelError::Checksum { .. }), "{err}");
         }
         assert_eq!(connections.load(Ordering::SeqCst), 1);
@@ -1542,6 +1583,7 @@ mod tests {
         let err = tokio::time::timeout(Duration::from_secs(10), fetch(ModelStore::in_dir(&dir)))
             .await
             .expect("retry returned")
+            .0
             .expect_err("corrupt retry fails checksum");
         assert!(matches!(err, ModelError::Checksum { .. }), "{err}");
         assert_eq!(connections.load(Ordering::SeqCst), 2);
@@ -1618,18 +1660,26 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), first_started.notified())
             .await
             .expect("leader requested file");
-        let follower = tokio::spawn(fetch(ModelStore::in_dir(&dir)));
+        let follower = tokio::spawn(fetch_counting(
+            ModelStore::in_dir(&dir),
+            url.clone(),
+            sha256.clone(),
+            BODY.len(),
+        ));
         let path = dir.join("wake.onnx");
         follower_joined(&path).await;
 
         leader.abort();
         assert!(leader.await.expect_err("leader aborted").is_cancelled());
-        let got = tokio::time::timeout(Duration::from_secs(10), follower)
+        let (got, told) = tokio::time::timeout(Duration::from_secs(10), follower)
             .await
             .expect("follower completed")
-            .expect("follower ran")
-            .expect("follower downloaded the file");
-        assert_eq!(got, path);
+            .expect("follower ran");
+        assert_eq!(got.expect("follower downloaded the file"), path);
+        assert!(
+            !told.contains(&0) && told.last() == Some(&(BODY.len() as u64)),
+            "a fetch that joined before any byte arrived is told only of bytes that did: {told:?}"
+        );
         assert_eq!(connections.load(Ordering::SeqCst), 2);
         assert_eq!(std::fs::read(&path).expect("saved"), BODY);
 
