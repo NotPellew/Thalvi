@@ -6,11 +6,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proptest::prelude::*;
 use thalvi_desktop::audio::AudioError;
+use thalvi_desktop::cues::{Cue, CueError, CueTiming, Mic};
 use thalvi_desktop::engine::MIN_HOLD;
 use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake, FrameFeed, WakeControl};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
 use thalvi_desktop::recognizer::{FakeControl, FakeRecognizer, RecognizerError, RecognizerEvent};
 use thalvi_desktop::wake::WakeEvent;
+use tokio::sync::Notify;
 
 use super::tests::TestHost;
 use super::*;
@@ -18,6 +20,7 @@ use crate::status::LastError;
 
 #[derive(Default)]
 struct Devices {
+    gate: Option<InputGate>,
     wake: Option<WakeControl>,
     feed: Option<FrameFeed>,
 }
@@ -33,6 +36,7 @@ struct Recognition {
 struct FakeRig {
     devices: Rc<RefCell<Devices>>,
     recognition: Arc<Mutex<Recognition>>,
+    cue_finished: Rc<Notify>,
 }
 
 struct Connections {
@@ -54,10 +58,27 @@ impl Recognizer for Connections {
     }
 }
 
+struct Cues {
+    player: FakeCuePlayer,
+    finished: Rc<Notify>,
+}
+
+impl CuePlayer for Cues {
+    async fn play(&self, cue: Cue, mic: Mic) -> Result<Option<CueTiming>, CueError> {
+        let result = self.player.play(cue, mic).await;
+        self.finished.notify_one();
+        result
+    }
+
+    fn timing_since(&self, since: Instant) -> Option<CueTiming> {
+        self.player.timing_since(since)
+    }
+}
+
 impl Rig for FakeRig {
     type Recognizer = Connections;
     type Wake = FakeWake;
-    type Cues = FakeCuePlayer;
+    type Cues = Cues;
     type Input = FakeInput;
     type Host = TestHost;
 
@@ -68,21 +89,26 @@ impl Rig for FakeRig {
     async fn load(
         &self,
         _: &DesktopConfig,
-        _: &InputGate,
+        gate: &InputGate,
         _: &Arc<Publisher>,
     ) -> Result<Loaded<Self>, Failure> {
         let (recognizer, server) = FakeRecognizer::new();
         let (wake, control) = FakeWake::new();
-        let (cues, _) = FakeCuePlayer::new();
+        let (player, _) = FakeCuePlayer::new();
         self.recognition.lock().unwrap().server = Some(server);
-        self.devices.borrow_mut().wake = Some(control);
+        let mut devices = self.devices.borrow_mut();
+        devices.gate = Some(gate.clone());
+        devices.wake = Some(control);
         Ok(Loaded {
             recognizer: Connections {
                 recognizer,
                 recognition: Arc::clone(&self.recognition),
             },
             wake,
-            cues,
+            cues: Cues {
+                player,
+                finished: Rc::clone(&self.cue_finished),
+            },
             recorder: Recorder::disabled(),
             http: reqwest::Client::new(),
             chat: None,
@@ -460,12 +486,32 @@ impl Case {
                 Action::HoldDown => !self.held,
                 _ => false,
             };
+        let muted_wake =
+            (starts && matches!(action, Action::Wake) && !self.gate_open()).then(|| {
+                (
+                    self.wake_frames_scored(),
+                    self.rig.recognition.lock().unwrap().next_capture,
+                )
+            });
         let mut updates = self.link.status_updates();
         if self.link.audio().active.is_none() {
             updates.borrow_and_update();
         }
         if !self.perform(action).await {
             return false;
+        }
+        if let Some((scored, _)) = muted_wake {
+            self.synchronize().await;
+            assert_eq!(self.wake_frames_scored(), scored, "a muted wake was scored");
+            tokio::time::timeout(quiet_bound(&self.config), async {
+                while !self.gate_open() {
+                    self.rig.cue_finished.notified().await;
+                }
+            })
+            .await
+            .expect("the microphone gate did not reopen after the end cue");
+            updates.mark_unchanged();
+            self.send_wake();
         }
         if starts {
             tokio::time::timeout(quiet_bound(&self.config), async {
@@ -483,6 +529,13 @@ impl Case {
             .expect("the trigger was neither taken nor refused");
         }
         self.synchronize().await;
+        if let Some((_, next_capture)) = muted_wake {
+            assert_eq!(
+                self.rig.recognition.lock().unwrap().next_capture,
+                next_capture + 1,
+                "the first wake after the end cue did not start a capture"
+            );
+        }
         self.observe();
         // A wake result belongs to this frame; an unscored one cannot wake a later capture.
         self.rig
@@ -495,22 +548,33 @@ impl Case {
         true
     }
 
+    fn gate_open(&self) -> bool {
+        self.rig
+            .devices
+            .borrow()
+            .gate
+            .as_ref()
+            .unwrap()
+            .is_enabled()
+    }
+
+    fn wake_frames_scored(&self) -> u32 {
+        self.rig.devices.borrow().wake.as_ref().unwrap().scored()
+    }
+
+    fn send_wake(&self) {
+        let devices = self.rig.devices.borrow();
+        devices.wake.as_ref().unwrap().fire(WakeEvent::Capture);
+        let mut frame = [0; FRAME_SAMPLES];
+        frame[0] = 1_500;
+        if let Some(feed) = &devices.feed {
+            feed.send(frame);
+        }
+    }
+
     async fn perform(&mut self, action: Action) -> bool {
         match action {
-            Action::Wake => {
-                self.rig
-                    .devices
-                    .borrow()
-                    .wake
-                    .as_ref()
-                    .unwrap()
-                    .fire(WakeEvent::Capture);
-                let mut frame = [0; FRAME_SAMPLES];
-                frame[0] = 1_500;
-                if let Some(feed) = &self.rig.devices.borrow().feed {
-                    feed.send(frame);
-                }
-            }
+            Action::Wake => self.send_wake(),
             Action::HoldDown => {
                 self.link.hold_input().set(true);
                 self.held = true;
