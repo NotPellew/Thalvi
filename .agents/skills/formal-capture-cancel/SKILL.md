@@ -272,6 +272,10 @@ worker, which builds the stream before reading any frames. The model layout supp
 and reports a spawn failure the same way. Worker initialization adds no await, ending
 control, or path to delivery, so `Loaded` and `LoadFailed` keep their meaning.
 
+The longer hold pre-roll changes only how many listening-ring frames `Engine::begin_hold` copies
+into the hold's heard audio before the press (6 instead of 2). It adds no await, ending control,
+cancellation write or delivery path, so the model actions and bounds are unchanged.
+
 The two checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty
