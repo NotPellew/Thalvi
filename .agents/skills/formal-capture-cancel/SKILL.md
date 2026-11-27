@@ -37,6 +37,10 @@ no await, queue step or write to `Requests::ended` is added before the final emp
 awaits (probe resolution, then field reads) live in a task spawned after delivery and cannot retract
 a paste. Model actions, cancellation writes and bounds are unchanged.
 
+The kept fix (#776) is now written to History, and that write awaited, before `Learning::offer`
+tells Settings to reread it. That await is a third one in the same watch task spawned after
+delivery, so it cannot hold back or retract a paste; actions, writes and bounds are unchanged.
+
 Status announcements (#394) publish engine states and streaming hold releases
 in order. Display reads the same states and the screen reader can also hear
 Finishing when a released hold is waiting for its last words. These synchronous
