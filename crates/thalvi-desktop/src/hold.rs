@@ -524,12 +524,9 @@ impl Presses {
     /// passed over are counted by [`take_lost`](Self::take_lost).
     pub fn take(&mut self) -> Option<Press> {
         let state = self.state.borrow_and_update();
-        if self.seen < state.forgotten {
-            self.lost += state.forgotten - self.seen;
-            self.seen = state.forgotten;
-        }
+        self.lost += state.forgotten.saturating_sub(self.seen);
         let mut taken = None;
-        let mut seen = self.seen;
+        let mut seen = self.seen.max(state.forgotten);
         for impulse in &state.log {
             if impulse.number <= seen {
                 continue;
@@ -1319,6 +1316,7 @@ impl HoldHooks {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::FutureExt;
     use proptest::prelude::{Just, Strategy};
 
     use super::*;
@@ -1840,6 +1838,11 @@ mod tests {
             (vec![true, false], None, 1),
             (vec![true, false, true], Some(2), 1),
             (vec![true, false, true, false, true], Some(3), 2),
+            (
+                [true, false].repeat(FORGOTTEN + 1),
+                None,
+                u64::try_from(FORGOTTEN + 1).unwrap(),
+            ),
             (vec![], None, 0),
         ] {
             let (input, state) = HoldInput::new();
@@ -1907,6 +1910,13 @@ mod tests {
             "a later tap's release does not move this press's"
         );
         assert!(press.release.precedes(after_tap));
+        let stop = Cutoff::at(after_release);
+        assert!(!stop.precedes(while_down));
+        assert!(!stop.precedes(after_release));
+        assert!(
+            stop.precedes(after_tap),
+            "a Stop drops the audio after its press"
+        );
         assert_eq!(presses.take_lost(), 0, "nothing was passed over yet");
         assert!(presses.take().is_none());
         assert_eq!(presses.take_lost(), 1, "the tap is counted once");
@@ -1914,48 +1924,77 @@ mod tests {
 
     #[test]
     fn a_refused_press_explains_why_in_one_line_for_the_overlay() {
-        for (refusal, headline) in [
-            (Refusal::Paused, "Paused — key ignored"),
-            (Refusal::MicrophoneClosed, "Microphone closed — key ignored"),
-            (Refusal::Delivering, "Delivering — key ignored"),
-            (Refusal::Capturing, "Dictating — key ignored"),
-            (Refusal::TooQuick, "Key released too quickly"),
+        for (refusal, headline, notice) in [
+            (
+                Refusal::Paused,
+                "Paused — key ignored",
+                "Thalvi is paused, so pressing the key started nothing. Resume listening first.",
+            ),
+            (
+                Refusal::MicrophoneClosed,
+                "Microphone closed — key ignored",
+                "The microphone is not open, so pressing the key started nothing.",
+            ),
+            (
+                Refusal::Delivering,
+                "Delivering — key ignored",
+                "Thalvi is still delivering the last dictation, so pressing the key started nothing.",
+            ),
+            (
+                Refusal::Capturing,
+                "Dictating — key ignored",
+                "A dictation is already running, so pressing the key started nothing.",
+            ),
+            (
+                Refusal::TooQuick,
+                "Key released too quickly",
+                "The key was pressed and released too quickly, so pressing it started nothing.",
+            ),
+            (
+                Refusal::NothingToStop,
+                "Nothing to stop — key ignored",
+                "A stop key was pressed while nothing was being dictated, so nothing was pasted.",
+            ),
         ] {
             assert_eq!(refusal.headline(), headline, "{refusal:?}");
+            assert_eq!(refusal.notice(), notice, "{refusal:?}");
         }
     }
 
     #[test]
     fn key_rows_read_and_write_their_names_and_refuse_a_mode_that_is_no_mode() {
-        for (json, action, mode) in [
+        for (json, action, mode, label) in [
             (
                 r#"{"action": "dictate", "mode": "hold", "key": "F9"}"#,
                 Action::Dictate,
                 KeyMode::Hold,
+                "Hold",
             ),
             (
                 r#"{"action": "write", "mode": "toggle", "key": "Alt+KeyX"}"#,
                 Action::Write,
                 KeyMode::Toggle,
+                "Toggle",
             ),
             (
                 r#"{"action": "dictate", "mode": "start", "key": "F7"}"#,
                 Action::Dictate,
                 KeyMode::Start,
+                "Start",
             ),
             (
                 r#"{"action": "dictate", "mode": "stop", "key": "F8"}"#,
                 Action::Dictate,
                 KeyMode::Stop,
+                "Stop",
             ),
         ] {
             let bind: KeyBind = serde_json::from_str(json).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(json).unwrap();
             assert_eq!((bind.action, bind.mode), (action, mode), "{json}");
-            assert_eq!(
-                serde_json::to_value(&bind).unwrap(),
-                serde_json::from_str::<serde_json::Value>(json).unwrap(),
-                "{json}"
-            );
+            assert_eq!(bind.mode.to_string(), saved["mode"].as_str().unwrap());
+            assert_eq!(bind.mode.label(), label);
+            assert_eq!(serde_json::to_value(&bind).unwrap(), saved, "{json}");
         }
         let error = serde_json::from_str::<KeyBind>(
             r#"{"action": "dictate", "mode": "strt", "key": "F7"}"#,
@@ -1999,10 +2038,15 @@ mod tests {
         click(&input, 0, &toggle);
         input.key(0, &toggle, true);
         assert_eq!(presses.take().map(|press| press.number), Some(1));
+        assert!(matches!(presses.changed().now_or_never(), Some(Ok(()))));
         assert_eq!(
             presses.take().map(|press| press.number),
             Some(2),
             "the second press waits for the next look, without another change"
+        );
+        assert!(
+            presses.changed().now_or_never().is_none(),
+            "both presses were taken"
         );
         assert!(presses.take().is_none());
         assert_eq!(presses.take_lost(), 0);
@@ -2374,18 +2418,20 @@ mod tests {
             Release,
         }
         use Step::{Chord, Confirm, Release, Wait};
-        // (steps, whether a hold is open after them)
-        let cases: [(&[Step], bool); 6] = [
-            (&[Wait, Confirm(0)], true),
-            (&[Wait, Chord, Confirm(0)], false),
-            (&[Wait, Release, Confirm(0)], false),
+        // (steps, whether a hold is open after them, how many presses were lost)
+        let cases: [(&[Step], bool, u64); 7] = [
+            (&[Wait, Confirm(0)], true, 0),
+            (&[Wait, Chord, Confirm(0)], false, 0),
+            (&[Wait, Release, Confirm(0)], false, 0),
             // The wait of an earlier press never starts the hold of a later one.
-            (&[Wait, Release, Wait, Confirm(0)], false),
-            (&[Wait, Release, Wait, Confirm(1)], true),
+            (&[Wait, Release, Wait, Confirm(0)], false, 0),
+            (&[Wait, Release, Wait, Confirm(1)], true, 0),
             // A key pressed once the hold started leaves the hold open.
-            (&[Wait, Confirm(0), Chord], true),
+            (&[Wait, Confirm(0), Chord], true, 0),
+            // A new AltGr down ends the hold whose release the hook missed.
+            (&[Wait, Confirm(0), Wait], false, 1),
         ];
-        for (index, (steps, open)) in cases.into_iter().enumerate() {
+        for (index, (steps, open, lost)) in cases.into_iter().enumerate() {
             let (input, state) = HoldInput::new();
             let mut presses = Presses::new(state);
             let mut waits = Vec::new();
@@ -2423,7 +2469,7 @@ mod tests {
                 open,
                 "a hold that waited keeps where the key went down, case {index}"
             );
-            assert_eq!(presses.take_lost(), 0, "case {index}");
+            assert_eq!(presses.take_lost(), lost, "case {index}");
 
             // Whatever became of the press, its release leaves nothing behind that spoils the
             // next press of the key.
