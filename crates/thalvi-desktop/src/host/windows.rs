@@ -11,11 +11,16 @@ use std::time::Duration;
 
 use super::{
     App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, MAYBE_PASTED, Modifier,
-    PasteText, RequestServer, WebUrl, WindowApp,
+    PasteText, RequestServer, StatusAnnouncer, WebUrl, WindowApp,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
 pub use overlay::{OverlayPlan, OverlaySurface, OverlayWaker};
 pub use win32::Real;
+
+/// Thalvi does not announce its status to Windows screen readers yet (#775).
+pub fn status_announcer() -> Option<Arc<dyn StatusAnnouncer>> {
+    None
+}
 
 /// A window handle as a plain number, so targets stay `Send`.
 pub type Hwnd = isize;

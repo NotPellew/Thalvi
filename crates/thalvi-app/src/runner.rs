@@ -25,7 +25,9 @@ use thalvi_desktop::entries::LiveKind;
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::history::{Capture, Store as History};
 use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
-use thalvi_desktop::host::{Desktop, HoldReport, Host, WindowApp};
+use thalvi_desktop::host::{
+    Desktop, HoldReport, Host, StatusAnnouncer, WindowApp, status_announcer,
+};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError};
@@ -36,6 +38,7 @@ use thalvi_desktop::wake::{WakeConfig, WakeEngine};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
+use crate::announcement::Announcements;
 use crate::status::{
     Failure, FailureKind, LighterModel, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status,
     View, WAKE_DOWNLOAD_NOTICE, load_notice,
@@ -146,7 +149,7 @@ impl EngineLink {
         paused: bool,
         whisper_helpers: PathBuf,
     ) -> Result<Self, String> {
-        let (link, ends, stopped) = Self::wire(&config, paused);
+        let (link, ends, stopped) = Self::wire_with(&config, paused, status_announcer());
         let (ready_tx, ready) = std_mpsc::channel();
         std::thread::Builder::new()
             .name("thalvi-engine".to_owned())
@@ -181,14 +184,23 @@ impl EngineLink {
         Ok(link)
     }
 
+    #[cfg(test)]
     fn wire(config: &DesktopConfig, paused: bool) -> (Self, RunnerEnds, std_mpsc::Sender<()>) {
+        Self::wire_with(config, paused, None)
+    }
+
+    fn wire_with(
+        config: &DesktopConfig,
+        paused: bool,
+        announcer: Option<Arc<dyn StatusAnnouncer>>,
+    ) -> (Self, RunnerEnds, std_mpsc::Sender<()>) {
         let last_writing_window = Arc::new(Mutex::new(None));
         let (control, control_rx) = mpsc::unbounded_channel();
         let (status_tx, status) = watch::channel(Status::Loading {
             notice: STARTING_NOTICE.to_owned(),
             downloading: false,
         });
-        let publisher = Publisher::new(status_tx, config.ending_pause);
+        let publisher = Publisher::announcing(status_tx, config.ending_pause, announcer);
         publisher.update(|view| view.wake_words = config.wake.enabled());
         let (level_tx, level) = watch::channel(0.0);
         let (audio_tx, audio) = watch::channel(AudioStatus {
@@ -458,10 +470,21 @@ pub(crate) struct Publisher {
     rebuilding: watch::Sender<bool>,
     /// The failure the last speech model load showed, so a reload clears that and no other.
     load_failure: Mutex<Option<Failure>>,
+    /// What each published status change says to a screen reader.
+    announcements: Announcements,
 }
 
 impl Publisher {
+    #[cfg(test)]
     fn new(out: watch::Sender<Status>, pauses: EndingPauses) -> Arc<Self> {
+        Self::announcing(out, pauses, None)
+    }
+
+    fn announcing(
+        out: watch::Sender<Status>,
+        pauses: EndingPauses,
+        announcer: Option<Arc<dyn StatusAnnouncer>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(PublisherState {
                 view: View {
@@ -483,6 +506,7 @@ impl Publisher {
             out,
             rebuilding: watch::channel(false).0,
             load_failure: Mutex::new(None),
+            announcements: Announcements::new(announcer),
         })
     }
 
@@ -496,13 +520,18 @@ impl Publisher {
             *current = state.view.rebuilding;
             changed
         });
+        let mut spoken = None;
         self.out.send_if_modified(|current| {
             if *current == status {
                 return false;
             }
+            spoken = self.announcements.for_change(current, &status);
             *current = status;
             true
         });
+        if let Some((announcer, words)) = spoken {
+            announcer.announce(&words);
+        }
         result
     }
 
@@ -680,6 +709,13 @@ impl Publisher {
                 }));
             }
         })
+    }
+
+    /// Publishes every engine state as the engine produces it, so a state another reader would
+    /// miss is still announced in order.
+    fn status_sink(self: &Arc<Self>) -> Box<dyn Fn(&EngineState)> {
+        let publisher = Arc::clone(self);
+        Box::new(move |engine| publisher.update(|view| view.engine = engine.clone()))
     }
 }
 
@@ -1194,6 +1230,7 @@ async fn build_session<S: Rig>(
             http,
             hold: key_state.clone(),
             notice: publisher.notice_sink(),
+            status: publisher.status_sink(),
             spotter,
             spotter_off,
         },
@@ -2257,6 +2294,7 @@ async fn follow(
     level_out: Arc<watch::Sender<f32>>,
     audio: watch::Receiver<AudioStatus>,
 ) {
+    // A new engine starts listening; the engine's own callback publishes every later state in order.
     publisher.update(|view| view.engine = state.borrow_and_update().clone());
     loop {
         tokio::select! {
@@ -2264,11 +2302,9 @@ async fn follow(
                 if changed.is_err() {
                     break;
                 }
-                let engine = state.borrow_and_update().clone();
-                if let EngineState::Capturing { notice: Some(notice), .. } = &engine {
+                if let EngineState::Capturing { notice: Some(notice), .. } = &*state.borrow_and_update() {
                     println!("{notice}");
                 }
-                publisher.update(|view| view.engine = engine);
             }
             changed = level.changed() => {
                 if changed.is_err() {
@@ -2959,6 +2995,7 @@ mod tests {
                 recognizer, wake, cues, gate, hold,
                 http: reqwest::Client::new(),
                 notice: publisher.notice_sink(),
+                status: publisher.status_sink(),
                 spotter: None,
                 spotter_off: None,
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
@@ -3259,6 +3296,7 @@ mod tests {
                         hold,
                         http: reqwest::Client::new(),
                         notice: publisher.notice_sink(),
+                        status: publisher.status_sink(),
                         spotter: None,
                         spotter_off: None,
                     },
@@ -4534,6 +4572,7 @@ mod tests {
         pause_on_rebuild: bool,
         cancel_on_audio_error: bool,
         first_open: Option<oneshot::Receiver<()>>,
+        announcer: Option<Arc<dyn StatusAnnouncer>>,
     }
 
     impl Default for FedOptions {
@@ -4546,6 +4585,7 @@ mod tests {
                 pause_on_rebuild: false,
                 cancel_on_audio_error: false,
                 first_open: None,
+                announcer: None,
             }
         }
     }
@@ -4574,7 +4614,7 @@ mod tests {
             }
             let opens = Rc::new(Cell::new(0));
             let feed = Rc::new(RefCell::new(None));
-            let (link, ends, _) = EngineLink::wire(&options.config, paused);
+            let (link, ends, _) = EngineLink::wire_with(&options.config, paused, options.announcer);
             let lab = MicLab {
                 opens: Rc::clone(&opens),
                 missing: Rc::new(Cell::new(missing)),
@@ -4998,6 +5038,72 @@ mod tests {
         .await;
         assert_eq!(script.opens.get(), opens + 1, "{label}");
         script.stop().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fed_hold_announces_finishing_once_at_release_then_where_the_words_went() {
+        use thalvi_desktop::recognizer::RecognizerEvent;
+
+        use crate::announcement::tests::Spoken;
+
+        for buffered in [true, false] {
+            LocalSet::new()
+                .run_until(async {
+                    let spoken = Spoken::default();
+                    let mut script = FedRun::configured(
+                        false,
+                        false,
+                        FedOptions {
+                            announcer: Some(Arc::new(spoken.clone())),
+                            ..FedOptions::default()
+                        },
+                    );
+                    yield_until("listening never started", || {
+                        matches!(&*script.status.borrow(), Status::Listening)
+                    })
+                    .await;
+                    script.server.ready();
+                    if buffered {
+                        script.server.buffer_audio();
+                    } else {
+                        script.server.flushes_on_end();
+                    }
+                    let (feed, mut ended) = Feed::new(spoken_clip());
+                    script.link.send(Control::Feed(feed));
+                    feed_started(&mut ended, &script.feeding)
+                        .await
+                        .unwrap_or_else(|end| panic!("the file was refused: {end:?}"));
+                    let key = script.link.hold_input();
+                    key.set(true);
+                    capture_started(&mut script).await;
+                    assert!(
+                        spoken.said().is_empty(),
+                        "a screen reader spoke during the capture: {:?}",
+                        spoken.said()
+                    );
+                    // The words are recognized the moment the key comes up: delivery follows at once.
+                    tokio::time::advance(Duration::from_millis(500)).await;
+                    key.set(false);
+                    script
+                        .server
+                        .emit(Ok(RecognizerEvent::Final("Hello".to_owned())));
+                    if !buffered {
+                        script.server.emit(Ok(RecognizerEvent::Ended));
+                    }
+                    pump_until("the hold was not pasted", || script.pasted() == ["Hello"]).await;
+                    status_until(&mut script.status, "the delivery was not shown", |status| {
+                        matches!(status, Status::Done { .. })
+                    })
+                    .await;
+                    assert_eq!(
+                        spoken.said(),
+                        ["Finishing", "Sent to Editor"],
+                        "buffered: {buffered}"
+                    );
+                    script.stop().await;
+                })
+                .await;
+        }
     }
 
     /// Starts a file's capture and fails it with a recognizer that cannot keep up.

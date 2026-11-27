@@ -89,8 +89,7 @@ pub enum Status {
         route: CaptureRoute,
         cancellable: bool,
     },
-    /// A released hold whose recognizer was still behind is finishing the words said before the
-    /// release; it can still be cancelled.
+    /// A streaming recognizer is finishing the words said before a hold was released.
     Finishing {
         target: Option<String>,
         route: CaptureRoute,

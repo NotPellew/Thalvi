@@ -251,8 +251,7 @@ pub enum EngineState {
     TranscribingLive {
         route: CaptureRoute,
     },
-    /// A released hold whose recognizer was still behind: it is finishing the words said before
-    /// the release.
+    /// A released hold whose streaming recognizer is finishing the words said before the release.
     Finishing {
         route: CaptureRoute,
     },
@@ -489,6 +488,8 @@ pub struct Parts<R, W, C> {
     pub hold: watch::Receiver<KeyState>,
     /// Tells the user about something that did not stop the capture.
     pub notice: Box<dyn Fn(&str)>,
+    /// Tells the app every state in order, including one a watch would replace before it is read.
+    pub status: Box<dyn Fn(&EngineState)>,
     /// Listens for the ending phrases beside the recognizer; none when it could not be loaded.
     pub spotter: Option<Box<dyn KeywordSpotter>>,
     /// Why there is no spotter, for the first capture to tell the user once.
@@ -535,6 +536,7 @@ pub struct Engine<R, W, C> {
     http: reqwest::Client,
     recorder: Recorder,
     notice: Rc<dyn Fn(&str)>,
+    status: Rc<dyn Fn(&EngineState)>,
     spotter: Option<Box<dyn KeywordSpotter>>,
     spotter_off: Option<String>,
     state: watch::Sender<EngineState>,
@@ -806,10 +808,10 @@ impl<S: RecognizerSession> Live<S> {
     fn waiting(&self) -> Option<EngineState> {
         let route = self.hold_route.filter(|_| self.text.pending().is_none())?;
         Some(match self.release {
-            Release::Behind(_) => EngineState::Finishing { route },
             Release::Tail(_) if self.session.buffers_audio() => {
                 EngineState::TranscribingLive { route }
             }
+            Release::Behind(_) | Release::Tail(_) => EngineState::Finishing { route },
             _ => return None,
         })
     }
@@ -1093,6 +1095,7 @@ where
             http: parts.http,
             recorder,
             notice: Rc::from(parts.notice),
+            status: Rc::from(parts.status),
             spotter: parts.spotter,
             spotter_off: parts.spotter_off,
             state,
@@ -1209,7 +1212,7 @@ where
         &mut self,
         frames: &mut impl FrameSource,
     ) -> Result<WakeTrigger, ListenError> {
-        self.set_state(EngineState::Listening);
+        self.set_state(&EngineState::Listening);
         if self.listening == ListenState::Stopped {
             self.key.skip();
         }
@@ -1482,7 +1485,7 @@ where
     ) -> CaptureOutcome {
         self.writing_window = window;
         self.cancel.borrow_and_update();
-        self.set_state(EngineState::StartingCapture);
+        self.set_state(&EngineState::StartingCapture);
         let source = if frames.fed() { "file" } else { "microphone" };
         let started = Instant::now();
         let held = self.held.take();
@@ -1525,7 +1528,7 @@ where
             self.gate.set_enabled(true);
         }
         self.level.send_replace(0.0);
-        self.set_state(EngineState::Listening);
+        self.set_state(&EngineState::Listening);
         let route = match &outcome {
             CaptureOutcome::Accepted(request) => Some(request.route.name()),
             _ => None,
@@ -1561,22 +1564,33 @@ where
         outcome
     }
 
-    fn set_state(&self, next: EngineState) {
-        self.state.send_if_modified(|current| {
-            if *current == next {
+    fn set_state(&self, next: &EngineState) {
+        Self::publish_state(&self.state, self.status.as_ref(), next);
+    }
+
+    fn publish_state(
+        state: &watch::Sender<EngineState>,
+        status: &dyn Fn(&EngineState),
+        next: &EngineState,
+    ) {
+        let changed = state.send_if_modified(|current| {
+            if current == next {
                 return false;
             }
-            *current = next;
+            *current = next.clone();
             true
         });
+        if changed {
+            status(next);
+        }
     }
 
     fn publish(&self, live: &Live<R::Session>) {
         if let Some(state) = live.waiting() {
-            self.set_state(state);
+            self.set_state(&state);
             return;
         }
-        self.set_state(match live.text.pending() {
+        self.set_state(&match live.text.pending() {
             Some(pending) => EngineState::PendingEnding {
                 route: pending.route,
                 text: pending.text.clone(),
@@ -1755,7 +1769,7 @@ where
                 break None;
             }
             if cue_ended && session.is_none() && loads_model {
-                self.set_state(EngineState::LoadingModel);
+                self.set_state(&EngineState::LoadingModel);
             }
         };
         let decided = Instant::now();
@@ -1825,7 +1839,7 @@ where
                 if let Err(error) = live.session.finish_audio().await {
                     return Some(Done::Failed(error.into()));
                 }
-                self.set_state(EngineState::TranscribingLive {
+                self.set_state(&EngineState::TranscribingLive {
                     route: held.route(),
                 });
             } else {
@@ -2101,7 +2115,7 @@ where
             if let Err(error) = live.session.finish_audio().await {
                 return Some(Done::Failed(error.into()));
             }
-            self.set_state(EngineState::TranscribingLive {
+            self.set_state(&EngineState::TranscribingLive {
                 route: held.route(),
             });
         } else {
@@ -2346,7 +2360,7 @@ where
                     .map_err(|error| Stop::Failed(error.into()))?;
                 live.capture_end = Some(now);
                 live.release = Release::Tail(now);
-                self.set_state(EngineState::TranscribingLive {
+                self.set_state(&EngineState::TranscribingLive {
                     route: CaptureRoute::Paste,
                 });
             }
@@ -2795,7 +2809,7 @@ where
         if Instant::now() >= deadline {
             return self.cleanup_fell_back(request, WritingError::Timeout, decided, None);
         }
-        self.set_state(EngineState::CleaningUp);
+        self.set_state(&EngineState::CleaningUp);
         let started = Instant::now();
         let mut reply = match bounded(
             &mut self.cancel,
@@ -2926,7 +2940,7 @@ where
             Ok(endpoint) => endpoint,
             Err(stop) => return self.not_written(&words, stop, None),
         };
-        self.set_state(EngineState::Writing {
+        self.set_state(&EngineState::Writing {
             text: String::new(),
         });
         let started = Instant::now();
@@ -2955,14 +2969,14 @@ where
             {
                 Ok(Some(Piece::Thinking)) => {
                     if first.text.is_none() {
-                        self.set_state(EngineState::Thinking);
+                        self.set_state(&EngineState::Thinking);
                     }
                     first.reasoning.get_or_insert_with(|| started.elapsed());
                 }
                 Ok(Some(Piece::Text(piece))) => {
                     first.text.get_or_insert_with(|| started.elapsed());
                     text.push_str(&piece);
-                    self.set_state(EngineState::Writing { text: text.clone() });
+                    self.set_state(&EngineState::Writing { text: text.clone() });
                 }
                 Ok(None) => break,
                 Err(stop) => {
@@ -3009,7 +3023,8 @@ where
         let Some(chat) = self.chat.as_mut() else {
             return Err(Some(WritingError::NotInstalled));
         };
-        let state = self.state.clone();
+        let state = &self.state;
+        let status = self.status.as_ref();
         let started = Instant::now();
         let result = tokio::select! {
             biased;
@@ -3018,7 +3033,7 @@ where
                 return Err(None);
             }
             () = until(deadline) => return Err(Some(WritingError::Timeout)),
-            result = chat.ready(|again| { state.send_replace(EngineState::StartingChat { again }); }) => result,
+            result = chat.ready(|again| Self::publish_state(state, status, &EngineState::StartingChat { again })) => result,
         };
         match result {
             Ok(ready) => {
@@ -3119,6 +3134,7 @@ mod tests {
                 chat: None,
                 hold,
                 notice: Box::new(|_| {}),
+                status: Box::new(|_| {}),
                 spotter: None,
                 spotter_off: None,
             },
