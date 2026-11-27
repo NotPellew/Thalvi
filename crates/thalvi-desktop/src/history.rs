@@ -723,6 +723,20 @@ mod tests {
         assert_eq!(texts(&store), ["fresh"]);
     }
 
+    #[test]
+    fn a_history_that_cannot_be_read_or_removed_is_reported() {
+        let dir = TempDir::new("unreadable");
+        std::fs::create_dir_all(dir.file()).unwrap();
+        let store = Store::at(dir.file());
+        for error in [store.list().unwrap_err(), store.clear().unwrap_err()] {
+            assert!(
+                matches!(&error, HistoryError::Io { path, .. } if *path == dir.file()),
+                "{error}"
+            );
+        }
+        assert!(dir.file().is_dir(), "nothing in its place is removed");
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_history_is_readable_by_its_owner_only() {
@@ -744,7 +758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recording_in_the_background_lands_in_the_file() {
+    async fn recording_and_trimming_in_the_background_land_in_the_file() {
         let dir = TempDir::new("background");
         let store = Arc::new(Store::at(dir.file()));
         store.record_in_background(HistoryConfig::default(), capture("later"));
@@ -756,5 +770,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(texts(&store), ["later"]);
+        store
+            .record(HistoryConfig::default(), capture("latest"))
+            .unwrap();
+        store.trim_in_background(config(r#"{"limit": 1}"#));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while texts(&store) != ["latest"] {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the background trim keeps only the newest entry");
     }
 }
