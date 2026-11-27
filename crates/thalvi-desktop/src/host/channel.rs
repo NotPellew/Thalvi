@@ -1,6 +1,7 @@
 //! The request/reply socket: the running app answers one line per connection, to its owner alone.
 
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+use nix::sys::socket::{Shutdown, getsockopt, shutdown, sockopt::PeerCredentials};
 
 use super::line::{LineError, MAX_REPLY, MAX_REQUEST, read_line, refusal};
 use crate::host::{HostError, RequestServer};
@@ -131,21 +132,24 @@ fn serve_in(
     }
     let listener = UnixListener::bind(&path)
         .map_err(|error| unsupported(format!("The socket could not be made: {error}.")))?;
+    let listener = Arc::new(listener);
     let private = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     let served = private.map_err(|error| error.to_string()).and_then(|()| {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
+        let accepting = Arc::clone(&listener);
         let handler: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(handler);
         let busy = Arc::new(AtomicUsize::new(0));
         std::thread::Builder::new()
             .name("thalvi-requests".to_owned())
-            .spawn(move || accept(&listener, &stopped, owner, read_timeout, &handler, &busy))
+            .spawn(move || accept(&accepting, &stopped, owner, read_timeout, &handler, &busy))
             .map(|thread| (stop, thread))
             .map_err(|error| error.to_string())
     });
     match served {
         Ok((stop, thread)) => Ok(RequestServer::new(Serving {
             path,
+            listener,
             stop,
             thread: Some(thread),
         })),
@@ -241,6 +245,7 @@ fn reply(mut connection: &UnixStream, answer: &str) -> std::io::Result<()> {
 /// Stops the thread and removes the socket when dropped.
 struct Serving {
     path: PathBuf,
+    listener: Arc<UnixListener>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -248,8 +253,8 @@ struct Serving {
 impl Drop for Serving {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        // Wakes the thread out of `accept`.
-        let _ = UnixStream::connect(&self.path);
+        // Linux wakes a blocked `accept` on shutdown even if the socket path was unlinked.
+        let _ = shutdown(self.listener.as_raw_fd(), Shutdown::Both);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -315,7 +320,6 @@ fn ask_in(
 #[cfg(test)]
 mod tests {
     use std::fs::Permissions;
-    use std::os::fd::AsRawFd;
 
     use super::*;
 
@@ -360,34 +364,46 @@ mod tests {
     #[test]
     fn one_app_answers_until_it_stops_serving_after_replacing_a_stale_socket_and_refusing_a_second()
     {
-        let dir = Dir::new("serve", 0o700);
-        assert_eq!(ask(&dir, "state"), Ok(None), "no socket");
-        let stale = UnixListener::bind(dir.socket()).unwrap();
-        // A child another test forks meanwhile holds a copy of the listener until it execs.
-        nix::sys::socket::shutdown(stale.as_raw_fd(), nix::sys::socket::Shutdown::Both).unwrap();
-        drop(stale);
-        assert!(dir.socket().exists());
-        assert_eq!(ask(&dir, "state"), Ok(None), "a socket nothing listens on");
-        let server = serve_in(&dir.0, me(), SHORT, echo).unwrap();
-        assert_eq!(
-            ask(&dir, "state").unwrap(),
-            Some("heard state".to_owned()),
-            "a new app replaces the stale file"
-        );
-        assert_eq!(ask(&dir, "pause").unwrap(), Some("heard pause".to_owned()));
-        let second = serve_in(&dir.0, me(), SHORT, |_| "second".to_owned());
-        assert_eq!(
-            second.err(),
-            Some(unsupported("Another Thalvi is already running."))
-        );
-        assert_eq!(
-            ask(&dir, "state").unwrap(),
-            Some("heard state".to_owned()),
-            "a second app leaves the live socket alone"
-        );
-        drop(server);
-        assert_eq!(ask(&dir, "state"), Ok(None));
-        assert!(!dir.socket().exists(), "the socket is removed");
+        for socket_exists in [true, false] {
+            let dir = Dir::new("serve", 0o700);
+            assert_eq!(ask(&dir, "state"), Ok(None), "no socket");
+            let stale = UnixListener::bind(dir.socket()).unwrap();
+            // A child another test forks meanwhile holds a copy of the listener until it execs.
+            shutdown(stale.as_raw_fd(), Shutdown::Both).unwrap();
+            drop(stale);
+            assert!(dir.socket().exists());
+            assert_eq!(ask(&dir, "state"), Ok(None), "a socket nothing listens on");
+            let server = serve_in(&dir.0, me(), SHORT, echo).unwrap();
+            assert_eq!(
+                ask(&dir, "state").unwrap(),
+                Some("heard state".to_owned()),
+                "a new app replaces the stale file"
+            );
+            assert_eq!(ask(&dir, "pause").unwrap(), Some("heard pause".to_owned()));
+            let second = serve_in(&dir.0, me(), SHORT, |_| "second".to_owned());
+            assert_eq!(
+                second.err(),
+                Some(unsupported("Another Thalvi is already running."))
+            );
+            assert_eq!(
+                ask(&dir, "state").unwrap(),
+                Some("heard state".to_owned()),
+                "a second app leaves the live socket alone"
+            );
+            if !socket_exists {
+                std::fs::remove_file(dir.socket()).unwrap();
+            }
+            let (stopped, server_stopped) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                drop(server);
+                let _ = stopped.send(());
+            });
+            server_stopped
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the server stops even if its socket file is gone");
+            assert_eq!(ask(&dir, "state"), Ok(None));
+            assert!(!dir.socket().exists(), "the socket is removed");
+        }
     }
 
     #[test]
