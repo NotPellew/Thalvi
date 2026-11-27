@@ -4241,10 +4241,12 @@ async fn presses_that_start_nothing_are_told_counted_and_left_to_the_caller() {
             rig.open().await;
             rig.feed_until(1000, Kind::Quiet).await;
             rig.finals("Hello").await;
-            // During a dictation by wake word, a press is refused; so is one that was over already.
+            // During a dictation by wake word, a press is refused, its release is not another
+            // press, and one that was over already is refused too.
             rig.key.set(true);
             settle().await;
             rig.key.set(false);
+            settle().await;
             rig.key.set(true);
             rig.key.set(false);
             settle().await;
