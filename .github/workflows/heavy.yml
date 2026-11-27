@@ -1,7 +1,7 @@
 name: Heavy
 
-# Every gate with no path detection, plus mutation testing over the high-risk Rust changed since the
-# `verified` tag. A green full run on main moves `verified`; a failed one files a ci-regression issue.
+# Every gate with no path detection, a 60 s run of each fuzz target, plus mutation testing over the
+# high-risk Rust changed since the `verified` tag. A green full run on main moves `verified`; a failed one files a ci-regression issue.
 on:
   push:
     branches: [main]
@@ -189,6 +189,57 @@ jobs:
           echo "seed: $seed" | tee -a "$GITHUB_STEP_SUMMARY"
           EXPLORE_SEED=$seed npm run explore --prefix crates/thalvi-app/ui
 
+  fuzz:
+    name: fuzz
+    needs: start
+    if: needs.start.outputs.superseded == 'false' && (inputs.scope || 'all') == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: install the nightly in fuzz/rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ort.pyke.io
+          key: ort-binaries-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ort-binaries-${{ runner.os }}-
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-fuzz@0.13.2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libgtk-3-dev libxkbcommon-dev
+      - run: cargo fuzz build
+      - name: run each target for 60 s from its seeds
+        run: |
+          set -o pipefail
+          status=0
+          for target in $(cargo fuzz list); do
+            echo "::group::$target"
+            if ! cargo fuzz run "$target" -- -max_total_time=60 2>&1 | tee "$RUNNER_TEMP/$target.log"; then
+              status=1
+              echo "::error::$target crashed; its input is in the fuzz-artifacts artifact."
+            fi
+            echo "::endgroup::"
+            echo "- $target: $(grep -E '^#[0-9]+' "$RUNNER_TEMP/$target.log" | tail -1)" >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit "$status"
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          retention-days: 7
+
   gnome-appimage:
     name: gnome-appimage
     needs: [start, ci]
@@ -324,13 +375,14 @@ jobs:
 
   verified:
     name: verified
-    needs: [start, ci, mutants, explore, gnome-appimage, update-ab]
+    needs: [start, ci, mutants, explore, fuzz, gnome-appimage, update-ab]
     if: >-
       github.ref == 'refs/heads/main' &&
       (inputs.scope || 'all') == 'all' &&
       needs.ci.result == 'success' &&
       needs.mutants.result == 'success' &&
       needs.explore.result == 'success' &&
+      needs.fuzz.result == 'success' &&
       needs.gnome-appimage.result == 'success' &&
       needs.update-ab.result == 'success'
     runs-on: ubuntu-latest
@@ -359,7 +411,7 @@ jobs:
 
   report:
     name: report
-    needs: [start, ci, mutants, explore, gnome-appimage, update-ab]
+    needs: [start, ci, mutants, explore, fuzz, gnome-appimage, update-ab]
     if: failure() && github.ref == 'refs/heads/main' && (inputs.scope || 'all') == 'all'
     runs-on: ubuntu-latest
     timeout-minutes: 5
