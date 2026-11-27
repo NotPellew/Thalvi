@@ -227,7 +227,7 @@ STUB
 }
 
 test_hyprland_startup() {
-  local monitor_delay=$1 deadline=$2 stub start elapsed rc=0
+  local monitor_delay=$1 deadline=$2 pause=${3:-0} stub start elapsed rc=0
   fresh_base
   stub=$(mktemp -d)
   stubs+=("$stub")
@@ -240,6 +240,14 @@ if [ "${!#}" != /tmp/supervisor.sh ]; then
 fi
 run=${LOG%/*}
 printf '%s\n' "$PPID" > "${0%/*}/compositor.pid"
+if [ "$RIG_TEST_PAUSE" = 1 ]; then
+  up_pid=$(ps -o ppid= -p "$PPID" | tr -d ' ')
+  kill -STOP "$up_pid"
+  (
+    timeout 10s bash -c 'until [ -s "$1" ]; do sleep 0.1; done' _ "$run/out/inner.display" || true
+    kill -CONT "$up_pid" 2>/dev/null || true
+  ) </dev/null >/dev/null 2>&1 &
+fi
 export RIG_W=1920 RIG_H=1080
 while [ "$1" != /tmp/supervisor.sh ]; do
   if [ "$1" = --setenv ] && [ "$2" = DBUS_SESSION_BUS_ADDRESS ]; then
@@ -275,7 +283,9 @@ signal.pause()' ;;
     read -r first probes < "$RUN/monitor-probe"
     (( probes += 1 ))
     printf '%s %s\n' "$first" "$probes" > "$RUN/monitor-probe"
-    if [ "$RIG_TEST_MONITOR_DELAY" != never ] && (( now - first >= RIG_TEST_MONITOR_DELAY && probes > 100 )); then
+    # Under load the old 100 probes may take longer than 10 s, so require another probe in that case.
+    if [ "$RIG_TEST_MONITOR_DELAY" != never ] &&
+        (( now - first >= RIG_TEST_MONITOR_DELAY && (RIG_TEST_PAUSE || probes > 100) )); then
       echo '[{"name":"fixture"}]'
     else
       echo '[]'
@@ -290,10 +300,12 @@ STUB
 
   start=$(date +%s%3N)
   PATH="$stub:$PATH" THALVI_RIG_RENDER=hardware THALVI_RIG_STARTUP_TIMEOUT="$deadline" \
-    RIG_TEST_MONITOR_DELAY="$monitor_delay" timeout 30s "$rig" up \
+    RIG_TEST_MONITOR_DELAY="$monitor_delay" RIG_TEST_PAUSE="$pause" timeout --kill-after=1s 30s "$rig" up \
     > "$THALVI_RIG_BASE/stdout" 2> "$THALVI_RIG_BASE/stderr" || rc=$?
   elapsed=$(( $(date +%s%3N) - start ))
-  if [ "$monitor_delay" != never ]; then
+  local description='Hyprland up times out at the monitor step and prints the last 20 Hyprland log lines'
+  [ "$pause" = 0 ] || description='Hyprland up rejects a monitor that appeared after the deadline while up was paused'
+  if [ "$monitor_delay" != never ] && [ "$pause" = 0 ]; then
     if [ "$rc" = 0 ] && [ "$elapsed" -ge 11000 ] && grep -q '^RUN_DIR=' "$THALVI_RIG_BASE/stdout"; then
       pass 'Hyprland up waits for a monitor that appears after the old 10 s limit'
     else
@@ -303,10 +315,10 @@ STUB
   elif [ "$rc" = 1 ] && [ "$elapsed" -lt 8000 ] &&
       grep -Fq 'timed out waiting for Hyprland monitors' "$THALVI_RIG_BASE/stderr" &&
       diff -u <(seq -f 'hyprland log line %g' 6 25) <(grep '^hyprland log line ' "$THALVI_RIG_BASE/stderr"); then
-    pass 'Hyprland up times out at the monitor step and prints the last 20 Hyprland log lines'
+    pass "$description"
   else
     cat "$THALVI_RIG_BASE/stderr" >&2
-    fail "Hyprland monitor timeout did not report the step and log tail within the deadline (exit $rc in ${elapsed}ms)"
+    fail "$description (exit $rc in ${elapsed}ms)"
   fi
 }
 
@@ -317,4 +329,5 @@ test_models_are_hardlinked
 test_whisper_helpers
 test_hyprland_startup 11000 60
 test_hyprland_startup never 3
+test_hyprland_startup 4000 3 1
 exit "$status"

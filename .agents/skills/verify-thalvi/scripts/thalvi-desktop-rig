@@ -368,6 +368,7 @@ cat > /home/rig/dbus.conf <<CONF
 CONF
 dbus-daemon --config-file=/home/rig/dbus.conf --nofork --nopidfile > /tmp/out/dbus.log 2>&1 &
 if [ -d /home/rig/mic-queue ]; then
+  echo 'the PipeWire microphone' >> /tmp/out/supervisor.log
   export PIPEWIRE_CORE=rig-pipewire PIPEWIRE_REMOTE=rig-pipewire DBUS_SYSTEM_BUS_ADDRESS=unix:path=/nonexistent
   pipewire > /tmp/out/pipewire.log 2>&1 &
   for _ in $(seq 50); do [ -S "$RUN/rig-pipewire" ] && [ -p /home/rig/mic.fifo ] && break; sleep 0.1; done
@@ -401,7 +402,9 @@ while :; do
   fi
   sleep 0.1
 done
+read -r ready_at _ < /proc/uptime
 echo "$sig" > /tmp/out/inner.sig
+echo "$ready_at" > /tmp/out/ready.at
 echo "$inner" > /tmp/out/inner.display
 wait
 EOF
@@ -415,12 +418,16 @@ EOF
   launch_held "$r/supervisor.out" "$r/compositor.pid" bwrap "${args[@]}" --setenv RIG_W "${size%x*}" --setenv RIG_H "${size#*x}" --bind "$r/hypr.conf" /home/rig/hypr.conf \
     --bind "$r/supervisor.sh" /tmp/supervisor.sh /tmp/supervisor.sh
   read -r pid < "$r/compositor.pid"
-  while [ ! -s "$r/out/inner.display" ]; do
+  while :; do
     read -r uptime _ < /proc/uptime
-    if ! kill -0 "$pid" 2>/dev/null; then
-      reason='compositors exited early while waiting for'
-    elif (( 10#${uptime/./} >= deadline )); then
+    if [ -s "$r/out/inner.display" ]; then
+      read -r uptime < "$r/out/ready.at"
+      (( 10#${uptime/./} < deadline )) && break
+    fi
+    if (( 10#${uptime/./} >= deadline )); then
       reason='timed out waiting for'
+    elif ! kill -0 "$pid" 2>/dev/null; then
+      reason='compositors exited early while waiting for'
     else
       sleep 0.1
       continue
