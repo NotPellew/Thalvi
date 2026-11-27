@@ -739,8 +739,8 @@ describe("the wake word picker", () => {
     return stub;
   }
   const WITH_WAKE = "Listening for the wake words and the hold keys.";
-  const KEYBOARD = "Listening for the hold keys only.";
-  const PAUSED = "Paused: neither the hold keys nor the wake words start anything.";
+  const KEYBOARD = "Listening for keybinds only.";
+  const PAUSED = "Paused: neither keybinds nor wake words start a capture.";
 
   // (saved switch, paused, clicked, the desktop refuses with, switch after, sent, status text, notice)
   const switches: [boolean, boolean, boolean, string | null, boolean, boolean | null, string, string][] = [
@@ -3225,7 +3225,13 @@ describe("live controls", () => {
     it("adds a row with the key recorded and the action and mode it starts with", async () => {
       const stub = await open();
       goTo("listening");
-      button("+ Add keybind").click();
+      const add = button("+ Add keybind");
+      const recording = "Press the new key. Escape cancels.";
+      add.click();
+      expect(add.closest(".row")?.textContent).toContain(recording);
+      press("Escape");
+      expect(add.closest(".row")?.textContent).not.toContain(recording);
+      add.click();
       press("F8");
       await settle();
 
@@ -3233,6 +3239,7 @@ describe("live controls", () => {
         { keys: [DICTATE, WRITE, { action: "dictate", mode: "hold", key: "F8" }] },
       ]);
       expect(rowOf("Key 3").querySelector("kbd")?.textContent).toBe("F8");
+      expect(add.closest(".row")?.textContent).not.toContain(recording);
     });
 
     it("changes a row's action and mode", async () => {

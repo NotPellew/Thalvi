@@ -639,17 +639,17 @@ function wordListTable({ settings, controls, apply }: PageContext): { node: HTML
   };
 }
 
-/** The Wake words switch: off, Thalvi keeps listening but only the hold keys start a capture. */
+/** The Wake words switch: off, Thalvi keeps listening but only keybinds start a capture. */
 function wakeSwitch({ settings, controls, backend, apply }: PageContext): HTMLElement[] {
   const state = el("small", { class: "unit", role: "status" });
   let paused = false;
   let input: HTMLInputElement | null = null;
   const show = (): void => {
     state.textContent = paused
-      ? "Paused: neither the hold keys nor the wake words start anything."
+      ? "Paused: neither keybinds nor wake words start a capture."
       : input?.checked === true
         ? "Listening for the wake words and the hold keys."
-        : "Listening for the hold keys only.";
+        : "Listening for keybinds only.";
   };
   const toggle = controls.toggle(settings.wake.enabled, (wanted) => {
     input = toggle.field as HTMLInputElement;
@@ -672,7 +672,7 @@ function wakeSwitch({ settings, controls, backend, apply }: PageContext): HTMLEl
   show();
   return [
     group("Wake words"),
-    row("Wake words", "Off: only the hold keys start a dictation.", {
+    row("Wake words", "Off: only keybinds start a dictation.", {
       node: el("span", { class: "stack" }, toggle.node, state),
       field: input,
     }),
@@ -781,18 +781,23 @@ function keybindRow(
       hint.textContent = MODE_HINTS[settings.keys[index]?.mode ?? bind.mode];
     });
   };
-  const action = controls.select(KEY_ACTIONS, bind.action, (value) =>
-    change((row) => {
+  const failed = (error: unknown): void => {
+    say(problem, errorText(error));
+    const saved = settings.keys[index] ?? bind;
+    action.field.value = saved.action;
+    mode.field.value = saved.mode;
+    shown.textContent = keyLabel(saved.key);
+  };
+  const action = controls.draftSelect(KEY_ACTIONS, bind.action, (value) => {
+    void change((row) => {
       row.action = value;
-    }),
-    "Action",
-  );
-  const mode = controls.select(KEY_MODES, bind.mode, (value) =>
-    change((row) => {
+    }).catch(failed);
+  }, "Action");
+  const mode = controls.draftSelect(KEY_MODES, bind.mode, (value) => {
+    void change((row) => {
       row.mode = value;
-    }),
-    "Mode",
-  );
+    }).catch(failed);
+  }, "Mode");
   const pick = button("Change…", () => {
     recordKey(
       pick,
@@ -801,10 +806,7 @@ function keybindRow(
       (name) => {
         void change((row) => {
           row.key = name;
-        }, (reason) => keyNotice(reason, name)).catch((error: unknown) => {
-          say(problem, errorText(error));
-          shown.textContent = keyLabel(settings.keys[index]?.key ?? bind.key);
-        });
+        }, (reason) => keyNotice(reason, name)).catch(failed);
       },
       () => {
         shown.textContent = keyLabel(settings.keys[index]?.key ?? bind.key);
@@ -863,6 +865,7 @@ function keybinds(context: PageContext): HTMLElement[] {
       applied,
       [problem],
       (name) => {
+        applied.textContent = "";
         apply((next) => {
           next.keys.push({ action: "dictate", mode: "hold", key: name });
         }, { explain: (reason) => keyNotice(reason, name) }).then(
@@ -874,7 +877,9 @@ function keybinds(context: PageContext): HTMLElement[] {
           },
         );
       },
-      () => undefined,
+      () => {
+        applied.textContent = "";
+      },
     );
   });
   const restore = button("Restore defaults", () => {
