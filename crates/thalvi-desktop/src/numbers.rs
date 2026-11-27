@@ -823,6 +823,7 @@ mod tests {
             ("I talked to one person", "I talked to one person"),
             ("give one to a friend", "give one to a friend"),
             ("Give one to 2FA support.", "Give one to 2FA support."),
+            ("Office hours are one to 2pm.", "Office hours are 1 to 2pm."),
             ("Send Cybrex2 to one person.", "Send Cybrex2 to one person."),
             (
                 "Use the larger one. To 2 places.",
