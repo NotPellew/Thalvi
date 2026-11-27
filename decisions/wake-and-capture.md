@@ -31,11 +31,33 @@ Starting and ending a capture: wake words, hold keys, cues and silence.
   Rejected: cutting at the spotted time, a recheck, acting on the spotter alone, judging on a short timer (24 of 36 finals came late), quoting dictated words.
 - **Musical earcons.** Five switchable cues share one output stream, paused between cues and rebuilt on device change or error; the mic drops frames only during playback, except a hold's start cue. Accepted delivery waits for final text, while its cue keeps playing; submit and task pauses and confirmation stay.
   Why: distinct contours explain capture state, opening output delays cues, and an undoable paste need not wait for sound. Rejected: running silence (blocks sleep), one beep for every state, a post-delivery cue, muting a hold's start cue.
-- **Hold to talk.** Holding a key dictates and releasing pastes: F9 without a modifier on Hyprland (binds Thalvi adds at runtime with its own executable through `hyprctl`, removed on quit and re-added on `configreloaded`), Alt+KeyZ on Windows (a swallowing keyboard hook that waits for the
-  key and Alt both up); a second key, `write_key` (F10, Alt+KeyX), releases into the writing model instead; every word of a hold is text, and only `cancel` abandons one. An immediate press keeps up to 160 ms (2 frames) of pre-roll from the listening ring. Each desktop supplies its default keys, and `hold_key` and `write_key` are stored only when they differ. Why: Hyprland 0.53.3 types held modifiers into the paste and drops the release when one comes up first, seen live, and drops a plain `bindr` when another key is pressed or a modifier is down during the hold, so the release is `bindrti`; `RegisterHotKey` sees no release; the key already ends a dictation, and spoken endings cut off sentences that held them; binds in the user's config go stale when the executable moves; without pre-roll, speaking as the key goes down clips the first consonant.
-  Rejected: Alt+Y with binds, Ctrl+Z/Y, spoken endings during a hold, a managed `thalvi-binds.conf` the user sources, hand-written binds, a modifier checklist with a key drop-down (Settings records the combination the user presses).
+- **Keybind modes.** Settings → Keys is a list of keybinds, each an action (Dictate, or Write to
+  write the words out first), a mode and a key; several rows can work one action. Hold dictates
+  while the key is down and pastes on release, F9 and F10 alone on Hyprland and Alt+KeyZ and
+  Alt+KeyX on Windows by default; Toggle starts on a press, or ends and pastes when a capture runs;
+  Start only starts and Stop only ends. One key capture runs at a time: a Hold or Start press while
+  one runs and a Stop press with none are refused with the overlay notice, and a Toggle or Stop
+  press ends the capture running, delivered as the action it started with. Every capture a key
+  started ends only by a key or `cancel`: no spoken or pause ending, so every word is text. Each
+  immediate start keeps up to 480 ms (6 frames) of pre-roll from the listening ring, and an AltGr-only press
+  keeps its audio from the press while it waits 0.2 s to be told from a chord. The rows are stored
+  only when they differ from the desktop's two Hold rows, and a config's `hold_key`/`write_key`
+  become its Hold rows once on load; then the old fields are gone. A key appears in one row, and an
+  action in the list needs a row that can start it and one that can end it. Hyprland adds Hold
+  rows as `bindrti` release binds and the others as press binds at runtime through `hyprctl`,
+  removed on quit and re-added on `configreloaded`; Windows swallows each matched key's press,
+  repeats and release, acting only on the press for the other modes. Why: Hyprland 0.53.3 types
+  held modifiers into the paste and drops the release when one comes up first, seen live, and drops
+  a plain `bindr` when another key is pressed or a modifier is down during the hold, so a Hold's
+  release is `bindrti`; `RegisterHotKey` sees no release; a long hold means holding a key for
+  minutes, which Discord's keybinds spare the user; binds in the user's config go stale when the
+  executable moves; a 450 ms pre-roll kept first words that shorter pre-roll lost in Hex's test.
+  Rejected: one key and one mode per action, spoken endings during a key capture, a start-only
+  action without a stop key, Ctrl+Z/Y, a managed `thalvi-binds.conf` the user sources, hand-written
+  binds, a modifier checklist with a key drop-down (Settings records the combination the user
+  presses).
 - **Wake words are a switch apart from listening.** `wake.enabled` (stored only when off) turns spoken activation off while listening stays on: the engine skips the wake model and the hold keys work, the switch applies as a retune with no rebuild, and keyboard-only is its own status (`keyboardOnly`, tray icon and `state` word `keyboard`). Why: pausing also refuses the hold keys, and a user who wants only the keyboard has no other way to stop wake words from starting captures. Rejected: pausing as the way to turn wake words off, unloading the wake model (re-enabling would need a rebuild).
-- **AltGr alone may be a hold key on Windows.** `AltRight` held alone dictates; AltGr with any other key is a chord that types, so the hook passes every event, ignores the Ctrl Windows adds, and starts the hold only after 0.2 s alone, keeping the audio from the press. Why: AltGr types `@`, `€` and `{` on layouts that have it, and a swallowed AltGr would break typing for them. Reversible: a hold started by AltGr and a second key stays a hold.
+- **AltGr alone may be a keybind key on Windows.** `AltRight` bound alone in any mode works; AltGr with any other key is a chord that types, so the hook passes every event, ignores the Ctrl Windows adds, and starts the keybind only after 0.2 s alone, keeping the audio from the press. Why: AltGr types `@`, `€` and `{` on layouts that have it, and a swallowed AltGr would break typing for them. Reversible: a capture started by AltGr and a second key stays a capture.
   Rejected: swallowing AltGr, starting the hold at the press and cancelling on a chord (cue and overlay would flash on every `@`).
 - **Hold release flush.** At release a hold sends 800 ms of generated silence (kept out of the recording) to streaming servers that have no end-of-input message and to streaming extras, while local sessions skip those frames and flush their right-context tail in one pass on `input_ended`; the hold pastes on the next final or after a session-reported wait: 250 ms, or 400 ms only for a decoder whose final re-hears the end
   of the stretch (Parakeet's, measured at 235-397 ms loaded); a tentative decoding that commits frames without a token while the voice

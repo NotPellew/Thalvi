@@ -60,6 +60,12 @@ that failed in delivery (`undelivered`) when it sets the status's failure kind,
 after `Settling::settle` has already decided what reaches the host. That is a
 label on the status, not a delivery path, so the mapped actions are unchanged.
 
+The keybinds change (#654) lets a Toggle or Stop key end a key capture while it runs
+(`Engine::on_stop`), and a Hold row's release still ends its own capture. It adds no control,
+cancel, pause, quit or delivery path: the ending is a key press the capture already watched,
+and `Engine::capture`'s cancel branch and `Runner::capture`'s ending requests are unchanged, as
+are the bounds and the model's actions.
+
 `Engine::capture` now also records the delivery route on a delivered capture's
 metrics line, after `set_state(Listening)` and after the outcome has already
 been decided. That write is not a delivery path and adds no cancellation or
@@ -285,6 +291,9 @@ worker, which builds the stream before reading any frames. The model layout supp
 `holds_text_for_end` when the session is created. Connect still awaits the same load
 and reports a spawn failure the same way. Worker initialization adds no await, ending
 control, or path to delivery, so `Loaded` and `LoadFailed` keep their meaning.
+
+`Engine::begin_capture` copies six listening-ring frames on immediate Hold, Toggle and Start
+presses. The copy is synchronous and leaves the cancellation and delivery boundaries as modeled.
 
 The two checked invariants have these exact meanings:
 

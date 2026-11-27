@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::Deserialize;
 
-use crate::hold::{HoldKey, HoldKind};
+use crate::hold::{KeyBind, KeyMode};
 use crate::host::command::{CommandRunner, tool};
 use crate::host::{HoldReport, HoldSource, HoldWatch, HostError};
 
@@ -60,13 +60,18 @@ impl Row {
         self.modmask == 0 && self.key.eq_ignore_ascii_case(key)
     }
 
-    /// Whether the bind starts or ends one of Thalvi's holds, whoever wrote it.
+    /// Whether the bind reports one of Thalvi's key rows, whoever wrote it.
     fn is_thalvi_hold(&self) -> bool {
+        let words: Vec<&str> = self.arg.split_whitespace().collect();
+        let legacy = words.last().is_some_and(|word| {
+            ["hold-start", "hold-end", "write-start", "write-end"].contains(word)
+        });
+        let row = words.len() >= 3
+            && words[words.len() - 3] == "key"
+            && matches!(words[words.len() - 1], "down" | "up");
         self.dispatcher == "exec"
             && self.arg.to_ascii_lowercase().contains("thalvi")
-            && self.arg.split_whitespace().next_back().is_some_and(|word| {
-                ["hold-start", "hold-end", "write-start", "write-end"].contains(&word)
-            })
+            && (legacy || row)
     }
 
     /// Whether this is a Thalvi hold bind whose program, the first shell word, is an absolute path that no longer exists.
@@ -107,33 +112,35 @@ fn quoted(exe: &Path) -> Result<String, HostError> {
 }
 
 /// Refuses a key with a modifier, and `AltGr`, which is one: Hyprland types a held modifier into the paste.
-pub(super) fn check(keys: &[(HoldKind, HoldKey)]) -> Result<(), HostError> {
+pub(super) fn check(keys: &[KeyBind]) -> Result<(), HostError> {
     match keys
         .iter()
-        .find(|(_, key)| !key.modifiers().is_empty() || key.is_altgr())
+        .find(|bind| !bind.key.modifiers().is_empty() || bind.key.is_altgr())
     {
-        Some((_, key)) => Err(HostError::Unsupported(format!(
-            "Hyprland can bind only F1 to F12 without a modifier for the hold keys, not {key}."
+        Some(bind) => Err(HostError::Unsupported(format!(
+            "Hyprland can bind only F1 to F12 without a modifier for the keys, not {}.",
+            bind.key
         ))),
         None => Ok(()),
     }
 }
 
-/// The binds that start and end each hold: Hyprland takes F1 to F12 alone and no other key.
-fn wanted(exe: &Path, keys: &[(HoldKind, HoldKey)]) -> Result<Vec<Bind>, HostError> {
+/// The binds each row needs: a Hold key fires on its press and its release, and Toggle, Start and
+/// Stop rows only on the press, since Hyprland reports no release for them.
+fn wanted(exe: &Path, keys: &[KeyBind]) -> Result<Vec<Bind>, HostError> {
     check(keys)?;
     let exe = quoted(exe)?;
     let mut binds = Vec::new();
-    for (kind, key) in keys {
-        let (start, end) = match kind {
-            HoldKind::Dictate => ("hold-start", "hold-end"),
-            HoldKind::Write => ("write-start", "write-end"),
-        };
-        for (action, release) in [(start, false), (end, true)] {
+    for (row, bind) in keys.iter().enumerate() {
+        let mut adds = vec![(format!("key {row} down"), false)];
+        if bind.mode == KeyMode::Hold {
+            adds.push((format!("key {row} up"), true));
+        }
+        for (command, release) in adds {
             binds.push(Bind {
-                key: key.to_string(),
+                key: bind.key.to_string(),
                 release,
-                command: format!("{exe} {action}"),
+                command: format!("{exe} {command}"),
             });
         }
     }
@@ -142,7 +149,7 @@ fn wanted(exe: &Path, keys: &[(HoldKind, HoldKey)]) -> Result<Vec<Bind>, HostErr
 
 /// What Hyprland needs to hold every wanted bind.
 struct Changes<'a> {
-    /// Keys whose binds go first: they hold binds of a Thalvi whose program is gone.
+    /// Keys whose previous binds are obsolete or left over from a missing executable.
     replace: Vec<&'a str>,
     add: Vec<&'a Bind>,
 }
@@ -150,15 +157,17 @@ struct Changes<'a> {
 /// The binds of `wanted` that Hyprland lacks, or the notice why they cannot be added: another bind
 /// holds a key, or a hold bind that Thalvi did not add does. A bind identical to a wanted one is
 /// adopted, so it is neither added again nor in the way, and a leftover is replaced.
-fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> {
+fn missing<'a>(wanted: &[&'a Bind], rows: &[Row], owned: &[&Bind]) -> Result<Changes<'a>, String> {
     let mut keys: Vec<&str> = wanted.iter().map(|bind| bind.key.as_str()).collect();
     keys.dedup();
     let (mut doubled, mut taken, mut replace) = (Vec::new(), Vec::new(), Vec::new());
     for key in keys {
-        let (leftovers, others): (Vec<_>, Vec<_>) = rows
-            .iter()
-            .filter(|row| row.on(key))
-            .partition(|row| row.is_leftover());
+        let (leftovers, others): (Vec<_>, Vec<_>) =
+            rows.iter().filter(|row| row.on(key)).partition(|row| {
+                row.is_leftover()
+                    || (owned.iter().any(|bind| bind.is(row))
+                        && !wanted.iter().any(|bind| bind.is(row)))
+            });
         let conflicts: Vec<_> = others
             .into_iter()
             .filter(|row| !wanted.iter().any(|bind| bind.is(row)))
@@ -175,7 +184,7 @@ fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> 
     let mut notices = Vec::new();
     if !doubled.is_empty() {
         notices.push(format!(
-            "Hyprland already binds {} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them.",
+            "Hyprland already binds {} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start, write-end and key lines from hyprland.conf, or quit the other Thalvi that holds them.",
             doubled.join(" and ")
         ));
     }
@@ -195,6 +204,7 @@ fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> 
     Ok(Changes {
         add: wanted
             .iter()
+            .copied()
             .filter(|bind| {
                 replace.contains(&bind.key.as_str()) || !rows.iter().any(|row| bind.is(row))
             })
@@ -203,49 +213,28 @@ fn missing<'a>(wanted: &'a [Bind], rows: &[Row]) -> Result<Changes<'a>, String> 
     })
 }
 
-/// The binds this process has put in Hyprland, each with the watches that rely on it: a key change
-/// binds the new keys before the old go, so a key kept by both must stay bound.
+/// Successful watches, in installation order. The newest watch for a key owns that key while
+/// the settings save is in flight. If the save fails its drop restores the older watch.
 #[derive(Clone, Default)]
-pub(super) struct Installed(Arc<Mutex<Vec<(Bind, usize)>>>);
+pub(super) struct Installed(Arc<Mutex<Vec<Arc<[Bind]>>>>);
 
 impl Installed {
-    fn entries(&self) -> MutexGuard<'_, Vec<(Bind, usize)>> {
+    fn watches(&self) -> MutexGuard<'_, Vec<Arc<[Bind]>>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
 
-    fn rely_on(&self, binds: &[Bind]) {
-        let mut entries = self.entries();
-        for bind in binds {
-            match entries.iter_mut().find(|(held, _)| held == bind) {
-                Some((_, watches)) => *watches += 1,
-                None => entries.push((bind.clone(), 1)),
-            }
-        }
-    }
+fn latest<'a>(watches: &'a [Arc<[Bind]>], key: &str) -> impl Iterator<Item = &'a Bind> {
+    watches
+        .iter()
+        .rev()
+        .find(|binds| binds.iter().any(|bind| bind.key == key))
+        .into_iter()
+        .flat_map(move |binds| binds.iter().filter(move |bind| bind.key == key))
+}
 
-    /// Stops relying on `binds`; returns the keys no watch relies on any longer.
-    fn give_up(&self, binds: &[Bind]) -> Vec<String> {
-        let mut entries = self.entries();
-        for bind in binds {
-            if let Some(at) = entries.iter().position(|(held, _)| held == bind) {
-                entries[at].1 -= 1;
-                if entries[at].1 == 0 {
-                    entries.remove(at);
-                }
-            }
-        }
-        let mut free: Vec<String> = Vec::new();
-        for bind in binds {
-            if !free.contains(&bind.key) && !entries.iter().any(|(held, _)| held.key == bind.key) {
-                free.push(bind.key.clone());
-            }
-        }
-        free
-    }
-
-    fn relies_on_key(&self, key: &str) -> bool {
-        self.entries().iter().any(|(held, _)| held.key == key)
-    }
+fn owned(watches: &[Arc<[Bind]>]) -> Vec<&Bind> {
+    watches.iter().flat_map(|binds| binds.iter()).collect()
 }
 
 /// Whether a watch relies on its binds in [`Installed`]: only a bound watch gives them up when dropped.
@@ -259,14 +248,14 @@ enum State {
 struct Shared<R> {
     run: Arc<R>,
     installed: Installed,
-    binds: Vec<Bind>,
+    binds: Arc<[Bind]>,
     state: Mutex<State>,
     tell: Box<dyn Fn(HoldReport) + Send + Sync>,
 }
 
 impl<R: CommandRunner> Shared<R> {
     /// Adds the binds Hyprland lacks, after checking that nothing else holds their keys.
-    fn ensure(&self) -> Result<(), HostError> {
+    fn ensure(&self, wanted: &[&Bind], owned: &[&Bind]) -> Result<(), HostError> {
         let list = self
             .run
             .run("hyprctl", &["-j", "binds"], None)
@@ -277,7 +266,7 @@ impl<R: CommandRunner> Shared<R> {
         let Changes {
             replace,
             add: missing,
-        } = missing(&self.binds, &rows).map_err(HostError::Unsupported)?;
+        } = missing(wanted, &rows, owned).map_err(HostError::Unsupported)?;
         if missing.is_empty() {
             return Ok(());
         }
@@ -308,14 +297,32 @@ impl<R: CommandRunner> Shared<R> {
             }
             Err(error) => error.to_string(),
         };
-        // Some of the batch may have gone in.
-        let mut added: Vec<String> = Vec::new();
+        // Some commands may have succeeded. Put back the owned bindings the batch replaced.
+        let mut changed: Vec<String> = replace.iter().map(ToString::to_string).collect();
         for bind in &missing {
-            if !added.contains(&bind.key) && !self.installed.relies_on_key(&bind.key) {
-                added.push(bind.key.clone());
+            if !changed.contains(&bind.key) && !owned.iter().any(|old| old.key == bind.key) {
+                changed.push(bind.key.clone());
             }
         }
-        self.unbind(&added);
+        self.unbind(&changed);
+        let mut restore = Vec::new();
+        for bind in owned {
+            if replace.contains(&bind.key.as_str()) && rows.iter().any(|row| bind.is(row)) {
+                let command = bind.keyword();
+                if !restore.contains(&command) {
+                    restore.push(command);
+                }
+            }
+        }
+        if !restore.is_empty()
+            && let Err(error) = self
+                .run
+                .run("hyprctl", &["--batch", &restore.join("; ")], None)
+        {
+            (self.tell)(HoldReport::Problem(format!(
+                "Thalvi could not restore its previous keys: {error}."
+            )));
+        }
         Err(HostError::NothingTyped(format!(
             "Hyprland would not bind the hold keys: {}.",
             refusal.trim_end_matches('.')
@@ -338,18 +345,54 @@ impl<R: CommandRunner> Shared<R> {
         }
     }
 
+    fn install(&self) -> Result<(), HostError> {
+        let mut watches = self.installed.watches();
+        self.ensure(&self.binds.iter().collect::<Vec<_>>(), &owned(&watches))?;
+        watches.push(Arc::clone(&self.binds));
+        Ok(())
+    }
+
+    fn uninstall(&self) {
+        let mut watches = self.installed.watches();
+        watches.retain(|binds| !Arc::ptr_eq(binds, &self.binds));
+        let mut keys: Vec<_> = self.binds.iter().map(|bind| bind.key.as_str()).collect();
+        keys.dedup();
+        let free: Vec<_> = keys
+            .iter()
+            .filter(|key| latest(&watches, key).next().is_none())
+            .map(ToString::to_string)
+            .collect();
+        let restore: Vec<_> = keys.iter().flat_map(|key| latest(&watches, key)).collect();
+        let mut owned = owned(&watches);
+        owned.extend(self.binds.iter());
+        if !restore.is_empty()
+            && let Err(error) = self.ensure(&restore, &owned)
+        {
+            (self.tell)(HoldReport::Problem(format!(
+                "Thalvi could not restore its previous keys: {error}."
+            )));
+        }
+        self.unbind(&free);
+    }
+
     /// Puts the binds back after Hyprland dropped them, unless something else took a key meanwhile.
     fn rebind(&self) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if matches!(*state, State::Gone) {
             return;
         }
-        match self.ensure() {
+        let result = if matches!(*state, State::Waiting) {
+            self.install()
+        } else {
+            let watches = self.installed.watches();
+            let mut keys: Vec<_> = self.binds.iter().map(|bind| bind.key.as_str()).collect();
+            keys.dedup();
+            let wanted: Vec<_> = keys.iter().flat_map(|key| latest(&watches, key)).collect();
+            self.ensure(&wanted, &owned(&watches))
+        };
+        match result {
             Ok(()) => {
-                if matches!(*state, State::Waiting) {
-                    self.installed.rely_on(&self.binds);
-                    *state = State::Bound;
-                }
+                *state = State::Bound;
                 (self.tell)(HoldReport::Working);
             }
             Err(error) => (self.tell)(HoldReport::Problem(format!(
@@ -383,8 +426,7 @@ impl<R: CommandRunner> Drop for HoldBinds<R> {
             let bound = matches!(*state, State::Bound);
             *state = State::Gone;
             if bound {
-                let free = self.shared.installed.give_up(&self.shared.binds);
-                self.shared.unbind(&free);
+                self.shared.uninstall();
             }
         }
         if let Some(close) = self.close_events.take() {
@@ -461,20 +503,19 @@ pub(super) fn bind<R: CommandRunner + 'static>(
     run: Arc<R>,
     installed: Installed,
     exe: &Path,
-    keys: &[(HoldKind, HoldKey)],
+    keys: &[KeyBind],
     events: io::Result<Events>,
     tell: impl Fn(HoldReport) + Send + Sync + 'static,
 ) -> Result<HoldSource, HostError> {
     let shared = Arc::new(Shared {
         run,
         installed,
-        binds: wanted(exe, keys)?,
+        binds: wanted(exe, keys)?.into(),
         state: Mutex::new(State::Waiting),
         tell: Box::new(tell),
     });
-    let refusal = match shared.ensure() {
+    let refusal = match shared.install() {
         Ok(()) => {
-            shared.installed.rely_on(&shared.binds);
             *shared.state.lock().unwrap_or_else(PoisonError::into_inner) = State::Bound;
             None
         }
@@ -513,6 +554,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::hold::{Action, KeyMode, KeyName};
     use crate::host::command::fakes::FakeRunner;
 
     /// How long a test waits for something that must happen.
@@ -609,12 +651,16 @@ mod tests {
 
     const EXE: &str = "/proc/self/exe";
 
-    fn hold(name: &str) -> (HoldKind, HoldKey) {
-        (HoldKind::Dictate, HoldKey::parse(name).unwrap())
+    fn hold(name: &str) -> KeyBind {
+        KeyBind::new(
+            Action::Dictate,
+            KeyMode::Hold,
+            KeyName::parse(name).unwrap(),
+        )
     }
 
-    fn write(name: &str) -> (HoldKind, HoldKey) {
-        (HoldKind::Write, HoldKey::parse(name).unwrap())
+    fn write(name: &str) -> KeyBind {
+        KeyBind::new(Action::Write, KeyMode::Hold, KeyName::parse(name).unwrap())
     }
 
     /// Binds `keys` in `hypr` with no event stream, collecting what the user is told.
@@ -622,7 +668,7 @@ mod tests {
         hypr: &Compositor,
         installed: &Installed,
         exe: &str,
-        keys: &[(HoldKind, HoldKey)],
+        keys: &[KeyBind],
     ) -> (Result<HoldWatch, HostError>, mpsc::Receiver<String>) {
         let (told, notices) = mpsc::channel();
         let watch = bind(
@@ -649,17 +695,20 @@ mod tests {
         }
     }
 
-    fn defaults() -> [(HoldKind, HoldKey); 2] {
+    fn defaults() -> [KeyBind; 2] {
         [hold("F9"), write("F10")]
     }
 
-    fn bound_by_thalvi(exe: &str, keys: &[(&str, &str)]) -> Vec<(String, bool, String)> {
+    fn bound_by_thalvi(exe: &str, keys: &[KeyBind]) -> Vec<(String, bool, String)> {
         keys.iter()
-            .flat_map(|(key, action)| {
-                [
-                    ((*key).to_owned(), false, format!("'{exe}' {action}-start")),
-                    ((*key).to_owned(), true, format!("'{exe}' {action}-end")),
-                ]
+            .enumerate()
+            .flat_map(|(row, bind)| {
+                let key = bind.key.to_string();
+                let mut binds = vec![(key.clone(), false, format!("'{exe}' key {row} down"))];
+                if bind.mode == KeyMode::Hold {
+                    binds.push((key, true, format!("'{exe}' key {row} up")));
+                }
+                binds
             })
             .collect()
     }
@@ -686,17 +735,17 @@ mod tests {
                     "hyprctl -j binds".to_owned(),
                     format!(
                         "hyprctl --batch \
-                         keyword bind , F9, exec, {quoted} hold-start; \
-                         keyword bindrti , F9, exec, {quoted} hold-end; \
-                         keyword bind , F10, exec, {quoted} write-start; \
-                         keyword bindrti , F10, exec, {quoted} write-end"
+                         keyword bind , F9, exec, {quoted} key 0 down; \
+                         keyword bindrti , F9, exec, {quoted} key 0 up; \
+                         keyword bind , F10, exec, {quoted} key 1 down; \
+                         keyword bindrti , F10, exec, {quoted} key 1 up"
                     )
                 ],
                 "{exe}"
             );
             assert_eq!(
                 hypr.bound(),
-                bound_by_thalvi(exe, &[("F9", "hold"), ("F10", "write")])
+                bound_by_thalvi(exe, &defaults())
                     .into_iter()
                     .map(|(key, release, arg)| (
                         key,
@@ -705,6 +754,47 @@ mod tests {
                     ))
                     .collect::<Vec<_>>(),
                 "{exe}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hold_row_binds_its_release_and_every_other_mode_only_its_press() {
+        for (mode, release) in [
+            (KeyMode::Hold, true),
+            (KeyMode::Toggle, false),
+            (KeyMode::Start, false),
+            (KeyMode::Stop, false),
+        ] {
+            let row = KeyBind::new(Action::Dictate, mode, KeyName::f9());
+            let hypr = Compositor::new(Vec::new());
+            let (watch, _) = bind_keys(&hypr, &Installed::default(), EXE, &[row]);
+            assert!(watch.is_ok(), "{mode:?}");
+            assert_eq!(
+                hypr.commands(),
+                [
+                    "hyprctl -j binds".to_owned(),
+                    if release {
+                        format!(
+                            "hyprctl --batch keyword bind , F9, exec, '{EXE}' key 0 down; keyword bindrti , F9, exec, '{EXE}' key 0 up"
+                        )
+                    } else {
+                        format!("hyprctl --batch keyword bind , F9, exec, '{EXE}' key 0 down")
+                    },
+                ],
+                "{mode:?}"
+            );
+            assert_eq!(
+                hypr.bound(),
+                if release {
+                    vec![
+                        ("F9".to_owned(), false, format!("'{EXE}' key 0 down")),
+                        ("F9".to_owned(), true, format!("'{EXE}' key 0 up")),
+                    ]
+                } else {
+                    vec![("F9".to_owned(), false, format!("'{EXE}' key 0 down"))]
+                },
+                "{mode:?}"
             );
         }
     }
@@ -746,7 +836,7 @@ mod tests {
                     assert_eq!(
                         error,
                         HostError::Unsupported(format!(
-                            "Hyprland can bind only F1 to F12 without a modifier for the hold keys, not {key}."
+                            "Hyprland can bind only F1 to F12 without a modifier for the keys, not {key}."
                         ))
                     );
                     assert_eq!(hypr.commands(), Vec::<String>::new(), "{key}");
@@ -783,13 +873,13 @@ mod tests {
             ("adopted pair", format!("'{gone}'"), true),
         ] {
             let mut existing = vec![
-                row("F9", false, "exec", &format!("{program} hold-start")),
-                row("F9", true, "exec", &format!("{program} hold-end")),
-                row("F10", false, "exec", &format!("{program} write-start")),
-                row("F10", true, "exec", &format!("{program} write-end")),
+                row("F9", false, "exec", &format!("{program} key 0 down")),
+                row("F9", true, "exec", &format!("{program} key 0 up")),
+                row("F10", false, "exec", &format!("{program} key 1 down")),
+                row("F10", true, "exec", &format!("{program} key 1 up")),
             ];
             if adopted {
-                existing.push(row("F9", false, "exec", &format!("'{EXE}' hold-start")));
+                existing.push(row("F9", false, "exec", &format!("'{EXE}' key 0 down")));
             }
             let hypr = Compositor::new(existing);
             let (watch, _) = bind_keys(&hypr, &Installed::default(), EXE, &defaults());
@@ -799,16 +889,12 @@ mod tests {
                 [
                     "hyprctl -j binds".to_owned(),
                     format!(
-                        "hyprctl --batch keyword unbind , F9; keyword bind , F9, exec, '{EXE}' hold-start; keyword bindrti , F9, exec, '{EXE}' hold-end; keyword unbind , F10; keyword bind , F10, exec, '{EXE}' write-start; keyword bindrti , F10, exec, '{EXE}' write-end"
+                        "hyprctl --batch keyword unbind , F9; keyword bind , F9, exec, '{EXE}' key 0 down; keyword bindrti , F9, exec, '{EXE}' key 0 up; keyword unbind , F10; keyword bind , F10, exec, '{EXE}' key 1 down; keyword bindrti , F10, exec, '{EXE}' key 1 up"
                     ),
                 ],
                 "{name}"
             );
-            assert_eq!(
-                hypr.bound(),
-                bound_by_thalvi(EXE, &[("F9", "hold"), ("F10", "write")]),
-                "{name}"
-            );
+            assert_eq!(hypr.bound(), bound_by_thalvi(EXE, &defaults()), "{name}");
             drop(watch);
             assert_eq!(hypr.bound(), [], "{name}: the watch owns the replacements");
         }
@@ -820,12 +906,12 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("thalvi live\\program-{}", std::process::id()));
         std::fs::write(&path, "").unwrap();
-        let command = format!("{} hold-start", quoted(&path).unwrap());
+        let command = format!("{} key 0 down", quoted(&path).unwrap());
         let hypr = Compositor::new(vec![row("F9", false, "exec", &command)]);
         let (watch, _) = bind_keys(&hypr, &Installed::default(), EXE, &defaults());
         std::fs::remove_file(path).unwrap();
         assert_eq!(watch.err(), Some(HostError::Unsupported(
-            "Hyprland already binds F9 to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them.".to_owned()
+            "Hyprland already binds F9 to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start, write-end and key lines from hyprland.conf, or quit the other Thalvi that holds them.".to_owned()
         )));
         assert_eq!(hypr.commands(), ["hyprctl -j binds"]);
         assert_eq!(hypr.bound().len(), 1);
@@ -838,7 +924,7 @@ mod tests {
         };
         let thalvi = |keys: &str| {
             format!(
-                "Hyprland already binds {keys} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them."
+                "Hyprland already binds {keys} to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start, write-end and key lines from hyprland.conf, or quit the other Thalvi that holds them."
             )
         };
         let cases = [
@@ -869,28 +955,28 @@ mod tests {
             (
                 "hand-written Thalvi binds on both keys",
                 vec![
-                    row("F9", false, "exec", "thalvi-desktop hold-start"),
-                    row("F10", false, "exec", "thalvi-desktop write-start"),
+                    row("F9", false, "exec", "thalvi-desktop key 0 down"),
+                    row("F10", false, "exec", "thalvi-desktop key 1 down"),
                 ],
                 thalvi("F9 and F10"),
             ),
             (
                 "hand-written Thalvi binds",
                 vec![
-                    row("F9", false, "exec", "thalvi-desktop hold-start"),
-                    row("F9", true, "exec", "thalvi-desktop hold-end"),
+                    row("F9", false, "exec", "thalvi-desktop key 0 down"),
+                    row("F9", true, "exec", "thalvi-desktop key 0 up"),
                 ],
                 thalvi("F9"),
             ),
             (
                 "another program's bind that ends in a word like the hold commands",
-                vec![row("F9", false, "exec", "obs hold-start")],
+                vec![row("F9", false, "exec", "obs key 0 down")],
                 taken("F9"),
             ),
             (
                 "a hand-written Thalvi bind next to another program's on another key",
                 vec![
-                    row("F9", false, "exec", "thalvi-desktop hold-start"),
+                    row("F9", false, "exec", "thalvi-desktop key 0 down"),
                     row("F10", false, "exec", "x"),
                 ],
                 format!("{} {}", thalvi("F9"), taken("F10")),
@@ -930,31 +1016,31 @@ mod tests {
             (
                 "every bind",
                 vec![
-                    present("F9", false, "hold-start"),
-                    present("F9", true, "hold-end"),
-                    present("F10", false, "write-start"),
-                    present("F10", true, "write-end"),
+                    present("F9", false, "key 0 down"),
+                    present("F9", true, "key 0 up"),
+                    present("F10", false, "key 1 down"),
+                    present("F10", true, "key 1 up"),
                 ],
                 vec![],
             ),
             (
                 "the dictate key's pair",
                 vec![
-                    present("F9", false, "hold-start"),
-                    present("F9", true, "hold-end"),
+                    present("F9", false, "key 0 down"),
+                    present("F9", true, "key 0 up"),
                 ],
                 vec![
-                    add("F10", false, "write-start"),
-                    add("F10", true, "write-end"),
+                    add("F10", false, "key 1 down"),
+                    add("F10", true, "key 1 up"),
                 ],
             ),
             (
                 "one bind of a pair",
-                vec![present("F9", false, "hold-start")],
+                vec![present("F9", false, "key 0 down")],
                 vec![
-                    add("F9", true, "hold-end"),
-                    add("F10", false, "write-start"),
-                    add("F10", true, "write-end"),
+                    add("F9", true, "key 0 up"),
+                    add("F10", false, "key 1 down"),
+                    add("F10", true, "key 1 up"),
                 ],
             ),
         ];
@@ -1005,8 +1091,31 @@ mod tests {
         drop(old);
         assert_eq!(
             hypr.bound(),
-            bound_by_thalvi(EXE, &[("F10", "write"), ("F8", "hold")])
+            [
+                ("F10".to_owned(), false, format!("'{EXE}' key 1 down")),
+                ("F10".to_owned(), true, format!("'{EXE}' key 1 up")),
+                ("F8".to_owned(), false, format!("'{EXE}' key 0 down")),
+                ("F8".to_owned(), true, format!("'{EXE}' key 0 up")),
+            ],
+            "each key reports the row it is in the new list"
         );
+
+        let toggle = KeyBind::new(
+            Action::Dictate,
+            KeyMode::Toggle,
+            KeyName::parse("F8").unwrap(),
+        );
+        let moved = [write("F10"), toggle];
+        let (changed, _) = bind_keys(&hypr, &installed, EXE, &moved);
+        let changed = changed.unwrap();
+        assert_eq!(hypr.bound(), bound_by_thalvi(EXE, &moved));
+        // A failed save drops the proposed watcher and restores the previous mode and row order.
+        drop(changed);
+        let mut restored = hypr.bound();
+        restored.sort();
+        let mut expected = bound_by_thalvi(EXE, &[hold("F8"), write("F10")]);
+        expected.sort();
+        assert_eq!(restored, expected);
 
         // F7 is taken by another bind: the change is refused and the keys in use stay.
         hypr.binds
@@ -1040,7 +1149,7 @@ mod tests {
                 "Hyprland would not bind the hold keys: invalid dispatcher.".to_owned()
             ))
         );
-        assert_eq!(hypr.bound(), bound_by_thalvi(EXE, &[("F9", "hold")]));
+        assert_eq!(hypr.bound(), bound_by_thalvi(EXE, &[hold("F9")]));
         assert_eq!(
             hypr.commands().last().map(String::as_str),
             Some("hyprctl --batch keyword unbind , F10")
@@ -1056,7 +1165,7 @@ mod tests {
             let (writing, _) = bind_keys(&hypr, &installed, EXE, &[write("F8")]);
             let mut watches = [dictation.ok(), writing.ok()];
             drop(watches[first].take());
-            let left = [("F9", "hold"), ("F8", "write")][second];
+            let left = if second == 0 { hold("F9") } else { write("F8") };
             assert_eq!(
                 hypr.bound(),
                 bound_by_thalvi(EXE, &[left]),
@@ -1070,7 +1179,7 @@ mod tests {
     fn follow_start(
         hypr: &Compositor,
         installed: &Installed,
-        keys: &[(HoldKind, HoldKey)],
+        keys: &[KeyBind],
     ) -> (
         Result<HoldSource, HostError>,
         UnixStream,
@@ -1093,7 +1202,7 @@ mod tests {
 
     #[test]
     fn a_refused_start_recovers_on_reload_and_reports_later_conflicts() {
-        let conflict = row("F9", false, "exec", "thalvi-desktop hold-start");
+        let conflict = row("F9", false, "exec", "thalvi-desktop key 0 down");
         let hypr = Compositor::new(vec![conflict.clone()]);
         let (source, mut events, reports) = follow_start(&hypr, &Installed::default(), &defaults());
         let Ok(HoldSource::Refused { reason, watch }) = source else {
@@ -1108,10 +1217,7 @@ mod tests {
         hypr.binds.lock().unwrap().clear();
         events.write_all(b"configreloaded>>\n").unwrap();
         assert_eq!(reports.recv_timeout(WAIT).unwrap(), HoldReport::Working);
-        assert_eq!(
-            hypr.bound(),
-            bound_by_thalvi(EXE, &[("F9", "hold"), ("F10", "write")])
-        );
+        assert_eq!(hypr.bound(), bound_by_thalvi(EXE, &defaults()));
         // An already-bound watch reports success even if the compositor kept its binds.
         events.write_all(b"configreloaded>>\n").unwrap();
         assert_eq!(reports.recv_timeout(WAIT).unwrap(), HoldReport::Working);
@@ -1119,7 +1225,7 @@ mod tests {
         *hypr.binds.lock().unwrap() = vec![conflict];
         events.write_all(b"configreloaded>>\n").unwrap();
         assert_eq!(reports.recv_timeout(WAIT).unwrap(), HoldReport::Problem(
-            "Hyprland already binds F9 to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start and write-end lines from hyprland.conf, or quit the other Thalvi that holds them. The hold keys do not work until that is fixed and Hyprland reloads its config again.".to_owned()
+            "Hyprland already binds F9 to Thalvi with binds this Thalvi did not add, so one press would start two holds. Remove the hold-start, hold-end, write-start, write-end and key lines from hyprland.conf, or quit the other Thalvi that holds them. The hold keys do not work until that is fixed and Hyprland reloads its config again.".to_owned()
         ));
         assert_eq!(&hypr.commands()[before..], ["hyprctl -j binds"]);
         assert_eq!(hypr.bound().len(), 1);

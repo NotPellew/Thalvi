@@ -768,6 +768,7 @@ impl Publisher {
                 }
                 state.view.engine = engine.clone();
             }),
+            Feedback::KeyRefused(refusal) => publisher.refused(refusal),
             Feedback::StreamingHoldReleased => {
                 let mut state = publisher
                     .state
@@ -1521,7 +1522,7 @@ impl<S: Rig> Runner<S> {
                 self.end_unopened_feed();
                 Flow::Continue
             }
-            Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Hold)) => {
+            Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Key)) => {
                 Box::pin(self.capture()).await
             }
             Woke::Trigger(Err(error)) => {
@@ -1626,7 +1627,7 @@ impl<S: Rig> Runner<S> {
                 let _ = reply.send(result);
             }
             Control::RestartIfIdle(restart) => {
-                let held = self.key_state.borrow().down;
+                let held = self.key_state.borrow().is_down();
                 return answer_restart(restart, self.paused, held, *self.feeding.borrow());
             }
             Control::Quit => return Flow::Quit,
@@ -2260,7 +2261,7 @@ async fn while_delivering<T>(
 }
 
 fn report_refusal(recorder: &Recorder, refusal: Refusal, count: u64) {
-    refusal.record(recorder, count);
+    refusal.record(recorder, count, None);
     println!("{}", refusal.notice());
 }
 
@@ -3173,8 +3174,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_lost_press_reaches_the_status_without_another_capture() {
+    async fn a_refused_press_reaches_the_status_without_another_capture() {
         use thalvi_desktop::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
+        use thalvi_desktop::hold::{Action, KeyBind, KeyMode, KeyName};
         use thalvi_desktop::recognizer::FakeRecognizer;
 
         LocalSet::new().run_until(async {
@@ -3203,7 +3205,18 @@ mod tests {
             input.set(true);
             input.set(false);
             tokio::time::timeout(Duration::from_secs(5), status.changed()).await.unwrap().unwrap();
-            assert!(matches!(&*status.borrow(), Status::Failed { notice, .. } if notice == Refusal::TooQuick.notice()));
+            assert!(matches!(
+                &*status.borrow(),
+                Status::Failed { notice, headline, .. }
+                    if notice == Refusal::TooQuick.notice() && headline == Refusal::TooQuick.headline()
+            ));
+            publisher.mode(Mode::Idle);
+            input.key(0, &KeyBind::new(Action::Dictate, KeyMode::Stop, KeyName::f9()), true);
+            tokio::time::timeout(Duration::from_secs(5), status.wait_for(|current| matches!(
+                current,
+                Status::Failed { notice, headline, .. }
+                    if notice == Refusal::NothingToStop.notice() && headline == Refusal::NothingToStop.headline()
+            ))).await.unwrap().unwrap();
             listening.abort();
             let _ = listening.await;
 
@@ -3535,7 +3548,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert!(
-                    matches!(trigger, Ok(WakeTrigger::Hold)),
+                    matches!(trigger, Ok(WakeTrigger::Key)),
                     "a fresh press dictates"
                 );
             })
@@ -5902,7 +5915,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum KeptFeed {
         Paused,
-        HoldKey,
+        KeyName,
         Retry,
         Connected,
     }
@@ -5928,13 +5941,13 @@ mod tests {
     async fn scripted_feed_keeps_pause_keys_retry_and_a_connected_microphone() {
         for case in [
             KeptFeed::Paused,
-            KeptFeed::HoldKey,
+            KeptFeed::KeyName,
             KeptFeed::Retry,
             KeptFeed::Connected,
         ] {
             let label = match case {
                 KeptFeed::Paused => "paused",
-                KeptFeed::HoldKey => "hold key",
+                KeptFeed::KeyName => "hold key",
                 KeptFeed::Retry => "retry",
                 KeptFeed::Connected => "connected",
             };
@@ -5979,7 +5992,7 @@ mod tests {
                             assert!(script.audio.borrow().active.is_none(), "{label}");
                             script.stop().await;
                         }
-                        KeptFeed::HoldKey => {
+                        KeptFeed::KeyName => {
                             let key = script.link.hold_input();
                             key.set(true);
                             key.set(false);

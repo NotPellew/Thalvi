@@ -9,7 +9,9 @@ import type {
   Ending,
   HistoryEntry,
   HistoryOutcome,
-  HoldKeyDefaults,
+  KeyBind,
+  KeyDefaults,
+  KeyMode,
   Learning,
   ScriptActionKind,
   ScriptSettings,
@@ -63,7 +65,7 @@ export interface PageContext {
   /** Why this desktop cannot match app styles, or null where it can. */
   appStylesUnavailable: string | null;
   /** The keys this desktop starts with. */
-  holdKeyDefaults: HoldKeyDefaults;
+  keyDefaults: KeyDefaults;
   /** Whether the OS starts Thalvi at login, or why that could not be read. */
   startAtLogin: SwitchRead;
   /** Whether Thalvi is in the app menu, or why that could not be read. */
@@ -696,17 +698,17 @@ function learning({ settings, controls, backend, apply, reloadSettings }: PageCo
   return { switchRow, suggestions: list };
 }
 
-/** The Wake words switch: off, Thalvi keeps listening but only the hold keys start a capture. */
+/** The Wake words switch: off, Thalvi keeps listening but only keybinds start a capture. */
 function wakeSwitch({ settings, controls, backend, apply }: PageContext): HTMLElement[] {
   const state = el("small", { class: "unit", role: "status" });
   let paused = false;
   let input: HTMLInputElement | null = null;
   const show = (): void => {
     state.textContent = paused
-      ? "Paused: neither the hold keys nor the wake words start anything."
+      ? "Paused: neither keybinds nor wake words start a capture."
       : input?.checked === true
         ? "Listening for the wake words and the hold keys."
-        : "Listening for the hold keys only.";
+        : "Listening for keybinds only.";
   };
   const toggle = controls.toggle(settings.wake.enabled, (wanted) => {
     input = toggle.field as HTMLInputElement;
@@ -729,7 +731,7 @@ function wakeSwitch({ settings, controls, backend, apply }: PageContext): HTMLEl
   show();
   return [
     group("Wake words"),
-    row("Wake words", "Off: only the hold keys start a dictation.", {
+    row("Wake words", "Off: only keybinds start a dictation.", {
       node: el("span", { class: "stack" }, toggle.node, state),
       field: input,
     }),
@@ -751,92 +753,212 @@ function keyLabel(text: string): string {
 }
 
 /** Why `recorded` was refused, in the words of the rows; a name that is no key at all can't be used, however it is spelled. */
-function holdKeyNotice(reason: string, recorded: string): string {
+function keyNotice(reason: string, recorded: string): string {
   if (reason.startsWith(`The key "${recorded}" is not a key name`)) {
-    return `${keyLabel(recorded)} can't be used as a hold key. Use a letter, a digit, Space or F1 to F12, alone or with Ctrl, Shift, Alt or Win.`;
+    return `${keyLabel(recorded)} can't be used as a key. Use a letter, a digit, Space or F1 to F12, alone or with Ctrl, Shift, Alt or Win.`;
   }
   return keyLabel(reason);
 }
 
-/** One hold key: the key in effect, a recorder that applies the next combination pressed, and a way back to the default. `notices` holds every hold key row's notice, which any new attempt clears. */
-function holdKeyRow(label: string, hint: string, field: "hold_key" | "write_key", { settings, apply, holdKeyDefaults }: PageContext, notices: HTMLElement[]): HTMLElement {
-  const shown = el("kbd", { class: "key", "aria-live": "polite" });
-  const problem = note();
-  // A key is watched as soon as it is applied, also during a capture.
-  const applied = el("small", { class: "applied", role: "status" });
-  notices.push(problem);
-  const clearNotices = (): void => {
-    applied.textContent = "";
-    for (const notice of notices) say(notice, "");
+/** Records the next key combination pressed on `window`; Escape or `cancel` ends it without one. */
+function recordKey(
+  start: HTMLButtonElement,
+  prompt: HTMLElement,
+  others: readonly HTMLElement[],
+  picked: (name: string) => void,
+  cancelled: () => void,
+): void {
+  const stop = (): void => {
+    window.removeEventListener("keydown", record, true);
+    start.removeEventListener("blur", cancel);
+    busy(start, false);
   };
-  const restore = button("Restore default", () => {
-    set(holdKeyDefaults[field]);
-  }, "quiet");
-  const change = button("Change…", () => {
-    clearNotices();
-    shown.textContent = "Press the new key. Escape cancels.";
-    busy(change, true);
-    restore.disabled = true;
-    change.focus();
-    const stop = (): void => {
-      window.removeEventListener("keydown", record, true);
-      change.removeEventListener("blur", cancel);
-      busy(change, false);
-    };
-    const cancel = (): void => {
+  const cancel = (): void => {
+    stop();
+    cancelled();
+  };
+  const record = (event: KeyboardEvent): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    const name = recordedKey(event);
+    if (event.code === "Escape") cancel();
+    else if (name !== null) {
       stop();
-      render();
-    };
-    const record = (event: KeyboardEvent): void => {
-      event.preventDefault();
-      event.stopPropagation();
-      const name = recordedKey(event);
-      if (event.code === "Escape") cancel();
-      else if (name !== null) {
-        stop();
-        set(name);
-      }
-    };
-    window.addEventListener("keydown", record, true);
-    change.addEventListener("blur", cancel);
-  });
-
-  function render(): void {
-    shown.textContent = keyLabel(settings[field]);
-    const isDefault = settings[field] === holdKeyDefaults[field];
-    if (isDefault && document.activeElement === restore) change.focus();
-    restore.disabled = isDefault;
-  }
-
-  function set(name: string): void {
-    clearNotices();
-    apply((next) => {
-      next[field] = name;
-    }, { explain: (reason) => holdKeyNotice(reason, name) }).then(() => {
-      applied.textContent = APPLIED_TEXT;
-      render();
-    }, (error: unknown) => {
-      say(problem, errorText(error));
-      render();
-    });
-  }
-
-  render();
-  return row(label, hint, el("span", { class: "stack" }, el("span", { class: "trow" }, shown, change, restore), applied, problem));
+      picked(name);
+    }
+  };
+  for (const notice of others) say(notice, "");
+  prompt.textContent = "Press the new key. Escape cancels.";
+  busy(start, true);
+  start.focus();
+  window.addEventListener("keydown", record, true);
+  start.addEventListener("blur", cancel);
 }
 
-/** Where the desktop gives the app no way to see a key, the group says why and has no controls. */
-function holdKeys(context: PageContext): HTMLElement[] {
-  const { holdKeyUnavailable } = context;
+const KEY_ACTIONS: readonly (readonly [KeyBind["action"], string])[] = [
+  ["dictate", "Dictate"],
+  ["write", "Write"],
+];
+const KEY_MODES: readonly (readonly [KeyMode, string])[] = [
+  ["hold", "Hold"],
+  ["toggle", "Toggle"],
+  ["start", "Start"],
+  ["stop", "Stop"],
+];
+const MODE_HINTS: Readonly<Record<KeyMode, string>> = {
+  hold: "Hold it, speak, let go to paste.",
+  toggle: "Press to start, press again to stop and paste.",
+  start: "Press to start.",
+  stop: "Press to stop and paste.",
+};
+
+/** One keybind: its action, mode, key and removal, and the errors that this row's changes were refused with. */
+function keybindRow(
+  index: number,
+  bind: KeyBind,
+  { settings, controls, apply }: PageContext,
+  rebuilt: () => void,
+): HTMLElement {
+  const shown = el("kbd", { class: "key", "aria-live": "polite" }, keyLabel(bind.key));
+  const hint = el("small", {}, MODE_HINTS[bind.mode]);
+  const applied = el("small", { class: "applied keybind-applied", role: "status" });
+  const problem = note();
+  problem.classList.add("keybind-note");
+  const clear = (): void => {
+    applied.textContent = "";
+    say(problem, "");
+  };
+  const change = (edit: (row: KeyBind) => void, explain?: (reason: string) => string): Promise<void> => {
+    clear();
+    return apply((next) => {
+      const row = next.keys[index];
+      if (row === undefined) return;
+      edit(row);
+    }, explain === undefined ? {} : { explain }).then(() => {
+      applied.textContent = APPLIED_TEXT;
+      shown.textContent = keyLabel(settings.keys[index]?.key ?? bind.key);
+      hint.textContent = MODE_HINTS[settings.keys[index]?.mode ?? bind.mode];
+    });
+  };
+  const failed = (error: unknown): void => {
+    say(problem, errorText(error));
+    const saved = settings.keys[index] ?? bind;
+    action.field.value = saved.action;
+    mode.field.value = saved.mode;
+    shown.textContent = keyLabel(saved.key);
+  };
+  const action = controls.draftSelect(KEY_ACTIONS, bind.action, (value) => {
+    void change((row) => {
+      row.action = value;
+    }).catch(failed);
+  }, "Action");
+  const mode = controls.draftSelect(KEY_MODES, bind.mode, (value) => {
+    void change((row) => {
+      row.mode = value;
+    }).catch(failed);
+  }, "Mode");
+  const pick = button("Change…", () => {
+    recordKey(
+      pick,
+      shown,
+      [problem, applied],
+      (name) => {
+        void change((row) => {
+          row.key = name;
+        }, (reason) => keyNotice(reason, name)).catch(failed);
+      },
+      () => {
+        shown.textContent = keyLabel(settings.keys[index]?.key ?? bind.key);
+      },
+    );
+  });
+  const remove = button("Remove", () => {
+    clear();
+    apply((next) => {
+      next.keys.splice(index, 1);
+    }).then(rebuilt, (error: unknown) => {
+      say(problem, errorText(error));
+    });
+  }, "quiet");
+  return el(
+    "div",
+    { class: "row", "data-label": `key ${String(index + 1)}` },
+    el("div", { class: "what" }, el("span", {}, `Key ${String(index + 1)}`), hint),
+    el("div", { class: "ctl" }, el("span", { class: "stack" },
+      el("span", { class: "trow" }, action.node, mode.node, shown, pick, remove),
+      applied,
+      problem,
+    )),
+  );
+}
+
+/** The list of keybinds: each row's action, mode and key, adding a row, and the desktop's defaults. */
+function keybinds(context: PageContext): HTMLElement[] {
+  const { holdKeyUnavailable, settings, apply, keyDefaults } = context;
   if (holdKeyUnavailable !== null) {
     const why = (): HTMLElement => unavailable({ kind: "unavailable", reason: holdKeyUnavailable, line: null });
-    return [group("Hold keys"), row("Dictate key", null, why()), row("Write key", null, why())];
+    return [group("Keys"), row("Keys", null, why())];
   }
-  const notices: HTMLElement[] = [];
+  const list = el("div", { class: "keys" });
+  const applied = el("small", { class: "applied keybind-applied", role: "status" });
+  const problem = note();
+  problem.classList.add("keybind-note");
+  const render = (focus: number | null = null): void => {
+    const rows = settings.keys.map((bind, index) => keybindRow(index, bind, context, () => {
+      render(settings.keys.length === 0 ? null : Math.min(index, settings.keys.length - 1));
+      if (settings.keys.length === 0) add.focus();
+    }));
+    if (rows.length === 0) {
+      rows.push(row("Keys", "No keys yet. Add one to dictate with the keyboard.", el("span", {})));
+    }
+    list.replaceChildren(...rows);
+    if (focus !== null) {
+      const row = list.querySelector<HTMLElement>(`[data-label="key ${String(focus + 1)}"]`);
+      Array.from(row?.querySelectorAll("button") ?? []).find((button) => button.textContent === "Change…")?.focus();
+    }
+  };
+  const add = button("+ Add keybind", () => {
+    for (const notice of [problem, applied]) say(notice, "");
+    recordKey(
+      add,
+      applied,
+      [problem],
+      (name) => {
+        applied.textContent = "";
+        apply((next) => {
+          next.keys.push({ action: "dictate", mode: "hold", key: name });
+        }, { explain: (reason) => keyNotice(reason, name) }).then(
+          () => {
+            render(settings.keys.length - 1);
+          },
+          (error: unknown) => {
+            say(problem, errorText(error));
+          },
+        );
+      },
+      () => {
+        applied.textContent = "";
+      },
+    );
+  });
+  const restore = button("Restore defaults", () => {
+    for (const notice of [problem, applied]) say(notice, "");
+    apply((next) => {
+      next.keys = keyDefaults.keys.map((bind) => ({ ...bind }));
+    }).then(
+      () => {
+        render(0);
+      },
+      (error: unknown) => {
+        say(problem, errorText(error));
+      },
+    );
+  }, "quiet");
+  render();
   return [
-    group("Hold keys"),
-    holdKeyRow("Dictate key", "Hold it, speak, let go to paste.", "hold_key", context, notices),
-    holdKeyRow("Write key", "Hold it to write the words out, then paste.", "write_key", context, notices),
+    group("Keys"),
+    list,
+    row("Add a keybind", "Any number of keys can work one action.", el("span", { class: "stack" }, add, restore, applied, problem)),
   ];
 }
 
@@ -3039,7 +3161,7 @@ function app(context: PageContext): HTMLElement[] {
 }
 
 function listening(context: PageContext): HTMLElement[] {
-  return [...microphone(context), ...wakeSwitch(context), ...wakeHeads(context), ...holdKeys(context), ...limits(context)];
+  return [...microphone(context), ...wakeSwitch(context), ...wakeHeads(context), ...keybinds(context), ...limits(context)];
 }
 
 const PAGES: readonly (readonly [string, string, (context: PageContext, speech: SpeechRows) => HTMLElement[]])[] = [

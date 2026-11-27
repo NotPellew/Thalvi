@@ -67,8 +67,10 @@ const SETTINGS: Settings = {
   look: "gunmetal",
   update_channel: "stable",
   recordings: { metrics: true, text: false, audio: false },
-  hold_key: "Alt+KeyZ",
-  write_key: "Alt+KeyX",
+  keys: [
+    { action: "dictate", mode: "hold", key: "Alt+KeyZ" },
+    { action: "write", mode: "hold", key: "Alt+KeyX" },
+  ],
   writing: null,
   writing_default_prompt: "Write what I dictated as clear text.",
   history: { enabled: true, limit: 200 },
@@ -320,7 +322,13 @@ export function fakeBackend(params: URLSearchParams): Backend {
     getHoldKeyUnavailable: () => Promise.resolve(null),
     getAppStylesUnavailable: () => Promise.resolve(null),
     getCurrentApp: () => Promise.resolve({ app: "firefox", title: "Gmail" }),
-    getHoldKeyDefaults: () => Promise.resolve({ hold_key: "Alt+KeyZ", write_key: "Alt+KeyX" }),
+    getKeyDefaults: () =>
+      Promise.resolve({
+        keys: [
+          { action: "dictate", mode: "hold", key: "Alt+KeyZ" },
+          { action: "write", mode: "hold", key: "Alt+KeyX" },
+        ],
+      }),
     getStartAtLogin: () =>
       Promise.resolve(
         hyprland

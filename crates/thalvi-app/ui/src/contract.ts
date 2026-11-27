@@ -238,10 +238,8 @@ export interface Settings {
   themes?: Themes;
   update_channel: UpdateChannel;
   recordings: { metrics: boolean; text: boolean; audio: boolean };
-  /** The key held to dictate, such as `Alt+KeyZ`; only Windows reads it. */
-  hold_key: string;
-  /** The key held to dictate and have the words written out, such as `Alt+KeyX`; only Windows reads it. */
-  write_key: string;
+  /** The keys Settings → Keys lists, in order. */
+  keys: KeyBind[];
   /** The chat endpoint that writes dictation out; null until one is set up. */
   writing: WritingSettings | null;
   /** The writing prompt used until the user sets their own; read only. */
@@ -419,7 +417,7 @@ export interface Backend {
   /** The app focused before Settings, or the last bound target; null when neither is known. */
   getCurrentApp(): Promise<CurrentApp | null>;
   /** The keys this desktop starts with, which Settings restores. */
-  getHoldKeyDefaults(): Promise<HoldKeyDefaults>;
+  getKeyDefaults(): Promise<KeyDefaults>;
   /** Whether the OS starts Thalvi at login, read from the OS, and why Thalvi could not put its entry back on start. */
   getStartAtLogin(): Promise<SwitchState>;
   /** Adds or removes the startup entry; rejects unless the OS then holds it as asked. */
@@ -468,10 +466,23 @@ export interface Backend {
   openReleaseNotes(): Promise<void>;
 }
 
-/** The dictate and write keys a desktop starts with, named as in `Settings`. */
-export interface HoldKeyDefaults {
-  hold_key: string;
-  write_key: string;
+/** The key rows a desktop starts with, named as in `Settings`. */
+export interface KeyDefaults {
+  keys: KeyBind[];
+}
+
+/** What a keybind starts: the words pasted as dictated, or written out first. */
+export type KeyAction = "dictate" | "write";
+
+/** How a keybind works: held, pressed to start or end, or only starting or only ending. */
+export type KeyMode = "hold" | "toggle" | "start" | "stop";
+
+/** One row of Settings → Keys. */
+export interface KeyBind {
+  action: KeyAction;
+  mode: KeyMode;
+  /** The physical key, such as `Alt+KeyZ` or `F9`. */
+  key: string;
 }
 
 /** An OS setting Thalvi can switch, or the reason it offers no switch and a line to do it by hand. */

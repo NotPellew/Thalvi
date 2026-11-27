@@ -44,7 +44,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 use ::windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
 use super::{Hwnd, Identity, KeyEvent, Process, Win32};
-use crate::hold::{self, HoldChange, HoldHooks, HoldKey, HoldKind, Verdict};
+use crate::hold::{self, HoldChange, HoldHooks, KeyBind, Verdict};
 use crate::host::{HoldWatch, HostError};
 
 /// The live Windows desktop.
@@ -195,11 +195,12 @@ fn input(event: KeyEvent) -> INPUT {
 /// or Win so the focused app does not take that release for a lone press that opens its menu.
 const MASK_KEY: u16 = 0xE8;
 
-type OnChange = Box<dyn Fn(HoldKind, HoldChange) + Send>;
+type OnChange = Box<dyn Fn(usize, HoldChange) + Send>;
 
 /// What the keyboard hook procedure works with; it runs on the thread that installed the hook.
 struct Rules {
     hooks: HoldHooks,
+    rows: usize,
     on_change: OnChange,
 }
 
@@ -273,8 +274,8 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 let mut rules = rules.try_borrow_mut().ok()?;
                 let rules = rules.as_mut()?;
                 let (verdict, changes) = rules.hooks.on_event(event, physically_down);
-                for (kind, change) in changes {
-                    (rules.on_change)(kind, change);
+                for (row, change) in changes {
+                    (rules.on_change)(row, change);
                 }
                 Some(verdict)
             });
@@ -311,16 +312,18 @@ impl Drop for HookThread {
 
 /// Starts the keyboard hook for `keys` on a thread of its own, reporting each change to `on_change`.
 pub(super) fn watch_hold_keys(
-    keys: Vec<(HoldKind, HoldKey)>,
+    keys: Vec<KeyBind>,
     on_change: OnChange,
 ) -> Result<HoldWatch, HostError> {
     let (ready_tx, ready) = std::sync::mpsc::channel();
     let join = std::thread::Builder::new()
         .name("thalvi-hold-key".to_owned())
         .spawn(move || {
+            let rows = keys.len();
             RULES.with(|rules| {
                 *rules.borrow_mut() = Some(Rules {
-                    hooks: HoldHooks::new(keys),
+                    hooks: HoldHooks::new(&keys),
+                    rows,
                     on_change,
                 });
             });
@@ -346,8 +349,9 @@ pub(super) fn watch_hold_keys(
             RULES.with(|rules| {
                 if let Some(rules) = rules.borrow_mut().take() {
                     // A key still held when watching ends must not stay down.
-                    (rules.on_change)(HoldKind::Dictate, HoldChange::Up);
-                    (rules.on_change)(HoldKind::Write, HoldChange::Up);
+                    for row in 0..rules.rows {
+                        (rules.on_change)(row, HoldChange::Up);
+                    }
                 }
             });
         })
