@@ -46,12 +46,6 @@ pub trait FrameDecoder: Send + 'static {
     /// A new stretch of text begins; what the model heard stays its acoustic context.
     fn next_segment(&mut self);
 
-    /// Whether the decoder holds the end of its audio back: its partials would drop the last words
-    /// until it has heard the silence after them.
-    fn holds_text_for_end(&self) -> bool {
-        false
-    }
-
     /// Whether queued frames may be pushed together so a sliding-window encoder catches up in one
     /// pass instead of one per step.
     fn batches_frames(&self) -> bool {
@@ -160,7 +154,7 @@ pub struct Revising<D> {
     shown: String,
     /// The voice detector heard speech since the decoder last looked.
     spoke: bool,
-    recent: std::collections::VecDeque<Frame>,
+    vad: VadDetector,
 }
 
 impl<D: SnapshotDecoder> Revising<D> {
@@ -175,7 +169,7 @@ impl<D: SnapshotDecoder> Revising<D> {
             zeros: 0,
             shown: String::new(),
             spoke: false,
-            recent: std::collections::VecDeque::new(),
+            vad: VadDetector::new(),
         }
     }
 
@@ -249,22 +243,9 @@ impl<D: SnapshotDecoder> Revising<D> {
 
 impl<D: SnapshotDecoder> SpeechStream for Revising<D> {
     fn accept(&mut self, frame: &Frame) -> Result<Vec<RecognizerEvent>, RecognizerError> {
-        self.recent.push_back(*frame);
-        if self.recent.len() > 10 {
-            self.recent.pop_front();
-        }
-        // The VAD handle cannot cross threads; replay a bounded history on this worker instead.
-        let mut vad = VadDetector::new();
-        let mut speech = false;
-        for frame in &self.recent {
-            speech = vad.speech(frame, false);
-        }
+        let speech = self.vad.speech(frame, false);
         let samples: Vec<f32> = frame.iter().map(|s| f32::from(*s) / PCM_SCALE).collect();
         self.push(&samples, speech)
-    }
-
-    fn holds_text_for_end(&self) -> bool {
-        true
     }
 
     fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
@@ -323,10 +304,6 @@ impl<D: FrameDecoder> SpeechStream for Segments<D> {
         self.decoder.batches_frames()
     }
 
-    fn holds_text_for_end(&self) -> bool {
-        self.decoder.holds_text_for_end()
-    }
-
     fn end_input(&mut self) -> Result<Vec<RecognizerEvent>, RecognizerError> {
         let pending = self.decoder.lookahead(&vec![0.0; self.lookahead_samples])?;
         self.take(pending);
@@ -347,6 +324,7 @@ impl<D: FrameDecoder> SpeechStream for Segments<D> {
 mod tests {
     use super::*;
     use crate::frame::FRAME_SAMPLES;
+    use crate::vad::tests::{hiss, voiced};
 
     type ScriptedSnapshot = (bool, usize, Vec<(usize, usize)>);
 
@@ -574,6 +552,123 @@ mod tests {
                 "{name}"
             );
             assert!(stream.decoder.script.is_empty(), "{name}");
+        }
+    }
+
+    fn synthetic_capture(script: &str) -> Vec<Frame> {
+        let mut state = 1;
+        let mut offset = 0;
+        script
+            .chars()
+            .flat_map(|mark| std::iter::repeat_n(mark, 8))
+            .map(|mark| match mark {
+                'S' => {
+                    let frame = voiced(offset);
+                    offset += FRAME_SAMPLES;
+                    frame
+                }
+                'q' => hiss(50, &mut state),
+                '.' => [0; FRAME_SAMPLES],
+                _ => panic!("unknown fixture mark {mark}"),
+            })
+            .collect()
+    }
+
+    /// The fixture's voiced frames peak above 0.08 and its room noise below 0.002.
+    struct SampleDecoder;
+
+    impl SnapshotDecoder for SampleDecoder {
+        fn snapshot(
+            &mut self,
+            audio: &[f32],
+            _speech: bool,
+        ) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            self.finish(audio)
+        }
+
+        fn finish(&mut self, audio: &[f32]) -> Result<Vec<Vec<usize>>, RecognizerError> {
+            Ok(audio
+                .chunks(FRAME_SAMPLES)
+                .map(|frame| {
+                    if frame.iter().any(|sample| sample.abs() > 0.01) {
+                        vec![0]
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect())
+        }
+
+        fn next_segment(&mut self) {}
+    }
+
+    fn finals(events: Vec<RecognizerEvent>) -> impl Iterator<Item = String> {
+        events.into_iter().filter_map(|event| match event {
+            RecognizerEvent::Final(text) => Some(text),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn persistent_vad_preserves_the_segments_of_the_ten_frame_replay() {
+        for (script, stretches) in [
+            ("SS.", 1),
+            ("S..............S.", 2),
+            ("Sqq", 1),
+            ("qS.", 1),
+            ("S.", 1),
+            ("q.S.", 1),
+            (
+                "..........SSSSqqqqSSSSqq......................................",
+                2,
+            ),
+        ] {
+            let capture = synthetic_capture(script);
+            let pieces = Arc::new(vec!["▁one".to_owned()]);
+            let mut current = Revising::new(SampleDecoder, Arc::clone(&pieces));
+            let mut replay = Revising::new(SampleDecoder, pieces);
+            let mut current_finals = Vec::new();
+            let mut replay_finals = Vec::new();
+            let mut current_flags = String::new();
+            let mut replay_flags = String::new();
+            let mut differences = Vec::new();
+
+            for (index, frame) in capture.iter().enumerate() {
+                current_finals.extend(finals(current.accept(frame).unwrap()));
+                // Every frame has samples, so only a speech decision leaves quiet at zero.
+                let current_speech = current.quiet == 0;
+
+                let mut vad = VadDetector::new();
+                let mut replay_speech = false;
+                for prior in &capture[index.saturating_sub(9)..=index] {
+                    replay_speech = vad.speech(prior, false);
+                }
+                let samples: Vec<_> = frame
+                    .iter()
+                    .map(|sample| f32::from(*sample) / PCM_SCALE)
+                    .collect();
+                replay_finals.extend(finals(replay.push(&samples, replay_speech).unwrap()));
+
+                current_flags.push(if current_speech { 'S' } else { '.' });
+                replay_flags.push(if replay_speech { 'S' } else { '.' });
+                if current_speech != replay_speech {
+                    differences.push(index);
+                }
+            }
+
+            println!(
+                "{script}\nreplay:  {replay_flags}\ncurrent: {current_flags}\ndiffering frames: {differences:?}"
+            );
+            if script.starts_with("..........SSSS") {
+                assert!(
+                    !differences.is_empty(),
+                    "room noise must exercise adaptation"
+                );
+            }
+            current_finals.extend(finals(current.end_input().unwrap()));
+            replay_finals.extend(finals(replay.end_input().unwrap()));
+            assert_eq!(current_finals, replay_finals, "{script}");
+            assert_eq!(current_finals.len(), stretches, "{script}");
         }
     }
 }

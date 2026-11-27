@@ -1,0 +1,6 @@
+/target/
+/artifacts/
+/coverage/
+# Seeds are committed; what libFuzzer adds to a corpus is not.
+/corpus/*/*
+!/corpus/*/seed-*

@@ -1,0 +1,15 @@
+{
+    "apps": {
+        "t3": {"classes": [" T3 Code "], "executables": ["T3 Code.exe"],
+               "input_keys": ["Ctrl", "SHIFT", "k"]},
+        "term": {"executables": ["wt.exe"]}
+    },
+    "scripts": [
+        {"phrase": "  Switch   To T3 ", "action": "focus_app", "destination": " t3 ",
+         "label": " T3 Code "},
+        {"phrase": "project", "action": "open_url",
+         "destination": " https://github.com/NotPellew/Thalvi "},
+        {"phrase": "message the demo saying", "action": "discord_message",
+         "destination": "discord://discord.com/channels/@me/42"}
+    ]
+}

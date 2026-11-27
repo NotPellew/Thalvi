@@ -261,6 +261,12 @@ like `Overlay`, so they neither set nor clear `ended`; the tray switch and the S
 run on their own tasks and end no capture. No await, queue step or write to cancellation
 state is added, so the model actions and bounds are unchanged.
 
+For the revising VAD (#635), `LocalRecognizer::connect` hands the loaded model to the
+worker, which builds the stream before reading any frames. The model layout supplies
+`holds_text_for_end` when the session is created. Connect still awaits the same load
+and reports a spawn failure the same way. Worker initialization adds no await, ending
+control, or path to delivery, so `Loaded` and `LoadFailed` keep their meaning.
+
 The two checked invariants have these exact meanings:
 
 - `NoDeliveryAfterStop`: a control ending this capture before the final empty

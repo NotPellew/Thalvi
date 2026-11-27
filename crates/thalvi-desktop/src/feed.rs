@@ -5,9 +5,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::time::{Instant, sleep, sleep_until};
+use tokio::time::{Instant, sleep_until};
 
 use crate::audio::{AudioError, Framer, InputGate};
 use crate::engine::FrameSource;
@@ -379,23 +378,6 @@ fn accepted(
     (epoch == gate.state().1 && played_generation == *generation.borrow()).then_some(queued)
 }
 
-impl<S: FrameSource> Fed<S> {
-    /// The next clip frame waiting now, if it still belongs to this gate and feed.
-    fn take_played(&mut self) -> Result<Option<Queued>, AudioError> {
-        loop {
-            match self.played.try_recv() {
-                Ok(played) => {
-                    if let Some(queued) = accepted(&self.gate, &self.generation, &played) {
-                        return Ok(Some(queued));
-                    }
-                }
-                Err(TryRecvError::Empty) => return Ok(None),
-                Err(TryRecvError::Disconnected) => return Err(AudioError::Closed),
-            }
-        }
-    }
-}
-
 async fn next_microphone<S: FrameSource>(microphone: &mut Option<S>) -> Result<Queued, AudioError> {
     match microphone.as_mut() {
         Some(microphone) => microphone.next().await,
@@ -405,22 +387,9 @@ async fn next_microphone<S: FrameSource>(microphone: &mut Option<S>) -> Result<Q
 
 impl<S: FrameSource> FrameSource for Fed<S> {
     async fn next(&mut self) -> Result<Queued, AudioError> {
+        let has_microphone = self.microphone.is_some();
+        let mut silence_at = None;
         loop {
-            if self.microphone.is_none() {
-                if let Some(queued) = self.take_played()? {
-                    return Ok(queued);
-                }
-                if !*self.feeding.borrow() {
-                    sleep(FRAME_TIME).await;
-                    if let Some(queued) = self.take_played()? {
-                        return Ok(queued);
-                    }
-                    if !*self.feeding.borrow() && self.gate.is_enabled() {
-                        return Ok(Queued::now([0; FRAME_SAMPLES]));
-                    }
-                    continue;
-                }
-            }
             tokio::select! {
                 biased;
                 played = self.played.recv() => {
@@ -431,12 +400,23 @@ impl<S: FrameSource> FrameSource for Fed<S> {
                         return Ok(queued);
                     }
                 }
-                frame = next_microphone(&mut self.microphone), if self.microphone.is_some() => {
+                frame = next_microphone(&mut self.microphone), if has_microphone => {
                     if frame.as_ref().is_err() || !*self.feeding.borrow() {
                         return frame;
                     }
                 }
-                _ = self.clip.changed(), if self.microphone.is_none() => {}
+                _ = self.clip.changed(), if !has_microphone => {
+                    silence_at = None;
+                }
+                () = async {
+                    let deadline = silence_at.get_or_insert_with(|| Instant::now() + FRAME_TIME);
+                    sleep_until(*deadline).await;
+                }, if !has_microphone && !*self.feeding.borrow() => {
+                    if !*self.feeding.borrow() && self.gate.is_enabled() {
+                        return Ok(Queued::now([0; FRAME_SAMPLES]));
+                    }
+                    silence_at = None;
+                }
             }
         }
     }
@@ -449,8 +429,42 @@ impl<S: FrameSource> FrameSource for Fed<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::Frames;
 
     const MAX: Duration = Duration::from_secs(60);
+
+    #[tokio::test(start_paused = true)]
+    async fn file_only_source_yields_silence_at_frame_pace() {
+        let feeder = Feeder::new(&InputGate::default(), Arc::new(watch::channel(false).0));
+        let mut source = feeder.without_microphone::<Frames>();
+        let start = Instant::now();
+
+        for frame in 1..=3 {
+            assert_eq!(source.next().await.unwrap().frame, [0; FRAME_SAMPLES]);
+            assert_eq!(Instant::now() - start, FRAME_TIME * frame);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn file_only_source_yields_a_new_feed_before_the_silence_deadline() {
+        let feeder = Feeder::new(&InputGate::default(), Arc::new(watch::channel(false).0));
+        let mut source = feeder.without_microphone::<Frames>();
+        let first_frame = [1_000; FRAME_SAMPLES];
+        let (feed, _ended) = Feed::new(Clip::from_frames(vec![first_frame]));
+        let start = Instant::now();
+
+        let (frame, ()) = tokio::join!(
+            biased;
+            tokio::time::timeout_at(start + FRAME_TIME, source.next()),
+            async {
+                sleep_until(start + FRAME_TIME / 2).await;
+                feeder.start(feed);
+            },
+        );
+
+        assert_eq!(frame.unwrap().unwrap().frame, first_frame);
+        assert!(Instant::now() < start + FRAME_TIME);
+    }
 
     /// A WAV file around `data`, with `extra` chunks before the data.
     fn wav(tag: u16, channels: u16, rate: u32, bits: u16, extra: &[u8], data: &[u8]) -> Vec<u8> {

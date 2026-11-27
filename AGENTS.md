@@ -150,7 +150,10 @@ Locally, run checks in three stages; none replaces a required CI result.
   - A gate this OS can't run is reported as skipped, never passed.
 - **After pushing:** PR CI runs the steps the changed paths affect, and
   `.github/workflows/heavy.yml` runs every gate on `main`, with Settings
-  exploration, the GNOME AppImage check and mutation testing.
+  exploration, the GNOME AppImage check, a short run of each fuzz target and mutation testing.
+
+Fuzz targets live in `fuzz/fuzz_targets/`, a nightly-only workspace of its own; run one with
+`cargo fuzz run <target> -- -max_total_time=300` from `fuzz/`, under `dev-job`.
 
 Run mutation testing locally only when an issue explicitly asks for it, and
 only `--in-diff` against the base with no desktop session and a throwaway

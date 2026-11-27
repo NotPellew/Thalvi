@@ -68,6 +68,10 @@ Branches, CI, checks and releases.
   under a paused page clock, with a fixed seed in `gates desktop-ui` and a random one in the heavy run (18 Nov 2026).
   Why: the prototype found #454, #531 and #533–#536 on its own at about 22 actions a second, and every shrunk trace replayed 3 of 3.
   Rejected: Bombadil 0.7.10, which takes no seed and whose shrinker replayed #454 in 0 of 3 tries.
+- **Fuzz targets for code that reads outside input.** `fuzz/` is a cargo-fuzz workspace of its own on a pinned nightly, one
+  target per entry point (spoken commands, spoken numbers, the settings file, recognizer frames), line-based text input so
+  seeds are real inputs from tests; Heavy runs each for 60 s (27 Nov 2026, #732). Why: properties check rules someone wrote down,
+  not malformed input. Rejected: a member of the root workspace (nightly for `cargo lint`), `arbitrary` structs (seeds unreadable).
 - **Repeatable property cases, separate exploration.** Cargo defaults to 256 ChaCha cases with a fixed seed;
   exploratory runs override and record the seed, and failures become minimized regressions.
   Why: required checks need replayable inputs while exploration needs new ones. Rejected: fixed seeds alone.

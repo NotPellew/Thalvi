@@ -50,12 +50,13 @@ impl Default for VadDetector {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::frame::FRAME_SAMPLES;
 
-    /// A 140 Hz buzz with harmonics and a slow swell, standing in for a voice.
-    fn voiced(offset: usize) -> Frame {
+    /// A 140 Hz buzz with harmonics and a slow swell, standing in for a voice; `offset` keeps
+    /// the phase continuous across frames.
+    pub(crate) fn voiced(offset: usize) -> Frame {
         std::array::from_fn(|i| {
             let t = f64::from(u32::try_from(i + offset).expect("small index")) / 16_000.0;
             let swell = 0.6 + 0.4 * (2.0 * std::f64::consts::PI * 4.0 * t).sin();
@@ -73,7 +74,8 @@ mod tests {
         })
     }
 
-    fn hiss(amplitude: i32, state: &mut u32) -> Frame {
+    /// Room noise: uniformly random samples in `-amplitude..=amplitude`.
+    pub(crate) fn hiss(amplitude: i32, state: &mut u32) -> Frame {
         std::array::from_fn(|_| {
             *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let span = u32::try_from(2 * amplitude + 1).expect("positive");
