@@ -1744,53 +1744,71 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_is_a_model_only_when_all_four_files_are_in_it() {
-        let cases: [(&str, &[&str], Result<(), FolderError>); 7] = [
-            ("all", &FILES, Ok(())),
-            ("no-encoder", &FILES[1..], missing(&["encoder.int8.onnx"])),
+    fn a_folder_is_a_model_only_when_all_four_files_are_in_it_and_each_missing_one_is_named() {
+        // (tag, files present, names that are directories, the verdict, the message when it is a refusal)
+        let cases = [
+            ("all", &FILES[..], &[][..], Ok(()), ""),
+            (
+                "no-encoder",
+                &FILES[1..],
+                &[],
+                missing(&["encoder.int8.onnx"]),
+                "Missing required file: encoder.int8.onnx",
+            ),
             (
                 "no-decoder",
                 &[FILES[0], FILES[2], FILES[3]],
+                &[],
                 missing(&["decoder.int8.onnx"]),
+                "Missing required file: decoder.int8.onnx",
             ),
             (
                 "no-joiner",
                 &[FILES[0], FILES[1], FILES[3]],
+                &[],
                 missing(&["joiner.int8.onnx"]),
+                "Missing required file: joiner.int8.onnx",
             ),
-            ("no-tokens", &FILES[..3], missing(&["tokens.txt"])),
+            (
+                "no-tokens",
+                &FILES[..3],
+                &[],
+                missing(&["tokens.txt"]),
+                "Missing required file: tokens.txt",
+            ),
             (
                 "two-gone",
                 &[FILES[1], FILES[2]],
+                &[],
                 missing(&["encoder.int8.onnx", "tokens.txt"]),
+                "Missing required files: encoder.int8.onnx, tokens.txt",
             ),
             (
                 "empty",
                 &[],
+                &[],
                 missing(&[FILES[0], FILES[1], FILES[2], FILES[3]]),
+                "Missing required files: encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt",
+            ),
+            (
+                "dir-as-file",
+                &FILES[1..],
+                &[FILES[0]],
+                missing(&[FILES[0]]),
+                "Missing required file: encoder.int8.onnx",
             ),
         ];
-        for (tag, present, expected) in cases {
+        for (tag, present, directories, expected, message) in cases {
             let dir = folder_with(tag, present);
-            assert_eq!(check_folder(&dir), expected, "{tag}");
+            for name in directories {
+                std::fs::create_dir(dir.join(name)).unwrap();
+            }
+            let found = check_folder(&dir);
+            assert_eq!(found, expected, "{tag}");
+            if let Err(error) = found {
+                assert_eq!(error.to_string(), message, "{tag}");
+            }
         }
-    }
-
-    #[test]
-    fn a_missing_file_is_named_in_the_message() {
-        let dir = folder_with("message", &FILES[..3]);
-        let one = check_folder(&dir).unwrap_err().to_string();
-        assert_eq!(one, "Missing required file: tokens.txt");
-        let dir = folder_with("messages", &FILES[1..3]);
-        let two = check_folder(&dir).unwrap_err().to_string();
-        assert_eq!(two, "Missing required files: encoder.int8.onnx, tokens.txt");
-    }
-
-    #[test]
-    fn a_directory_in_place_of_a_file_counts_as_missing() {
-        let dir = folder_with("dir-as-file", &FILES[1..]);
-        std::fs::create_dir(dir.join(FILES[0])).unwrap();
-        assert_eq!(check_folder(&dir), missing(&[FILES[0]]));
     }
 
     #[test]
@@ -2195,8 +2213,8 @@ mod tests {
     }
 
     #[test]
-    fn an_encoder_is_told_by_what_it_declares() {
-        let cases: [(&[&str], Option<EncoderKind>); 5] = [
+    fn an_encoder_is_told_by_what_it_declares_and_a_tdt_one_also_by_its_shapes() {
+        let cases: [(&[&str], Option<EncoderKind>); 6] = [
             (
                 &[
                     "audio_signal",
@@ -2214,21 +2232,12 @@ mod tests {
             (&["features", "length"], None),
             (&["features", "length", "language"], None),
             (&[], None),
+            (&["audio_signal", "length"], Some(EncoderKind::Tdt)),
         ];
         for (inputs, kind) in cases {
             assert_eq!(EncoderKind::of(inputs), kind, "{inputs:?}");
         }
-    }
-
-    #[test]
-    fn a_tdt_encoder_is_recognized_without_a_catalog_name() {
-        for (inputs, expected) in [
-            (&["audio_signal", "length"][..], Some(EncoderKind::Tdt)),
-            (&["features", "length"][..], None),
-            (&["audio_signal", "language"][..], None),
-        ] {
-            assert_eq!(EncoderKind::of(inputs), expected);
-        }
+        assert_eq!(EncoderKind::of(&["audio_signal", "language"]), None);
         let encoder = [1, 1024, -1];
         let tdt = [-1, -1, -1, 8198];
         let plain = [-1, -1, -1, 8193];
@@ -2511,42 +2520,37 @@ mod tests {
     }
 
     #[test]
-    fn a_decoding_that_goes_quiet_while_the_speech_goes_on_is_replayed_whole() {
-        for (speech, expected) in [(true, 56), (false, 8)] {
+    fn a_decoding_that_goes_quiet_while_the_speech_goes_on_is_replayed_whole_by_a_preview_with_speech_and_by_the_final()
+     {
+        for (ending, speech, expected) in [
+            ("a preview with speech", true, 56),
+            ("a preview without speech", false, 8),
+            ("the final", false, 56),
+        ] {
             let backend = Wanders::default();
             let encoded = Arc::clone(&backend.encoded);
             let mut stream = Replayed::new(backend, Arc::new(Vec::new()));
             for count in [8, 16, 24, 32, 40, 48] {
                 stream.snapshot(&sound(count * 1280, 0), false).unwrap();
             }
-            let frames = stream
-                .snapshot(&sound(56 * 1280, 0), speech)
-                .unwrap()
-                .concat();
+            let frames = if ending == "the final" {
+                stream.finish(&sound(56 * 1280, 0)).unwrap().concat()
+            } else {
+                stream
+                    .snapshot(&sound(56 * 1280, 0), speech)
+                    .unwrap()
+                    .concat()
+            };
             assert_eq!(
                 frames,
                 (0..expected).collect::<Vec<_>>(),
-                "the text covers the whole stretch again only with speech: {speech}"
+                "the text covers the whole stretch again only with speech or at the final: {ending}"
             );
             assert!(
                 !speech || encoded.lock().unwrap().last() == Some(&56),
                 "the whole stretch is heard again"
             );
         }
-    }
-
-    #[test]
-    fn the_final_of_a_decoding_that_went_quiet_replays_the_whole_stretch() {
-        let backend = Wanders::default();
-        let mut stream = Replayed::new(backend, Arc::new(Vec::new()));
-        for count in [8, 16, 24, 32, 40, 48] {
-            stream.snapshot(&sound(count * 1280, 0), false).unwrap();
-        }
-        assert_eq!(
-            stream.finish(&sound(56 * 1280, 0)).unwrap().concat(),
-            (0..56).collect::<Vec<_>>(),
-            "the final holds every word heard"
-        );
     }
 
     #[derive(Clone)]

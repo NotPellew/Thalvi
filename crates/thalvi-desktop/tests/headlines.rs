@@ -317,25 +317,8 @@ fn everything_else() -> Cases {
     ]
 }
 
-#[test]
-fn each_error_kind_has_a_headline_that_fits_the_overlay() {
-    let cases = recognition()
-        .into_iter()
-        .chain(writing())
-        .chain(microphone())
-        .chain(everything_else());
-    for (error, headline) in cases {
-        assert_eq!(error.headline(), headline, "{error}");
-        assert!(
-            headline.chars().count() <= MAX_HEADLINE_CHARS,
-            "{headline} is longer than {MAX_HEADLINE_CHARS} characters"
-        );
-    }
-}
-
-#[test]
-fn each_download_failure_has_its_own_headline_that_fits_the_overlay() {
-    for (failure, expected) in [
+fn downloads() -> Cases {
+    [
         (
             DownloadFailure::Connect {
                 host: "h".to_owned(),
@@ -349,15 +332,33 @@ fn each_download_failure_has_its_own_headline_that_fits_the_overlay() {
         ),
         (DownloadFailure::Tls, "Download certificate not trusted"),
         (DownloadFailure::Broken, "Download broke off"),
-    ] {
-        let headline = ModelError::Download {
+    ]
+    .into_iter()
+    .map(|(failure, headline)| {
+        let error: Box<dyn UserError> = Box::new(ModelError::Download {
             kind: ModelKind::Speech,
             file: "f".to_owned(),
             failure,
             source: std::sync::Arc::new(download()),
-        }
-        .headline();
-        assert_eq!(headline, expected);
-        assert!(headline.chars().count() <= MAX_HEADLINE_CHARS, "{headline}");
+        });
+        (error, headline)
+    })
+    .collect()
+}
+
+#[test]
+fn each_error_kind_has_a_headline_that_fits_the_overlay() {
+    let cases = recognition()
+        .into_iter()
+        .chain(writing())
+        .chain(microphone())
+        .chain(everything_else())
+        .chain(downloads());
+    for (error, headline) in cases {
+        assert_eq!(error.headline(), headline, "{error}");
+        assert!(
+            headline.chars().count() <= MAX_HEADLINE_CHARS,
+            "{headline} is longer than {MAX_HEADLINE_CHARS} characters"
+        );
     }
 }

@@ -184,6 +184,21 @@ async fn the_desktop_only_wakes_for_its_selected_dictation_head() {
         !capture.is_empty() && capture.iter().all(|e| *e == WakeEvent::Capture),
         "the same clip should wake the capture route when hey_mycroft is the capture head, got {capture:?}"
     );
+
+    let mut both = engine(
+        r#"{"capture":{"model":"hey_mycroft","threshold":0.5},"conversation":{"model":"hey_jarvis","threshold":0.000001}}"#,
+    )
+    .await;
+    let ran = run(&mut both, &input, &[]);
+    let crossing = ran
+        .iter()
+        .find(|f| f.capture >= 0.5)
+        .expect("hey_mycroft crosses");
+    assert_eq!(
+        crossing.event,
+        Some(WakeEvent::Capture),
+        "a dictation crossing wakes with a saved conversation head"
+    );
 }
 
 #[tokio::test]
@@ -209,21 +224,6 @@ async fn only_the_dictation_threshold_controls_wakes() {
 
     let mut at_sixty = engine(r#"{"capture":{"model":"hey_mycroft","threshold":0.6}}"#).await;
     assert_eq!(woken(run(&mut at_sixty, &input, &[40])), []);
-}
-
-#[tokio::test]
-async fn a_dictation_crossing_wakes_with_a_saved_conversation_head() {
-    let input = clip_frames().await;
-    let mut both = engine(
-        r#"{"capture":{"model":"hey_mycroft","threshold":0.5},"conversation":{"model":"hey_jarvis","threshold":0.000001}}"#,
-    )
-    .await;
-    let ran = run(&mut both, &input, &[]);
-    let crossing = ran
-        .iter()
-        .find(|f| f.capture >= 0.5)
-        .expect("hey_mycroft crosses");
-    assert_eq!(crossing.event, Some(WakeEvent::Capture));
 }
 
 #[tokio::test]

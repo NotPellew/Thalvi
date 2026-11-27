@@ -103,15 +103,11 @@ def test_a_stretch_starts_once_shows_growing_text_and_ends_with_its_final():
         (Step("", " ."), []),
         (Step(". Never", ""), ["speechStart", "transcript"]),
         (Step("", "\u2047"), ["speechStart", "speechEnd", "speechComplete"]),
+        (Step("", "Yes."), ["speechStart", "speechEnd", "speechComplete"]),
     ],
 )
-def test_punctuation_alone_is_no_speech_but_an_unknown_word_is(step, events):
+def test_punctuation_alone_is_no_speech_but_an_unknown_word_or_a_lone_final_is(step, events):
     assert [e["type"] for e in Turns().take(step, 160)] == events
-
-
-def test_a_final_with_no_partial_before_it_still_starts_its_stretch():
-    events = Turns().take(Step("", "Yes."), 320)
-    assert [e["type"] for e in events] == ["speechStart", "speechEnd", "speechComplete"]
 
 
 def test_resampling_keeps_a_tone_and_does_not_depend_on_how_audio_is_chunked():

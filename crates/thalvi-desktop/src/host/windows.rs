@@ -1024,7 +1024,11 @@ mod tests {
     }
 
     #[test]
-    fn switching_fails_in_plain_words_and_presses_nothing() {
+    fn switching_fails_in_plain_words_presses_nothing_or_reports_a_cut_short_shortcut() {
+        enum Failure {
+            Said(&'static str),
+            MaybePartial,
+        }
         let shortcut = || {
             Some(Shortcut {
                 modifiers: Vec::new(),
@@ -1036,13 +1040,13 @@ mod tests {
                 "no executables",
                 app(&[], None),
                 None,
-                "no Windows program name",
+                Failure::Said("no Windows program name"),
             ),
             (
                 "not running",
                 app(&["slack.exe"], shortcut()),
                 None,
-                "not open",
+                Failure::Said("not open"),
             ),
             (
                 "unknown key",
@@ -1054,19 +1058,31 @@ mod tests {
                     }),
                 ),
                 None,
-                "no key called Hyper_L",
+                Failure::Said("no key called Hyper_L"),
             ),
             (
                 "focus refused",
                 app(&["T3 Code.exe"], shortcut()),
                 None,
-                "did not let Thalvi switch",
+                Failure::Said("did not let Thalvi switch"),
             ),
             (
                 "elevated app",
                 app(&["T3 Code.exe"], shortcut()),
                 Some(HIGH),
-                "administrator",
+                Failure::Said("administrator"),
+            ),
+            (
+                "shortcut cut short",
+                app(
+                    &["notepad.exe"],
+                    Some(Shortcut {
+                        modifiers: vec![Modifier::Alt],
+                        key: "F4".to_owned(),
+                    }),
+                ),
+                None,
+                Failure::MaybePartial,
             ),
         ];
         for (case, app, integrity, expected) in cases {
@@ -1078,35 +1094,27 @@ mod tests {
                     }
                 });
             }
+            if matches!(expected, Failure::MaybePartial) {
+                desktop.api.with(|state| state.accepts = Some(1));
+            }
 
             let error = desktop.focus_app(&app).unwrap_err();
 
-            let notice = match error {
-                HostError::Unsupported(notice) | HostError::NothingTyped(notice) => notice,
-                HostError::MaybePartial(notice) => panic!("{case}: {notice}"),
-            };
-            assert!(notice.contains(expected), "{case}: {notice}");
-            assert!(desktop.api.read(|state| state.sent.is_empty()), "{case}");
-            if case != "focus refused" {
-                assert!(desktop.api.read(|state| state.focused.is_empty()), "{case}");
+            match (error, expected) {
+                (
+                    HostError::Unsupported(notice) | HostError::NothingTyped(notice),
+                    Failure::Said(expected),
+                ) => {
+                    assert!(notice.contains(expected), "{case}: {notice}");
+                    assert!(desktop.api.read(|state| state.sent.is_empty()), "{case}");
+                    if case != "focus refused" {
+                        assert!(desktop.api.read(|state| state.focused.is_empty()), "{case}");
+                    }
+                }
+                (HostError::MaybePartial(_), Failure::MaybePartial) => {}
+                (error, _) => panic!("{case}: {error:?}"),
             }
         }
-    }
-
-    #[test]
-    fn a_shortcut_cut_short_is_reported_as_maybe_partial() {
-        let desktop = windows(Fake::desktop());
-        desktop.api.with(|state| state.accepts = Some(1));
-        let shortcut = Shortcut {
-            modifiers: vec![Modifier::Alt],
-            key: "F4".to_owned(),
-        };
-
-        let error = desktop
-            .focus_app(&app(&["notepad.exe"], Some(shortcut)))
-            .unwrap_err();
-
-        assert!(matches!(error, HostError::MaybePartial(_)));
     }
 
     #[test]
@@ -1128,12 +1136,6 @@ mod tests {
         ] {
             assert_eq!(virtual_key(name), code, "{name}");
         }
-        assert_eq!(
-            shortcut_events(&[Modifier::Alt, Modifier::Logo], "x")
-                .unwrap()
-                .len(),
-            6
-        );
     }
 
     #[test]

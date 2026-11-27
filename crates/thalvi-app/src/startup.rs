@@ -263,54 +263,102 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_names_the_change_and_leaves_the_entry_as_it_was() {
-        let os = Fake {
-            refuse: Some("permission denied"),
-            ..Fake::default()
-        };
-        assert_eq!(
-            set(&os, true, || Ok(())).unwrap_err().to_string(),
-            "Thalvi could not be set to start at login: permission denied"
+    fn a_failed_change_leaves_the_entry_as_it_was_and_says_whether_it_was_refused_unkept_or_unread()
+    {
+        type Step = (
+            bool,
+            bool,
+            Result<(), StartupError>,
+            Result<bool, StartupError>,
         );
-        assert_eq!(state(&os), Ok(false));
-
-        os.entry.set(true);
-        assert_eq!(
-            set(&os, false, || Ok(())).unwrap_err().to_string(),
-            "Thalvi could not be stopped from starting at login: permission denied"
-        );
-        assert_eq!(state(&os), Ok(true));
-    }
-
-    #[test]
-    fn a_change_the_os_does_not_keep_is_an_error_not_a_success() {
-        let os = Fake {
-            ignores_changes: true,
-            ..Fake::default()
-        };
-        assert_eq!(
-            set(&os, true, || Ok(())),
-            Err(StartupError::NotKept { on: true })
-        );
-        assert_eq!(state(&os), Ok(false));
-
-        os.entry.set(true);
-        assert_eq!(
-            set(&os, false, || Ok(())),
-            Err(StartupError::NotKept { on: false })
-        );
-        assert_eq!(state(&os), Ok(true));
-    }
-
-    #[test]
-    fn an_unreadable_entry_is_reported_on_load_and_after_a_change() {
-        let os = Fake {
-            unreadable: true,
-            ..Fake::default()
-        };
-        let reason = "the registry is locked".to_owned();
-        assert_eq!(state(&os), Err(StartupError::Read(reason.clone())));
-        assert_eq!(set(&os, true, || Ok(())), Err(StartupError::Read(reason)));
+        let reason = || "permission denied".to_owned();
+        let locked = || "the registry is locked".to_owned();
+        let rows: [(&str, Fake, Vec<Step>); 3] = [
+            (
+                "refused",
+                Fake {
+                    refuse: Some("permission denied"),
+                    ..Fake::default()
+                },
+                vec![
+                    (
+                        false,
+                        true,
+                        Err(StartupError::Change {
+                            on: true,
+                            reason: reason(),
+                        }),
+                        Ok(false),
+                    ),
+                    (
+                        true,
+                        false,
+                        Err(StartupError::Change {
+                            on: false,
+                            reason: reason(),
+                        }),
+                        Ok(true),
+                    ),
+                ],
+            ),
+            (
+                "not kept",
+                Fake {
+                    ignores_changes: true,
+                    ..Fake::default()
+                },
+                vec![
+                    (
+                        false,
+                        true,
+                        Err(StartupError::NotKept { on: true }),
+                        Ok(false),
+                    ),
+                    (
+                        true,
+                        false,
+                        Err(StartupError::NotKept { on: false }),
+                        Ok(true),
+                    ),
+                ],
+            ),
+            (
+                "unreadable",
+                Fake {
+                    unreadable: true,
+                    ..Fake::default()
+                },
+                vec![(
+                    false,
+                    true,
+                    Err(StartupError::Read(locked())),
+                    Err(StartupError::Read(locked())),
+                )],
+            ),
+        ];
+        for (name, os, steps) in rows {
+            for (entry, on, changed, read) in steps {
+                os.entry.set(entry);
+                assert_eq!(set(&os, on, || Ok(())), changed, "{name} {on}");
+                assert_eq!(state(&os), read, "{name} {on}");
+            }
+        }
+        for (on, text) in [
+            (
+                true,
+                "Thalvi could not be set to start at login: permission denied",
+            ),
+            (
+                false,
+                "Thalvi could not be stopped from starting at login: permission denied",
+            ),
+        ] {
+            let error = StartupError::Change {
+                on,
+                reason: reason(),
+            };
+            assert_eq!(error.to_string(), text);
+        }
     }
 
     #[test]

@@ -812,31 +812,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_surface_that_refuses_to_show_leaves_the_overlay_hidden_and_the_next_status_tries_again() {
-        let start = Instant::now();
-        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
-        let mut surface = Fake {
-            refuse: true,
-            ..Fake::default()
-        };
-        let mut overlay = Overlaying::new(true, start);
-        overlay.take(Message::Status(Box::new(capturing())), start);
-        overlay.settle(&mut surface, &mut painter, 0.0, start);
-        assert!(
-            !overlay.cancels(&painter, 386.0, 17.0),
-            "a hidden overlay cancels nothing"
-        );
-        surface.refuse = false;
-        overlay.take(Message::Status(Box::new(capturing())), start + RETRY_AFTER);
-        overlay.settle(&mut surface, &mut painter, 0.0, start + RETRY_AFTER);
-        assert_eq!(surface.calls, ["show", "show"]);
-        assert!(
-            overlay.cancels(&painter, 386.0, 17.0),
-            "a shown overlay's button cancels"
-        );
-    }
-
     fn paste_countdown(target: Option<String>, text: &str, pause_ms: u64) -> Status {
         Status::Pending {
             target,
@@ -1004,36 +979,58 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_show_or_present_retries_at_most_once_a_second() {
+    fn a_failed_show_leaves_the_overlay_hidden_and_a_failed_show_or_present_retries_at_most_once_a_second()
+     {
         let start = Instant::now();
         let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
         let mut surface = Fake {
             refuse: true,
             ..Fake::default()
         };
-        let mut overlay = Overlaying::new(false, start);
-        let mut again = |overlay: &mut Overlaying, surface: &mut Fake, now: Instant| {
-            overlay.take(Message::Status(Box::new(capturing())), now);
-            overlay.settle(surface, &mut painter, 0.0, now);
-        };
-        again(&mut overlay, &mut surface, start);
+        let mut overlay = Overlaying::new(true, start);
+        let again =
+            |overlay: &mut Overlaying, surface: &mut Fake, painter: &mut Painter, now: Instant| {
+                overlay.take(Message::Status(Box::new(capturing())), now);
+                overlay.settle(surface, painter, 0.0, now);
+            };
+        again(&mut overlay, &mut surface, &mut painter, start);
+        assert!(
+            !overlay.cancels(&painter, 386.0, 17.0),
+            "a hidden overlay cancels nothing"
+        );
         again(
             &mut overlay,
             &mut surface,
+            &mut painter,
             start + Duration::from_millis(40),
         );
         again(
             &mut overlay,
             &mut surface,
+            &mut painter,
             start + Duration::from_millis(999),
         );
         assert_eq!(surface.calls, ["show"]);
-        again(&mut overlay, &mut surface, start + RETRY_AFTER);
+        again(
+            &mut overlay,
+            &mut surface,
+            &mut painter,
+            start + RETRY_AFTER,
+        );
         assert_eq!(surface.calls, ["show", "show"]);
         surface.refuse = false;
         surface.calls.clear();
-        again(&mut overlay, &mut surface, start + 2 * RETRY_AFTER);
+        again(
+            &mut overlay,
+            &mut surface,
+            &mut painter,
+            start + 2 * RETRY_AFTER,
+        );
         assert_eq!(surface.calls, ["show"]);
+        assert!(
+            overlay.cancels(&painter, 386.0, 17.0),
+            "a shown overlay's button cancels"
+        );
         surface.refuse = true;
         surface.calls.clear();
         overlay.shown = Shown::Showing { stale: true };

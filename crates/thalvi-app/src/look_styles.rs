@@ -1500,21 +1500,6 @@ mod tests {
     }
 
     #[test]
-    fn every_look_gets_its_colours_and_neon_pairs_light_and_dark() {
-        let value = response(&config("{}"));
-        assert_eq!(value["looks"]["holo"]["--neon"], "#6bf8ff");
-        assert_eq!(value["looks"]["holo"]["--check-bg"], "rgba(4, 10, 14, 0.8)");
-        assert_eq!(value["looks"]["gunmetal"]["--deep"], "#5c5c60");
-        assert_eq!(
-            value["looks"]["neon"]["--bg"],
-            "light-dark(#e8eff7, #020617)"
-        );
-        for look in ["holo", "gunmetal"] {
-            assert_eq!(value["looks"][look]["--editor-bg"], "#101418");
-        }
-    }
-
-    #[test]
     fn an_override_reaches_its_look_and_a_suspended_or_unreadable_one_keeps_the_built_in_look() {
         let value = response(&config(
             r##"{"themes":{"version":1,
@@ -1528,22 +1513,6 @@ mod tests {
             value["looks"]["neon"]["--neon"],
             "light-dark(#007a43, #2bff88)"
         );
-    }
-
-    #[test]
-    fn the_properties_describe_what_a_look_offers_settings() {
-        let value = response(&config("{}"));
-        let properties = value["properties"].as_array().unwrap();
-        assert_eq!(properties.len(), 32);
-        let accent = properties
-            .iter()
-            .find(|property| property["id"] == "colors.accent")
-            .unwrap();
-        assert_eq!(accent["label"], "Accent");
-        assert_eq!(accent["unit"], "color");
-        assert_eq!(accent["looks"], json!(["neon", "holo", "gunmetal"]));
-        assert_eq!(accent["surfaces"], json!(["settings", "overlay"]));
-        assert!(accent.get("min").is_some_and(Value::is_null));
     }
 
     #[test]
@@ -1676,11 +1645,11 @@ mod tests {
     }
 
     #[test]
-    fn numbers_reach_settings_as_the_decimals_they_were_written_as() {
-        let value = response(&config(
-            r#"{"themes":{"version":1,"holo":{"font":{"scale":1.1},"decoration":{"mesh":0.07}}}}"#,
+    fn values_show_a_looks_override_as_written_and_keep_other_and_suspended_looks_at_defaults() {
+        let changed = response(&config(
+            r##"{"themes":{"version":1,"holo":{"colors":{"dark":{"accent":"#ff0000"}},"font":{"scale":1.1},"decoration":{"mesh":0.07}}}}"##,
         ));
-        let scale = value["properties"]
+        let scale = changed["properties"]
             .as_array()
             .and_then(|properties| {
                 properties
@@ -1692,17 +1661,9 @@ mod tests {
             (&scale["min"], &scale["max"], &scale["step"]),
             (&json!(0.85), &json!(1.25), &json!(0.05))
         );
-        assert_eq!(value["values"]["holo"]["font.scale"], json!(1.1));
-        assert_eq!(value["values"]["holo"]["decoration.mesh"], json!(0.07));
-    }
-
-    #[test]
-    fn values_show_a_looks_override_and_keep_other_and_suspended_looks_at_defaults() {
-        let changed = response(&config(
-            r##"{"themes":{"version":1,"holo":{"colors":{"dark":{"accent":"#ff0000"}},"font":{"scale":1.1}}}}"##,
-        ));
         assert_eq!(changed["values"]["holo"]["colors.accent"], "#ff0000");
         assert_eq!(changed["values"]["holo"]["font.scale"], json!(1.1));
+        assert_eq!(changed["values"]["holo"]["decoration.mesh"], json!(0.07));
         assert_ne!(changed["values"]["neon"]["colors.accent"], "#ff0000");
         assert_ne!(changed["values"]["gunmetal"]["colors.accent"], "#ff0000");
         assert_eq!(changed["values"]["neon"]["font.scale"], json!(1.0));

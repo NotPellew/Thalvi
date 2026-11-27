@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn editing_keeps_the_original_and_calls_nothing() {
+    async fn editing_keeps_the_original_and_calls_nothing_and_discard_drops_the_draft() {
         let (drafts, delivery) = offered(FakeHost::default(), &cancelled("hello wrld")).await;
         let before = delivery.host().calls();
         drafts.edit("hello world".to_owned()).unwrap();
@@ -342,6 +342,11 @@ mod tests {
             ("hello wrld", "hello world", DraftOutcome::Cancelled)
         );
         assert_eq!(delivery.host().calls(), before);
+
+        let (discarded, _) = offered(FakeHost::default(), &cancelled("hello")).await;
+        discarded.discard();
+        assert_eq!(discarded.view(), None);
+        assert_eq!(discarded.edit("x".to_owned()), Err(NoDraft));
     }
 
     #[tokio::test]
@@ -372,13 +377,5 @@ mod tests {
         drafts.edit("sent".to_owned()).unwrap();
         drafts.offer(newer("after revert").await);
         assert_eq!(shown(&drafts), some("after revert", false));
-    }
-
-    #[tokio::test]
-    async fn discard_drops_the_draft() {
-        let (drafts, _) = offered(FakeHost::default(), &cancelled("hello")).await;
-        drafts.discard();
-        assert_eq!(drafts.view(), None);
-        assert_eq!(drafts.edit("x".to_owned()), Err(NoDraft));
     }
 }

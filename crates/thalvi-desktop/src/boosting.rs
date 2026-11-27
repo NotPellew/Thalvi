@@ -356,7 +356,11 @@ mod tests {
     #[test]
     fn a_listed_phrase_comes_out_when_it_is_close_behind_the_best_path() {
         let tree = tree(&["Cybrex2"]);
-        let cases = [("close behind", 0.8, C), ("far behind", 3.0, A)];
+        let cases = [
+            ("close behind", 0.8, C),
+            ("level once boosted", 2.0, A),
+            ("far behind", 3.0, A),
+        ];
         for (name, gap, first) in cases {
             let frames = vec![vec![row(&[(A, -0.5), (C, -0.5 - gap)]), blank_row()]];
             let got = run(&tree, &mut TreeState::default(), frames);
@@ -378,6 +382,13 @@ mod tests {
                 vec![row(&[(Y, -0.5)]), blank_row()],
             ];
             assert_eq!(run(&tree, &mut state, begun), [[C], [Y]], "{name}");
+            let mut aside = state;
+            let unlisted = vec![vec![row(&[(Y, -1.5), (REX, -0.5), (X, -1.0)]), blank_row()]];
+            assert_eq!(
+                run(&tree, &mut aside, unlisted),
+                [[REX]],
+                "{name}: tokens that go on no listed phrase earn nothing, so the model's best wins"
+            );
             let next = vec![vec![row(&[(B, -0.5 - gap), (A, -0.5)]), blank_row()]];
             assert_eq!(run(&tree, &mut state, next), [expected], "{name}");
             let moved = run(
@@ -425,24 +436,15 @@ mod tests {
             ],
             vec![blank_row()],
             endless,
+            vec![row(&[(D, -0.5), (BLANK, -0.5)]), blank_row()],
         ];
         let got = run(&tree, &mut state, frames);
-        assert_eq!(got, [vec![A, X], vec![], vec![Z; MAX_TOKENS_PER_FRAME]]);
-        assert_eq!(state, TreeState::default());
-    }
-
-    #[test]
-    fn the_match_carries_on_into_the_next_call() {
-        let tree = tree(&["Cybrex2"]);
-        let second = || vec![vec![row(&[(A, -0.5), (Y, -3.0)]), blank_row()]];
-        let mut state = TreeState::default();
-        run(
-            &tree,
-            &mut state,
-            vec![vec![row(&[(C, -0.5)]), blank_row()]],
+        assert_eq!(
+            got,
+            [vec![A, X], vec![], vec![Z; MAX_TOKENS_PER_FRAME], vec![D]],
+            "a token level with blank comes out, as the first best does"
         );
-        assert_eq!(run(&tree, &mut state, second()), [[Y]]);
-        assert_eq!(run(&tree, &mut TreeState::default(), second()), [[A]]);
+        assert_eq!(state, TreeState::default());
     }
 
     #[test]
