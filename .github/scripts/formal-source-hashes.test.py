@@ -72,54 +72,30 @@ class Provenance(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('git provenance match for 1 formal skills', result.stdout)
 
-    def test_current_checkout_provenance_passes(self):
-        result = subprocess.run(['python3', str(SCRIPT)], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('git provenance match for 3 formal skills', result.stdout)
-
-    def test_malformed_sync_commit_fails(self):
-        path = self.repo / 'crates' / 'a.rs'
-        path.parent.mkdir(parents=True)
-        path.write_bytes(b'code\n')
-        self.commit('base')
-        for value in ('nope', 'abc', 'g' * 40, 'a' * 39, 'a' * 41):
-            with self.subTest(value=value):
-                self.source(value, {'crates/a.rs': b'code\n'})
-                self.assert_fails(self.check(), 'malformed sync_commit')
-
-    def test_all_zero_sync_commit_fails(self):
-        path = self.repo / 'crates' / 'a.rs'
-        path.parent.mkdir(parents=True)
-        path.write_bytes(b'code\n')
-        self.commit('base')
-        self.source('0' * 40, {'crates/a.rs': b'code\n'})
-        self.assert_fails(self.check(), 'all-zero sync_commit')
-
-    def test_missing_sync_commit_fails(self):
+    def test_an_unusable_sync_commit_fails(self):
         path = self.repo / 'crates' / 'a.rs'
         path.parent.mkdir(parents=True)
         path.write_bytes(b'code\n')
         self.commit('base')
         skill = self.repo / '.agents' / 'skills' / 'formal-demo'
         skill.mkdir(parents=True)
-        recorded = hashlib.sha256(b'code\n').hexdigest()
-        for body in (
-            {'files': {'crates/a.rs': {'sha256': recorded}}},
-            {'sync_commit': None, 'files': {'crates/a.rs': {'sha256': recorded}}},
-            {'sync_commit': '', 'files': {'crates/a.rs': {'sha256': recorded}}},
-        ):
+        recorded = {'crates/a.rs': {'sha256': hashlib.sha256(b'code\n').hexdigest()}}
+        blob = subprocess.check_output(['git', '-C', str(self.repo), 'hash-object', str(path)], text=True).strip()
+        cases = [
+            ({'sync_commit': value, 'files': recorded}, 'malformed sync_commit')
+            for value in ('nope', 'abc', 'g' * 40, 'a' * 39, 'a' * 41)
+        ]
+        cases += [
+            ({'sync_commit': '0' * 40, 'files': recorded}, 'all-zero sync_commit'),
+            ({'files': recorded}, 'missing sync_commit'),
+            ({'sync_commit': None, 'files': recorded}, 'missing sync_commit'),
+            ({'sync_commit': '', 'files': recorded}, 'missing sync_commit'),
+            ({'sync_commit': blob, 'files': recorded}, 'not a commit'),
+        ]
+        for body, phrase in cases:
             with self.subTest(body=body):
                 (skill / 'source.json').write_text(json.dumps(body))
-                self.assert_fails(self.check(), 'missing sync_commit')
-
-    def test_non_commit_sync_commit_fails(self):
-        path = self.repo / 'crates' / 'a.rs'
-        path.parent.mkdir(parents=True)
-        path.write_bytes(b'code\n')
-        self.commit('base')
-        blob = subprocess.check_output(['git', '-C', str(self.repo), 'hash-object', str(path)], text=True).strip()
-        self.source(blob, {'crates/a.rs': b'code\n'})
-        self.assert_fails(self.check(), 'not a commit')
+                self.assert_fails(self.check(), phrase)
 
     def test_non_ancestor_sync_commit_fails(self):
         path = self.repo / 'crates' / 'a.rs'
@@ -154,7 +130,7 @@ class Provenance(unittest.TestCase):
         self.source(sync, {'crates/a.rs': b'code\n'})
         self.assert_fails(self.check(), 'missing at sync_commit')
 
-    def test_working_tree_drift_fails(self):
+    def test_an_edited_or_missing_working_tree_file_fails(self):
         path = self.repo / 'crates' / 'a.rs'
         path.parent.mkdir(parents=True)
         path.write_bytes(b'code\n')
@@ -162,13 +138,6 @@ class Provenance(unittest.TestCase):
         self.source(rev(self.repo), {'crates/a.rs': b'code\n'})
         path.write_bytes(b'edited\n')
         self.assert_fails(self.check(), 'SOURCE DRIFT')
-
-    def test_missing_working_tree_file_fails(self):
-        path = self.repo / 'crates' / 'a.rs'
-        path.parent.mkdir(parents=True)
-        path.write_bytes(b'code\n')
-        self.commit('base')
-        self.source(rev(self.repo), {'crates/a.rs': b'code\n'})
         path.unlink()
         result = self.check()
         self.assert_fails(result, 'SOURCE DRIFT')

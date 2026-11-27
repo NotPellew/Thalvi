@@ -384,22 +384,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_writing_types_nothing_and_leaves_the_users_own_words_on_the_clipboard() {
-        let failed = CaptureOutcome::Failed {
-            error: CaptureError::Writing(crate::writing::WritingError::Timeout),
-            recoverable_text: Some("tell Anna I'm late".to_owned()),
-        };
-        let (finished, calls) = finish(FakeHost::default(), failed).await;
-        let finished = finished.unwrap();
-        assert!(!finished.delivered);
-        assert_eq!(
-            finished.notice,
-            "The writing model took longer than 15 seconds. Nothing was pasted. Captured text is on the clipboard."
-        );
-        assert_eq!(calls, ["capture_target", "copy:\"tell Anna I'm late\""]);
-    }
-
-    #[tokio::test]
     async fn copying_text_puts_it_on_the_clipboard_and_says_why_it_could_not() {
         let locked = HostError::Unsupported("The clipboard is locked.".to_owned());
         for (host, expected) in [
@@ -417,45 +401,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_text_that_reached_its_destination_counts_as_delivered() {
-        let deliver_fails =
-            || FakeHost::default().failing("deliver", HostError::NothingTyped("No.".to_owned()));
-        let failed = CaptureOutcome::Failed {
-            error: CaptureError::MicStopped,
+    async fn only_text_that_reached_its_destination_counts_as_delivered_and_each_outcome_has_its_headline()
+     {
+        let deliver_fails = |message: &str| {
+            FakeHost::default().failing("deliver", HostError::NothingTyped(message.to_owned()))
+        };
+        let no_clipboard = || {
+            FakeHost::default().failing("copy", HostError::Unsupported("No clipboard.".to_owned()))
+        };
+        let failed = |error| CaptureOutcome::Failed {
+            error,
             recoverable_text: Some("kept".to_owned()),
         };
         for (host, outcome, expected) in [
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Paste, "hi"),
-                Some(true),
+                Some((true, "Delivered", &[][..])),
             ),
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Submit, "hi"),
-                Some(true),
+                Some((true, "Delivered", &[])),
             ),
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Task, "switch to editor"),
-                Some(true),
+                Some((true, "Delivered", &[])),
             ),
             (
-                deliver_fails(),
+                deliver_fails("No."),
                 accepted(CaptureRoute::Paste, "hi"),
-                Some(false),
+                Some((false, "Nothing was pasted — Settings", &[])),
+            ),
+            (
+                deliver_fails("Nope."),
+                accepted(CaptureRoute::Paste, "text"),
+                Some((false, "Nothing was pasted — Settings", &[])),
             ),
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Paste, ""),
-                Some(false),
+                Some((false, "Nothing to paste", &[])),
             ),
             (
                 FakeHost::default(),
                 accepted(CaptureRoute::Task, "unknown phrase"),
-                Some(false),
+                Some((false, "That task isn't configured yet", &[])),
             ),
-            (FakeHost::default(), failed, Some(false)),
+            (
+                FakeHost::default(),
+                accepted(CaptureRoute::Task, "do a backflip"),
+                Some((false, "That task isn't configured yet", &[])),
+            ),
+            (
+                FakeHost::default(),
+                failed(CaptureError::MicStopped),
+                Some((false, "Microphone stopped mid-capture", &[])),
+            ),
+            (
+                FakeHost::default(),
+                failed(CaptureError::Audio(AudioError::Busy)),
+                Some((false, "Microphone is used by another app", &[])),
+            ),
+            (
+                no_clipboard(),
+                failed(CaptureError::Audio(AudioError::Busy)),
+                Some((false, "Clipboard failed — text in Settings", &[])),
+            ),
+            (
+                FakeHost::default(),
+                CaptureOutcome::Failed {
+                    error: CaptureError::Recognizer(RecognizerError::Unreachable {
+                        speech: SpeechSource::direct("Office", "ws://127.0.0.1:8080".to_owned()),
+                        reason: ConnectFailure::Refused,
+                        detail: Detail("Connection refused (os error 111)".to_owned()),
+                    }),
+                    recoverable_text: None,
+                },
+                Some((
+                    false,
+                    "Can't reach speech server — Settings",
+                    &["Connection refused (os error 111)"],
+                )),
+            ),
             (
                 FakeHost::default(),
                 CaptureOutcome::Cancelled { dictated: None },
@@ -464,8 +493,12 @@ mod tests {
         ] {
             let (finished, _) = finish(host, outcome.clone()).await;
             assert_eq!(
-                finished.map(|finished| finished.delivered),
-                expected,
+                finished.map(|finished| (finished.delivered, finished.headline, finished.causes)),
+                expected.map(|(delivered, headline, causes)| (
+                    delivered,
+                    headline.to_owned(),
+                    causes.iter().map(|cause| (*cause).to_owned()).collect()
+                )),
                 "{outcome:?}"
             );
         }
@@ -597,30 +630,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_app_switch_a_desktop_cannot_make_leaves_the_text_on_the_clipboard() {
-        let (notice, seen) = run(
-            FakeHost::default().failing(
-                "focus_app",
-                HostError::Unsupported(
-                    "Switching apps is unavailable on GNOME Wayland.".to_owned(),
-                ),
-            ),
-            accepted(CaptureRoute::Task, "switch to editor"),
-        )
-        .await;
-        assert_eq!(
-            notice.as_deref(),
-            Some(
-                "Switching apps is unavailable on GNOME Wayland. Captured text is on the clipboard."
-            )
-        );
-        assert_eq!(
-            seen.last().map(String::as_str),
-            Some("copy:\"switch to editor\"")
-        );
-    }
-
-    #[tokio::test]
     async fn an_empty_paste_pastes_and_copies_nothing() {
         let (notice, seen) = run(FakeHost::default(), accepted(CaptureRoute::Paste, "")).await;
         assert_eq!(notice.as_deref(), Some("There was nothing to paste."));
@@ -628,36 +637,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_failure_keeps_the_text_on_the_clipboard_and_says_what_happened() {
-        for (error, expected) in [
-            (
-                HostError::Unsupported("Pasting needs wtype, which is not installed.".to_owned()),
-                "Pasting needs wtype, which is not installed. Captured text is on the clipboard.",
-            ),
-            (
-                HostError::NothingTyped("The window closed. Nothing was pasted.".to_owned()),
-                "The window closed. Nothing was pasted. Captured text is on the clipboard.",
-            ),
-            (
-                HostError::MaybePartial("Thalvi may or may not have pasted the text.".to_owned()),
-                "Thalvi may or may not have pasted the text. Captured text is on the clipboard.",
-            ),
-        ] {
-            let (notice, seen) = run(
-                FakeHost::default().failing("deliver", error.clone()),
-                accepted(CaptureRoute::Submit, "keep me"),
+    async fn every_failure_says_what_happened_and_keeps_the_text_on_the_clipboard() {
+        let deliver = |route: CaptureRoute, text: &str| {
+            format!(
+                "deliver:the editor:{text:?}:enter={}",
+                route == CaptureRoute::Submit
             )
-            .await;
-            assert_eq!(notice.as_deref(), Some(expected), "{error:?}");
-            assert_eq!(
-                seen,
+        };
+        for (host, outcome, expected, seen) in [
+            (
+                FakeHost::default().failing(
+                    "deliver",
+                    HostError::Unsupported(
+                        "Pasting needs wtype, which is not installed.".to_owned(),
+                    ),
+                ),
+                accepted(CaptureRoute::Submit, "keep me"),
+                "Pasting needs wtype, which is not installed. Captured text is on the clipboard.",
                 calls(&[
                     "capture_target",
-                    "deliver:the editor:\"keep me\":enter=true",
-                    "copy:\"keep me\""
+                    &deliver(CaptureRoute::Submit, "keep me"),
+                    "copy:\"keep me\"",
                 ]),
-                "{error:?}"
-            );
+            ),
+            (
+                FakeHost::default().failing(
+                    "deliver",
+                    HostError::NothingTyped("The window closed. Nothing was pasted.".to_owned()),
+                ),
+                accepted(CaptureRoute::Submit, "keep me"),
+                "The window closed. Nothing was pasted. Captured text is on the clipboard.",
+                calls(&[
+                    "capture_target",
+                    &deliver(CaptureRoute::Submit, "keep me"),
+                    "copy:\"keep me\"",
+                ]),
+            ),
+            (
+                FakeHost::default().failing(
+                    "deliver",
+                    HostError::MaybePartial(
+                        "Thalvi may or may not have pasted the text.".to_owned(),
+                    ),
+                ),
+                accepted(CaptureRoute::Submit, "keep me"),
+                "Thalvi may or may not have pasted the text. Captured text is on the clipboard.",
+                calls(&[
+                    "capture_target",
+                    &deliver(CaptureRoute::Submit, "keep me"),
+                    "copy:\"keep me\"",
+                ]),
+            ),
+            (
+                FakeHost::default().failing(
+                    "capture_target",
+                    HostError::NothingTyped(
+                        "The desktop did not identify the focused window.".to_owned(),
+                    ),
+                ),
+                accepted(CaptureRoute::Paste, "keep me"),
+                "The desktop did not identify the focused window. Nothing was pasted. Captured text is on the clipboard.",
+                calls(&["capture_target", "copy:\"keep me\""]),
+            ),
+            (
+                FakeHost::default().failing("deliver", HostError::NothingTyped("Gone.".to_owned())),
+                accepted(CaptureRoute::Submit, ""),
+                "Gone.",
+                calls(&["capture_target", &deliver(CaptureRoute::Submit, "")]),
+            ),
+            (
+                FakeHost::default().panicking("deliver"),
+                accepted(CaptureRoute::Paste, "keep me"),
+                "The desktop action stopped unexpectedly. Check the target before retrying. Captured text is on the clipboard.",
+                calls(&[
+                    "capture_target",
+                    &deliver(CaptureRoute::Paste, "keep me"),
+                    "copy:\"keep me\"",
+                ]),
+            ),
+        ] {
+            let (notice, seen_calls) = run(host, outcome.clone()).await;
+            assert_eq!(notice.as_deref(), Some(expected), "{outcome:?}: {expected}");
+            assert_eq!(seen_calls, seen, "{outcome:?}: {expected}");
         }
     }
 
@@ -682,27 +743,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_bound_window_nothing_is_pasted() {
-        let (notice, seen) = run(
-            FakeHost::default().failing(
-                "capture_target",
-                HostError::NothingTyped(
-                    "The desktop did not identify the focused window.".to_owned(),
-                ),
-            ),
-            accepted(CaptureRoute::Paste, "keep me"),
-        )
-        .await;
-        assert_eq!(
-            notice.as_deref(),
-            Some(
-                "The desktop did not identify the focused window. Nothing was pasted. Captured text is on the clipboard."
-            )
-        );
-        assert_eq!(seen, calls(&["capture_target", "copy:\"keep me\""]));
-    }
-
-    #[tokio::test]
     async fn when_the_clipboard_fails_too_the_notice_carries_the_text() {
         let (notice, _) = run(
             FakeHost::default()
@@ -718,108 +758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_submit_that_fails_has_no_text_to_keep() {
-        let (notice, seen) = run(
-            FakeHost::default().failing("deliver", HostError::NothingTyped("Gone.".to_owned())),
-            accepted(CaptureRoute::Submit, ""),
-        )
-        .await;
-        assert_eq!(notice.as_deref(), Some("Gone."));
-        assert_eq!(
-            seen,
-            calls(&["capture_target", "deliver:the editor:\"\":enter=true"])
-        );
-    }
-
-    #[tokio::test]
-    async fn a_host_that_panics_is_reported_as_possibly_partial_and_the_text_is_kept() {
-        let (notice, seen) = run(
-            FakeHost::default().panicking("deliver"),
-            accepted(CaptureRoute::Paste, "keep me"),
-        )
-        .await;
-        assert_eq!(
-            notice.as_deref(),
-            Some(
-                "The desktop action stopped unexpectedly. Check the target before retrying. Captured text is on the clipboard."
-            )
-        );
-        assert_eq!(seen.last().map(String::as_str), Some("copy:\"keep me\""));
-    }
-
-    #[tokio::test]
-    async fn each_failure_has_a_headline_for_the_overlay_and_a_lost_clipboard_says_where_the_text_is()
-     {
-        let failed = |error| CaptureOutcome::Failed {
-            error,
-            recoverable_text: Some("kept".to_owned()),
-        };
-        let no_clipboard = || {
-            FakeHost::default().failing("copy", HostError::Unsupported("No clipboard.".to_owned()))
-        };
-        let cases = [
-            (
-                FakeHost::default(),
-                failed(CaptureError::Audio(AudioError::Busy)),
-                "Microphone is used by another app",
-            ),
-            (
-                no_clipboard(),
-                failed(CaptureError::Audio(AudioError::Busy)),
-                "Clipboard failed — text in Settings",
-            ),
-            (
-                FakeHost::default().failing("deliver", HostError::NothingTyped("Nope.".to_owned())),
-                accepted(CaptureRoute::Paste, "text"),
-                "Nothing was pasted — Settings",
-            ),
-            (
-                FakeHost::default(),
-                accepted(CaptureRoute::Task, "do a backflip"),
-                "That task isn't configured yet",
-            ),
-            (
-                FakeHost::default(),
-                accepted(CaptureRoute::Paste, ""),
-                "Nothing to paste",
-            ),
-            (
-                FakeHost::default(),
-                accepted(CaptureRoute::Paste, "hi"),
-                "Delivered",
-            ),
-        ];
-        for (host, outcome, headline) in cases {
-            let (finished, _) = finish(host, outcome).await;
-            assert_eq!(
-                finished.map(|finished| finished.headline),
-                Some(headline.to_owned())
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn a_failed_capture_hands_on_the_technical_causes() {
-        let (finished, _) = finish(
-            FakeHost::default(),
-            CaptureOutcome::Failed {
-                error: CaptureError::Recognizer(RecognizerError::Unreachable {
-                    speech: SpeechSource::direct("Office", "ws://127.0.0.1:8080".to_owned()),
-                    reason: ConnectFailure::Refused,
-                    detail: Detail("Connection refused (os error 111)".to_owned()),
-                }),
-                recoverable_text: None,
-            },
-        )
-        .await;
-        assert_eq!(
-            finished.map(|finished| finished.causes),
-            Some(vec!["Connection refused (os error 111)".to_owned()])
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_capture_keeps_what_was_dictated_and_a_cancelled_one_does_nothing() {
+    async fn failed_and_cancelled_captures_keep_the_text_and_deliver_nothing() {
         let failed = |recoverable_text: Option<&str>| CaptureOutcome::Failed {
             error: CaptureError::NotReady {
                 waited: Duration::from_secs(8),
@@ -852,6 +791,19 @@ mod tests {
         .await;
         assert_eq!(notice, None);
         assert_eq!(seen, calls(&["capture_target"]));
+
+        let writing_failed = CaptureOutcome::Failed {
+            error: CaptureError::Writing(crate::writing::WritingError::Timeout),
+            recoverable_text: Some("tell Anna I'm late".to_owned()),
+        };
+        let (finished, typed) = finish(FakeHost::default(), writing_failed).await;
+        let finished = finished.unwrap();
+        assert!(!finished.delivered);
+        assert_eq!(
+            finished.notice,
+            "The writing model took longer than 15 seconds. Nothing was pasted. Captured text is on the clipboard."
+        );
+        assert_eq!(typed, ["capture_target", "copy:\"tell Anna I'm late\""]);
     }
 
     #[tokio::test]
@@ -938,7 +890,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_task_and_a_failed_task_keep_the_captured_text() {
+    async fn unknown_failed_and_impossible_tasks_keep_the_captured_text() {
         let (notice, seen) = run(
             FakeHost::default(),
             accepted(CaptureRoute::Task, "do a backflip"),
@@ -969,6 +921,27 @@ mod tests {
                 "focus_app:Code",
                 "copy:\"switch to editor\""
             ])
+        );
+
+        let (notice, seen) = run(
+            FakeHost::default().failing(
+                "focus_app",
+                HostError::Unsupported(
+                    "Switching apps is unavailable on GNOME Wayland.".to_owned(),
+                ),
+            ),
+            accepted(CaptureRoute::Task, "switch to editor"),
+        )
+        .await;
+        assert_eq!(
+            notice.as_deref(),
+            Some(
+                "Switching apps is unavailable on GNOME Wayland. Captured text is on the clipboard."
+            )
+        );
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("copy:\"switch to editor\"")
         );
     }
 

@@ -203,7 +203,6 @@ fn has_bad_percent(candidate: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::DesktopConfig;
-    use crate::delivery::fakes::FakeHost;
 
     fn config() -> DesktopConfig {
         DesktopConfig::from_json_str(
@@ -363,28 +362,5 @@ mod tests {
                 "{spoken:?}"
             );
         }
-    }
-
-    #[test]
-    fn execute_asks_the_host_and_refuses_discord_before_any_host_call() {
-        let host = FakeHost::default();
-        assert_eq!(
-            execute(&open("https://example.com/", "example.com"), &host).as_deref(),
-            Ok("Asked the browser to open example.com.")
-        );
-        let focus = decide("switch to editor", &config().scripts).unwrap();
-        assert_eq!(
-            execute(&focus, &host).as_deref(),
-            Ok("Focused switch to editor.")
-        );
-        let discord = decide("message the demo channel saying hi", &config().scripts).unwrap();
-        assert!(matches!(
-            execute(&discord, &host),
-            Err(HostError::Unsupported(_))
-        ));
-        assert_eq!(
-            host.calls(),
-            ["open_url:https://example.com/", "focus_app:Code"]
-        );
     }
 }

@@ -729,94 +729,70 @@ async fn telling_the_step_it_is_already_at_wakes_nobody_watching_the_load() {
 }
 
 #[tokio::test]
-async fn a_catalog_model_that_cannot_be_provided_fails_with_the_model_errors_own_headline() {
-    let blocker = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-model-blocker");
-    std::fs::write(&blocker, b"a file where the model folder should be").expect("writes");
-    let source = TransducerSource::new(
-        ModelStore::in_dir(blocker.join("models")),
-        SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms),
-        &WordList::default(),
-        Adapters::default(),
-    );
-
-    let steps = Mutex::new(Vec::new());
-    let error = source
-        .load(|step| steps.lock().unwrap().push(step))
-        .await
-        .err()
-        .expect("no folder to fetch into");
-
-    assert_eq!(
-        *steps.lock().unwrap(),
-        [Step::Fetching(Download {
-            export: Export::Cpu,
-            size: CatalogSpeech::Nemotron160ms.assets().size(),
-        })]
-    );
-
-    assert_eq!(error.headline(), "Can't save the model file");
-    assert!(
-        error
-            .to_string()
-            .starts_with("Could not save the speech model nemotron_160ms.encoder.int8.onnx in "),
-        "{error}"
-    );
-}
-
-#[tokio::test]
-async fn a_gpu_plan_that_cannot_save_its_files_tries_the_cpu_files_next_and_each_load_checks_the_adapter_once()
+async fn a_catalog_model_that_cannot_be_saved_fails_with_the_model_errors_own_headline_after_trying_the_cpu_files_last()
  {
-    let blocker = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("local-gpu-blocker");
-    std::fs::write(&blocker, b"a file where the model folder should be").expect("writes");
-    let checks = Arc::new(AtomicUsize::new(0));
-    let adapters = Adapters::checking({
-        let checks = Arc::clone(&checks);
-        move || {
-            checks.fetch_add(1, Ordering::SeqCst);
-            Adapter::Discrete(Gpu {
-                name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
-                api: "Vulkan",
+    for (name, model, discrete_gpu) in [
+        ("nemotron_160ms", CatalogSpeech::Nemotron160ms, false),
+        ("unified_160ms", CatalogSpeech::Unified160ms, true),
+    ] {
+        let blocker =
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("local-{name}-blocker"));
+        std::fs::write(&blocker, b"a file where the model folder should be").expect("writes");
+        let checks = Arc::new(AtomicUsize::new(0));
+        let adapters = if discrete_gpu {
+            let checks = Arc::clone(&checks);
+            Adapters::checking(move || {
+                checks.fetch_add(1, Ordering::SeqCst);
+                Adapter::Discrete(Gpu {
+                    name: "NVIDIA GeForce RTX 5070 Ti".to_owned(),
+                    api: "Vulkan",
+                })
             })
-        }
-    });
-    let source = TransducerSource::new(
-        ModelStore::in_dir(blocker.join("models")),
-        SpeechChoice::Catalog(CatalogSpeech::Unified160ms),
-        &WordList::default(),
-        adapters,
-    );
-    let steps = Mutex::new(Vec::new());
+        } else {
+            Adapters::default()
+        };
+        let source = TransducerSource::new(
+            ModelStore::in_dir(blocker.join("models")),
+            SpeechChoice::Catalog(model),
+            &WordList::default(),
+            adapters,
+        );
+        let steps = Mutex::new(Vec::new());
 
-    let error = source
-        .load(|step| steps.lock().expect("steps").push(step))
-        .await
-        .err()
-        .expect("no folder to fetch into");
+        let error = source
+            .load(|step| steps.lock().expect("steps").push(step))
+            .await
+            .err()
+            .expect("no folder to fetch into");
 
-    let model = CatalogSpeech::Unified160ms;
-    let Some(gpu_assets) = model.gpu_assets() else {
-        panic!("Nemotron Unified has GPU files");
-    };
-    assert_eq!(
-        *steps.lock().expect("steps"),
-        [
-            Step::Fetching(Download {
+        let mut expected = Vec::new();
+        if discrete_gpu {
+            let Some(gpu_assets) = model.gpu_assets() else {
+                panic!("{name} has GPU files");
+            };
+            expected.push(Step::Fetching(Download {
                 export: Export::Gpu,
                 size: gpu_assets.size(),
-            }),
-            Step::Fetching(Download {
-                export: Export::Cpu,
-                size: model.assets().size(),
-            }),
-        ]
-    );
-    assert!(
-        error
-            .to_string()
-            .starts_with("Could not save the speech model unified_160ms.encoder.int8.onnx in "),
-        "the error is the CPU files': {error}"
-    );
-    assert_eq!(checks.load(Ordering::SeqCst), 1);
+            }));
+        }
+        expected.push(Step::Fetching(Download {
+            export: Export::Cpu,
+            size: model.assets().size(),
+        }));
+        assert_eq!(*steps.lock().expect("steps"), expected, "{name}");
+        assert_eq!(error.headline(), "Can't save the model file", "{name}");
+        assert!(
+            error.to_string().starts_with(&format!(
+                "Could not save the speech model {name}.encoder.int8.onnx in "
+            )),
+            "{name}: the error is the CPU files': {error}"
+        );
+        assert_eq!(
+            checks.load(Ordering::SeqCst),
+            usize::from(discrete_gpu),
+            "{name}"
+        );
+    }
 }
 
 #[tokio::test]
