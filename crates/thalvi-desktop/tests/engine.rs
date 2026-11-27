@@ -7484,13 +7484,8 @@ async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
             settle().await;
             engine.finish().await;
             let rows = read_lines(&dir.join("metrics.jsonl"));
-            let (second_hold_start, _) = rows
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| row["event"] == "desktop_hold_start")
-                .nth(1)
-                .expect("the second hold keeps its start metric");
-            let rows = &rows[..second_hold_start];
+            let mut holds = rows.rsplit(|row| row["event"] == "desktop_hold_start");
+            let rows = holds.nth(1).expect("the first hold has metrics");
             assert!(
                 rows.iter().any(|row| row["event"] == "desktop_end_cue"
                     && row["cue"] == "accepted"
