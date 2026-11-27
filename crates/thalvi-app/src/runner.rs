@@ -538,7 +538,9 @@ impl Publisher {
             true
         });
         if let Some((announcer, words)) = spoken {
-            state.announced_finishing |= finishing;
+            if finishing {
+                state.announced_finishing = true;
+            }
             announcer.announce(&words);
         }
         result

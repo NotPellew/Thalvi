@@ -3185,9 +3185,141 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake};
-    use crate::hold::KeyState;
-    use crate::recognizer::FakeRecognizer;
+    use crate::engine::fakes::{FakeCuePlayer, FakeFrames, FakeWake, FrameFeed};
+    use crate::hold::{HoldInput, KeyBind, KeyName, KeyState};
+    use crate::recognizer::{FakeControl, FakeRecognizer};
+
+    fn hotkey_engine(
+        status: Box<dyn Fn(Feedback<'_>)>,
+    ) -> (
+        Engine<FakeRecognizer, FakeWake, FakeCuePlayer>,
+        FakeFrames,
+        FrameFeed,
+        HoldInput,
+        FakeControl,
+    ) {
+        let gate = InputGate::default();
+        let (frames, feed) = FakeFrames::new(&gate);
+        let (wake, _) = FakeWake::new();
+        let (cues, _) = FakeCuePlayer::new();
+        let (recognizer, server) = FakeRecognizer::new();
+        let (keys, hold) = HoldInput::new();
+        let (engine, _) = Engine::new(
+            Parts {
+                recognizer,
+                wake,
+                cues,
+                gate,
+                http: reqwest::Client::new(),
+                chat: None,
+                hold,
+                notice: Box::new(|_| {}),
+                status,
+                spotter: None,
+                spotter_off: None,
+            },
+            &DesktopConfig::from_json_str("{}").unwrap(),
+            Recorder::disabled(),
+        );
+        (engine, frames, feed, keys, server)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn key_presses_during_wake_dictation_are_refused_and_drained() {
+        let (mut engine, mut frames, _feed, keys, mut server) = hotkey_engine(Box::new(|_| {}));
+        let woke = Woke {
+            at: Instant::now(),
+            dictation: engine.recorder.begin(),
+        };
+        server.ready();
+        let Ok((mut live, _, _)) = engine.start(&mut frames, &woke, None).await else {
+            panic!("the recognizer is ready");
+        };
+
+        engine.ignore_lost();
+        assert!(engine.take_ignored().is_empty(), "no press was lost");
+
+        keys.set(true);
+        keys.set(false);
+        keys.set_write(true);
+        // A press left in the cursor would keep the biased key branch ready on every loop.
+        assert!(engine.on_key(&mut live, None, &mut frames).await.is_none());
+        assert_eq!(engine.take_ignored(), [Refusal::Capturing]);
+        assert!(
+            engine.key.changed().now_or_never().is_none(),
+            "both presses were drained"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_start_shows_its_notice_until_words_arrive_and_does_not_restart_finishing() {
+        let releases = Rc::new(std::cell::Cell::new(0));
+        let feedback_count = Rc::clone(&releases);
+        let (mut engine, mut frames, _feed, keys, mut server) =
+            hotkey_engine(Box::new(move |feedback| {
+                if matches!(feedback, Feedback::StreamingHoldReleased) {
+                    feedback_count.set(feedback_count.get() + 1);
+                }
+            }));
+        keys.set(true);
+        let press = engine.key.take().expect("the Hold press");
+        engine.begin_capture(press);
+        let held = engine.held.take().expect("the Hold opened");
+        let woke = engine.woke.take().expect("the Hold woke the engine");
+        server.ready();
+        let Ok((mut live, _, _)) = engine.start(&mut frames, &woke, Some(&held)).await else {
+            panic!("the recognizer is ready");
+        };
+
+        let start = KeyBind::new(Action::Write, KeyMode::Start, KeyName::f10());
+        keys.key(0, &start, true);
+        assert!(
+            engine
+                .on_key(&mut live, Some(&held), &mut frames)
+                .await
+                .is_none()
+        );
+        assert!(matches!(
+            &*engine.state.borrow(),
+            EngineState::Capturing { notice: Some(notice), .. }
+                if notice == Refusal::Capturing.notice()
+        ));
+        assert_eq!(engine.take_ignored(), [Refusal::Capturing]);
+        engine.on_partial(&mut live, "Hello".to_owned());
+
+        tokio::time::advance(MIN_HOLD).await;
+        keys.set(false);
+        assert!(
+            engine
+                .on_key(&mut live, Some(&held), &mut frames)
+                .await
+                .is_none()
+        );
+        assert_eq!(server.input_ended_calls(), 1);
+        assert_eq!(releases.get(), 1);
+        let finishing = engine.state.borrow().clone();
+
+        let stop = KeyBind::new(Action::Dictate, KeyMode::Stop, KeyName::f9());
+        keys.key(0, &start, false);
+        for (row, bind) in [(0, &start), (1, &stop)] {
+            keys.key(row, bind, true);
+            assert!(
+                engine
+                    .on_key(&mut live, Some(&held), &mut frames)
+                    .await
+                    .is_none()
+            );
+            assert_eq!(engine.take_ignored(), [Refusal::Capturing]);
+            assert_eq!(*engine.state.borrow(), finishing);
+            assert_eq!(server.input_ended_calls(), 1);
+            assert_eq!(releases.get(), 1);
+        }
+        assert!(matches!(
+            engine.on_tail(&mut live, Some(&held)),
+            Some(Done::Accepted(CaptureRequest { route: CaptureRoute::Paste, text }))
+                if text == "Hello"
+        ));
+    }
 
     #[tokio::test]
     async fn dictation_wakes_when_its_score_crosses() {
