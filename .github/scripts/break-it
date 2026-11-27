@@ -421,11 +421,14 @@ interrupted() {
   exit 2
 }
 
+# Runs stage function $2 with its time limit $3 and records how long it took.
 timed() {
   local stage=$1 began=$SECONDS
   shift
+  echo "==> ${TITLE[$stage]} for up to $(duration "$2"), until $(date -d "+$2 seconds" +%H:%M)"
   "$@"
   ELAPSED[$stage]=$((SECONDS - began))
+  echo "==> ${TITLE[$stage]}: ${RESULT[$stage]} after $(duration "${ELAPSED[$stage]}")"
 }
 
 inside() {
