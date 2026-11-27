@@ -170,7 +170,8 @@ code.line { display: block; padding: var(--code-pad-y) var(--code-pad-x); border
 .chips:empty { display: none; }
 .chip { display: inline-flex; align-items: center; gap: var(--chip-gap); font: var(--fs-13) var(--mono); }
 .suggestions { align-items: stretch; }
-.suggestions .suggestion { flex-wrap: wrap; justify-content: flex-start; }
+.suggestions .suggested { color: var(--hint-color); font-size: var(--fs-11); }
+.suggestions .suggestion { display: flex; flex-direction: column; align-items: flex-start; gap: var(--mini-gap); }
 #settings[data-look] main .chip > button { height: auto; padding: 0 var(--chip-right) 0 var(--chip-left); border: 0; background: none; box-shadow: none; font: var(--fs-13) var(--mono); text-transform: none; }
 #settings[data-look] main .chip > button:hover { color: var(--neon); background: none; }
 
