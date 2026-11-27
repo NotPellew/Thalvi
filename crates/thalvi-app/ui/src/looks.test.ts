@@ -137,7 +137,7 @@ describe("the settings window's look", () => {
       "Device",
       "Wake words",
       "Dictation wake word",
-      "Hold keys",
+      "Keys",
       "Capture limits",
     ]);
     expect(headings("commands")).toEqual(["Endings", "Quiet before acting", "Apps", "Scripts"]);

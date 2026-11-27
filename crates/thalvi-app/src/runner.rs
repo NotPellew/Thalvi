@@ -1403,7 +1403,7 @@ impl<S: Rig> Runner<S> {
                 self.end_unopened_feed();
                 Flow::Continue
             }
-            Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Hold)) => {
+            Woke::Trigger(Ok(WakeTrigger::Capture | WakeTrigger::Key)) => {
                 Box::pin(self.capture()).await
             }
             Woke::Trigger(Err(error)) => {
@@ -1508,7 +1508,7 @@ impl<S: Rig> Runner<S> {
                 let _ = reply.send(result);
             }
             Control::RestartIfIdle(restart) => {
-                let held = self.key_state.borrow().down;
+                let held = self.key_state.borrow().is_down();
                 return answer_restart(restart, self.paused, held, *self.feeding.borrow());
             }
             Control::Quit => return Flow::Quit,
@@ -3334,7 +3334,7 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert!(
-                    matches!(trigger, Ok(WakeTrigger::Hold)),
+                    matches!(trigger, Ok(WakeTrigger::Key)),
                     "a fresh press dictates"
                 );
             })
@@ -5379,7 +5379,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum KeptFeed {
         Paused,
-        HoldKey,
+        KeyName,
         Retry,
         Connected,
     }
@@ -5405,13 +5405,13 @@ mod tests {
     async fn scripted_feed_keeps_pause_keys_retry_and_a_connected_microphone() {
         for case in [
             KeptFeed::Paused,
-            KeptFeed::HoldKey,
+            KeptFeed::KeyName,
             KeptFeed::Retry,
             KeptFeed::Connected,
         ] {
             let label = match case {
                 KeptFeed::Paused => "paused",
-                KeptFeed::HoldKey => "hold key",
+                KeptFeed::KeyName => "hold key",
                 KeptFeed::Retry => "retry",
                 KeptFeed::Connected => "connected",
             };
@@ -5456,7 +5456,7 @@ mod tests {
                             assert!(script.audio.borrow().active.is_none(), "{label}");
                             script.stop().await;
                         }
-                        KeptFeed::HoldKey => {
+                        KeptFeed::KeyName => {
                             let key = script.link.hold_input();
                             key.set(true);
                             key.set(false);

@@ -12,7 +12,7 @@ use super::{
     App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, PasteText, WebUrl,
     WindowApp,
 };
-use crate::hold::{HoldChange, HoldKey, HoldKind};
+use crate::hold::{HoldChange, KeyBind};
 
 /// Where GNOME dictation goes: there is no window to bind, so the text waits on the clipboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,8 +47,8 @@ impl Gnome {
         reason = "the same signature as the other hosts, whose hook can fail"
     )]
     pub fn watch_hold_keys(
-        _keys: &[(HoldKind, HoldKey)],
-        _on_change: impl Fn(HoldKind, HoldChange) + Send + 'static,
+        _keys: &[KeyBind],
+        _on_change: impl Fn(usize, HoldChange) + Send + 'static,
         _on_problem: impl Fn(HoldReport) + Send + Sync + 'static,
     ) -> Result<HoldSource, HostError> {
         Ok(HoldSource::Unavailable(
@@ -151,6 +151,7 @@ mod tests {
 
     use super::super::command::{CommandError, fakes::FakeRunner};
     use super::*;
+    use crate::hold::{Action, KeyMode, KeyName};
 
     /// A clipboard that keeps what it is given, or refuses it, and a fixed work area.
     #[derive(Default)]
@@ -316,8 +317,15 @@ mod tests {
 
     #[test]
     fn the_hold_key_is_no_failure_on_gnome_but_says_why_it_does_nothing() {
-        let source =
-            Gnome::watch_hold_keys(&[(HoldKind::Dictate, HoldKey::alt_z())], |_, _| {}, drop);
+        let source = Gnome::watch_hold_keys(
+            &[KeyBind::new(
+                Action::Dictate,
+                KeyMode::Hold,
+                KeyName::alt_z(),
+            )],
+            |_, _| {},
+            drop,
+        );
         assert!(matches!(source, Ok(HoldSource::Unavailable(reason)) if reason.contains("let go")));
     }
 }

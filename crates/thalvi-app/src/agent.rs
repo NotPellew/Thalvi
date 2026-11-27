@@ -9,7 +9,7 @@ use thalvi_desktop::capture::CaptureRoute;
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::entries::{self, LiveKind};
 use thalvi_desktop::feed::{Clip, FeedEnd};
-use thalvi_desktop::hold::HoldKind;
+use thalvi_desktop::hold::Action;
 use thalvi_desktop::metrics::{self, SUMMARY_WINDOW};
 use thalvi_desktop::models::{SpeechModelInfo, SpeechProgress, WakeModelInfo};
 use thalvi_desktop::transducer::SpeechChoice;
@@ -24,7 +24,7 @@ use crate::status::{Failure, FailureKind, Status};
 pub const EFFECT_WAIT: Duration = Duration::from_secs(3);
 
 /// The commands a refusal lists, so that it need not repeat the one that was sent.
-const COMMANDS: [&str; 21] = [
+const COMMANDS: [&str; 22] = [
     "status",
     "state",
     "pause",
@@ -41,6 +41,7 @@ const COMMANDS: [&str; 21] = [
     "settings-check",
     "settings-set",
     "metrics-summary",
+    "key",
     "feed",
     "models",
     "model-download",
@@ -92,6 +93,8 @@ pub enum Request {
     WriteStart,
     /// The writing key came up.
     WriteEnd,
+    /// Row `row` of Settings → Keys went down or up, counting from 0.
+    Key { row: usize, down: bool },
     /// Copy the report of the last error shown.
     CopyError,
     /// Open the settings window, at a page when one is named.
@@ -151,6 +154,7 @@ impl Request {
                 | Self::Feed { .. }
                 | Self::ModelDownload { .. }
                 | Self::SpeechCheck { .. }
+                | Self::Key { .. }
                 | Self::Show { .. }
         );
         if !takes_details && details > 1 {
@@ -202,7 +206,9 @@ pub trait Running {
     fn last_error(&self) -> Option<Failure>;
     fn control(&self, control: Control);
     /// Presses or releases the dictation key.
-    fn hold(&self, kind: HoldKind, down: bool);
+    fn hold(&self, kind: Action, down: bool);
+    /// Presses or releases row `row` of Settings → Keys, refusing a row that does not exist.
+    fn key(&self, row: usize, down: bool) -> Result<(), String>;
     /// Opens the Settings window, at `page` when one is given.
     fn show_settings(&self, page: Option<&str>);
     async fn copy_error(&self) -> Result<(), String>;
@@ -380,10 +386,11 @@ async fn handle(running: &impl Running, wait: Duration, request: Request) -> Str
         Request::Resume => resume(running, wait).await,
         Request::Toggle => toggle(running, wait).await,
         Request::Cancel => cancel(running, wait).await,
-        Request::HoldStart => hold_start(running, HoldKind::Dictate, wait).await,
-        Request::HoldEnd => hold_end(running, HoldKind::Dictate, wait).await,
-        Request::WriteStart => hold_start(running, HoldKind::Write, wait).await,
-        Request::WriteEnd => hold_end(running, HoldKind::Write, wait).await,
+        Request::HoldStart => hold_start(running, Action::Dictate, wait).await,
+        Request::HoldEnd => hold_end(running, Action::Dictate, wait).await,
+        Request::WriteStart => hold_start(running, Action::Write, wait).await,
+        Request::WriteEnd => hold_end(running, Action::Write, wait).await,
+        Request::Key { row, down } => key_row(running, row, down, wait).await,
         Request::CopyError => copy_error(running).await,
     }
 }
@@ -678,7 +685,59 @@ async fn cancel(running: &impl Running, wait: Duration) -> String {
     }
 }
 
-async fn hold_start(running: &impl Running, kind: HoldKind, wait: Duration) -> String {
+/// Presses or releases one row of Settings → Keys, and waits for it to show.
+async fn key_row(running: &impl Running, row: usize, down: bool, wait: Duration) -> String {
+    let mut status = running.status();
+    // Marks the status seen: only a change after the press answers it, never one already shown.
+    let refusal = if down {
+        match &*status.borrow_and_update() {
+            Status::Paused => Some("Thalvi is paused. Resume it first."),
+            current if capturing(current) => Some("A capture is already running."),
+            Status::Working { .. } => Some("The last text is still being delivered."),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Err(error) = running.key(row, down) {
+        return refused(&error, json!({"took_effect": false}));
+    }
+    if let Some(refusal) = refusal {
+        return no_effect(running, refusal);
+    }
+    if !down {
+        if !speaking(&status.borrow()) {
+            return no_effect(running, "No capture is being taken.");
+        }
+        return if reached(&mut status, wait, |status| !speaking(status)).await {
+            took_effect(running)
+        } else {
+            no_effect(running, "The capture did not end.")
+        };
+    }
+    // While Thalvi loads, only the engine knows whether it takes the press: it starts the capture
+    // or refuses the press, which fails the status.
+    let started = tokio::time::timeout(wait, async {
+        while status.changed().await.is_ok() {
+            let current = status.borrow_and_update();
+            if capturing(&current) || matches!(*current, Status::Working { .. }) {
+                return true;
+            }
+            if matches!(*current, Status::Failed { .. }) {
+                return false;
+            }
+        }
+        false
+    })
+    .await;
+    if started == Ok(true) {
+        took_effect(running)
+    } else {
+        no_effect(running, "Thalvi did not start a capture.")
+    }
+}
+
+async fn hold_start(running: &impl Running, kind: Action, wait: Duration) -> String {
     let mut status = running.status();
     // Marks the status seen: only a change after the press answers it, never one already shown.
     let refusal = match &*status.borrow_and_update() {
@@ -715,7 +774,7 @@ async fn hold_start(running: &impl Running, kind: HoldKind, wait: Duration) -> S
     }
 }
 
-async fn hold_end(running: &impl Running, kind: HoldKind, wait: Duration) -> String {
+async fn hold_end(running: &impl Running, kind: Action, wait: Duration) -> String {
     let mut status = running.status();
     let holding = speaking(&status.borrow());
     running.hold(kind, false);
@@ -1122,15 +1181,36 @@ mod tests {
             }
         }
 
-        fn hold(&self, kind: HoldKind, down: bool) {
+        fn key(&self, row: usize, down: bool) -> Result<(), String> {
+            lock(&self.sent).push(format!("key {row} {}", if down { "down" } else { "up" }));
+            let config = self.config();
+            let Some(bind) = config.keys.get(row) else {
+                return Err(format!(
+                    "There is no key row {row}; Settings → Keys has {} rows, numbered from 0.",
+                    config.keys.len()
+                ));
+            };
+            self.keys.key(row, bind, down);
+            if down && self.current() == Status::Listening {
+                self.set_status(Status::Capturing {
+                    target: Some("kitty".to_owned()),
+                    committed: String::new(),
+                    partial: None,
+                    notice: None,
+                });
+            }
+            Ok(())
+        }
+
+        fn hold(&self, kind: Action, down: bool) {
             let key = match kind {
-                HoldKind::Dictate => "hold",
-                HoldKind::Write => "write",
+                Action::Dictate => "hold",
+                Action::Write => "write",
             };
             lock(&self.sent).push(format!("{key} {down}"));
             match kind {
-                HoldKind::Dictate => self.keys.set(down),
-                HoldKind::Write => self.keys.set_write(down),
+                Action::Dictate => self.keys.set(down),
+                Action::Write => self.keys.set_write(down),
             }
             if self.ignoring.load(Ordering::SeqCst) {
                 return;
@@ -2056,6 +2136,26 @@ mod tests {
     }
 
     #[test]
+    fn a_key_command_presses_a_row_and_refuses_a_row_the_settings_do_not_hold() {
+        let rig = Rig::new("key-row", "{}");
+        assert_eq!(
+            rig.ask(&Request::Key { row: 1, down: true })["took_effect"],
+            true
+        );
+        assert_eq!(*lock(&rig.fake.sent), ["key 1 down"]);
+        let press = lock(&rig.fake.presses).take().expect("a press");
+        assert_eq!(press.row, 1);
+        assert_eq!(press.action, Action::Write);
+        let refused = rig.ask(&Request::Key { row: 9, down: true });
+        assert_eq!(refused["took_effect"], false);
+        assert_eq!(
+            refused["error"],
+            "There is no key row 9; Settings → Keys has 2 rows, numbered from 0."
+        );
+        assert!(lock(&rig.fake.presses).take().is_none());
+    }
+
+    #[test]
     fn writing_controls_use_the_write_key_and_writing_can_be_cancelled() {
         let rig = Rig::new("write-control", "{}");
         assert_eq!(rig.ask(&Request::WriteStart)["took_effect"], true);
@@ -2080,8 +2180,8 @@ mod tests {
             (Request::HoldStart, Request::WriteStart, "hold first"),
         ] {
             let (first_end, second_end, expected) = match first {
-                Request::WriteStart => (Request::WriteEnd, Request::HoldEnd, HoldKind::Dictate),
-                _ => (Request::HoldEnd, Request::WriteEnd, HoldKind::Write),
+                Request::WriteStart => (Request::WriteEnd, Request::HoldEnd, Action::Dictate),
+                _ => (Request::HoldEnd, Request::WriteEnd, Action::Write),
             };
             let rig = Rig::new("cross-hold", "{}");
             assert_eq!(rig.ask(&first)["took_effect"], true, "{name}");
@@ -2098,7 +2198,7 @@ mod tests {
             assert_eq!(again["took_effect"], true, "{name}: {again}");
             let press = lock(&rig.fake.presses).take();
             assert_eq!(
-                press.map(|press| press.kind),
+                press.map(|press| press.action),
                 Some(expected),
                 "{name}: the pressed key holds"
             );
@@ -3001,6 +3101,7 @@ mod tests {
                 settings: json!({"look": "neon"}),
             },
             Request::MetricsSummary,
+            Request::Key { row: 0, down: true },
             Request::Feed { path },
             Request::Models,
             Request::ModelDownload {

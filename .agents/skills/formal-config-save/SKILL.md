@@ -118,6 +118,12 @@ change it.
 
 An unreadable look, and a built-in-look save that fails, are recorded on `LastError` for the tray and Settings. Neither writes `desktop.json` or takes the save lock.
 
+The keybind rows (#654) are one more form field: `settings_json` writes the rows in effect, and
+`Store::check` refuses rows this desktop cannot bind before the loader reads them, both inside the
+existing save path. `AppState::take_effect` compares the rows with the watch like the hold keys it
+replaces. No new writer, lock or temporary name is added, and the model and its three invariants
+are unchanged.
+
 The numbers-as-digits setting (#588) shapes the form in `settings_json` and narrows the writing
 key restore in `unmask_keys`: a writing object with no endpoint keeps no key. Saves still go
 through `Store::check`/`Store::save` and `settings_set`'s existing lock and temporary name; no

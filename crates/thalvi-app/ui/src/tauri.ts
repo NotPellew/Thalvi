@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { DownloadFailure, errorText } from "./contract.ts";
-import type { AudioStatus, Backend, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, Level, LookStyles, OverlayPreviewState, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, ChatModelInfo, CurrentApp, Draft, HistoryEntry, KeyDefaults, Level, LookStyles, OverlayPreviewState, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 /** The rejection of `download_speech_model`, which carries `{ message, causes }`, as a typed error. */
 function downloadFailure(rejection: unknown): DownloadFailure {
@@ -70,7 +70,7 @@ export function tauriBackend(): Backend {
     getHoldKeyUnavailable: () => invoke<string | null>("get_hold_key_unavailable"),
     getAppStylesUnavailable: () => invoke<string | null>("get_app_styles_unavailable"),
     getCurrentApp: () => invoke<CurrentApp | null>("get_current_app"),
-    getHoldKeyDefaults: () => invoke<HoldKeyDefaults>("get_hold_key_defaults"),
+    getKeyDefaults: () => invoke<KeyDefaults>("get_key_defaults"),
     getStartAtLogin: () => invoke<SwitchState>("get_start_at_login"),
     setStartAtLogin: (on) => invoke<undefined>("set_start_at_login", { on }),
     getMenuEntry: () => invoke<SwitchState>("get_menu_entry"),

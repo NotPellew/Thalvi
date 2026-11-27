@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use thalvi_desktop::config::{ConfigError, DesktopConfig, Look};
 use thalvi_desktop::entries::{self, LiveKind};
-use thalvi_desktop::hold::{HoldKey, HoldKind};
+use thalvi_desktop::hold::KeyBind;
 use thalvi_desktop::host::{Desktop, HostError};
 use thalvi_desktop::models::CatalogSpeech;
 use thalvi_desktop::theme::{self, LookOverrides};
@@ -140,28 +140,22 @@ fn prepare(settings: &mut Value, current: &DesktopConfig) {
     unmask_keys(settings, current);
 }
 
-/// Refuses changed hold keys this desktop can never bind, before the loader reads them: it takes
-/// the key every config once stored (Alt+KeyZ, Alt+KeyX) for the desktop's default, so a refusal
-/// after it would never see that key. A key that is no key name is the loader's to refuse.
+/// Refuses changed key rows this desktop can never bind, before the loader reads them. A row that
+/// is no key or mode is the loader's to refuse, and a row that did not change needs no check.
 fn check_keys(
     settings: &Value,
     current: &DesktopConfig,
-    check: impl FnOnce(&[(HoldKind, HoldKey)]) -> Result<(), HostError>,
+    check: impl FnOnce(&[KeyBind]) -> Result<(), HostError>,
 ) -> Result<(), String> {
-    let asked = |name: &str, current: &HoldKey| {
-        settings
-            .get(name)
-            .and_then(Value::as_str)
-            .and_then(|key| HoldKey::parse(key).ok())
-            .unwrap_or_else(|| current.clone())
+    let Ok(keys) = serde_json::from_value::<Vec<KeyBind>>(
+        settings.get("keys").cloned().unwrap_or(Value::Null),
+    ) else {
+        return Ok(());
     };
-    let hold = asked("hold_key", &current.hold_key);
-    let write = asked("write_key", &current.write_key);
-    if (&hold, &write) == (&current.hold_key, &current.write_key) {
+    if keys == current.keys {
         return Ok(());
     }
-    check(&[(HoldKind::Dictate, hold), (HoldKind::Write, write)])
-        .map_err(|error| format!("{error} The keys that were set before still work."))
+    check(&keys).map_err(|error| format!("{error} The keys that were set before still work."))
 }
 
 /// Whether the form's writing settings name an endpoint to write with; numbers as digits can be
@@ -323,9 +317,11 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
     if let Some(settings) = settings.as_object_mut() {
         settings.remove("start_at_login");
         settings.remove("show_in_menu");
-        // The file keeps a key only when it is not the desktop's default; the form shows the key in effect.
-        settings.insert("hold_key".to_owned(), config.hold_key.to_string().into());
-        settings.insert("write_key".to_owned(), config.write_key.to_string().into());
+        // The file keeps the rows only when they are not the desktop's default; the form shows the rows in effect.
+        settings.insert(
+            "keys".to_owned(),
+            serde_json::to_value(&config.keys).unwrap_or(Value::Null),
+        );
     }
     // The file keeps the switch only when it is off; the form always shows it.
     if let Some(wake) = settings.get_mut("wake").and_then(Value::as_object_mut) {
@@ -461,6 +457,7 @@ mod tests {
     use serde_json::json;
     use thalvi_desktop::config::Look;
     use thalvi_desktop::entries::LiveKind;
+    use thalvi_desktop::hold::{Action, KeyMode, KeyName};
     use thalvi_desktop::transducer::SpeechChoice;
 
     use super::*;
@@ -561,7 +558,7 @@ mod tests {
                 "ending_pause",
                 "endings",
                 "history",
-                "hold_key",
+                "keys",
                 "look",
                 "microphone",
                 "overlay",
@@ -570,7 +567,6 @@ mod tests {
                 "stt",
                 "update_channel",
                 "wake",
-                "write_key",
                 "writing",
                 "writing_default_prompt"
             ]
@@ -797,46 +793,66 @@ mod tests {
     }
 
     #[test]
-    fn the_form_shows_the_hold_keys_in_effect_and_the_file_keeps_only_a_changed_one() {
+    fn the_form_shows_the_keys_in_effect_and_the_file_keeps_only_changed_rows() {
         let (store, dir) = store("hold-keys");
         let (hold, write) = Desktop::default_hold_keys();
         let mut settings = settings_json(&store_defaults()).unwrap();
-        assert_eq!(settings["hold_key"], hold.to_string());
-        assert_eq!(settings["write_key"], write.to_string());
+        assert_eq!(
+            settings["keys"],
+            json!([
+                {"action": "dictate", "mode": "hold", "key": hold.to_string()},
+                {"action": "write", "mode": "hold", "key": write.to_string()},
+            ])
+        );
 
         let file = || -> Value {
             serde_json::from_str(&std::fs::read_to_string(&store.path).unwrap()).unwrap()
         };
         store.save(settings.clone(), &store_defaults()).unwrap();
-        assert_eq!(
-            (file().get("hold_key"), file().get("write_key")),
-            (None, None)
-        );
+        assert_eq!(file().get("keys"), None, "the defaults are not stored");
 
-        settings["hold_key"] = json!("F8");
+        settings["keys"] = json!([
+            {"action": "dictate", "mode": "toggle", "key": "F8"},
+            {"action": "write", "mode": "hold", "key": "F10"},
+        ]);
         let saved = store.save(settings, &store_defaults()).unwrap();
-        let (kept, absent) = (file()["hold_key"].clone(), file().get("write_key").cloned());
+        let kept = file()["keys"].clone();
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(saved.hold_key.to_string(), "F8");
-        assert_eq!((kept, absent), (json!("F8"), None));
+        assert_eq!(
+            saved
+                .keys
+                .iter()
+                .map(|bind| bind.key.to_string())
+                .collect::<Vec<_>>(),
+            ["F8", "F10"]
+        );
+        assert_eq!(saved.keys[0].action, Action::Dictate);
+        assert_eq!(saved.keys[0].mode, KeyMode::Toggle);
+        assert_eq!(
+            kept,
+            json!([
+                {"action": "dictate", "mode": "toggle", "key": "F8"},
+                {"action": "write", "mode": "hold", "key": "F10"},
+            ])
+        );
     }
 
     #[test]
-    fn a_changed_hold_key_the_desktop_can_never_bind_is_refused_even_when_it_was_the_old_default() {
-        let refuse_modifiers = |keys: &[(HoldKind, HoldKey)]| match keys
-            .iter()
-            .find(|(_, key)| !key.modifiers().is_empty())
-        {
-            Some((_, key)) => Err(HostError::Unsupported(format!("No {key} here."))),
-            None => Ok(()),
-        };
+    fn a_changed_key_row_the_desktop_can_never_bind_is_refused_even_when_it_was_the_old_default() {
+        let refuse_modifiers =
+            |keys: &[KeyBind]| match keys.iter().find(|bind| !bind.key.modifiers().is_empty()) {
+                Some(bind) => Err(HostError::Unsupported(format!("No {} here.", bind.key))),
+                None => Ok(()),
+            };
         let mut current = store_defaults();
-        current.hold_key = HoldKey::f9();
-        current.write_key = HoldKey::f10();
+        let row = |action, key| KeyBind::new(action, KeyMode::Hold, KeyName::parse(key).unwrap());
+        current.keys = vec![row(Action::Dictate, "F9"), row(Action::Write, "F10")];
         let asked = |hold: &str, write: &str| {
             let mut settings = settings_json(&current).unwrap();
-            settings["hold_key"] = json!(hold);
-            settings["write_key"] = json!(write);
+            settings["keys"] = json!([
+                {"action": "dictate", "mode": "hold", "key": hold},
+                {"action": "write", "mode": "hold", "key": write},
+            ]);
             check_keys(&settings, &current, refuse_modifiers)
         };
 

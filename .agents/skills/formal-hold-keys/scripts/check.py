@@ -15,21 +15,23 @@ SKILL = Path(__file__).resolve().parents[1]
 ROOT = SKILL.parents[2]
 CACHE = (Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'thalvi-formal').resolve()
 HOLD = 'crates/thalvi-desktop/src/hold.rs'
-PROPERTIES = ('EachPressCountedOnce', 'HoldFollowsItsKey', 'FreeKeyStartsHold', 'ChordNeverHolds')
+PROPERTIES = ('EachPressCountedOnce', 'HoldFollowsItsKey', 'FreeKeyStartsCapture', 'ChordNeverHolds')
 # Each mutation puts back one way `hold.rs` broke or could break, and the property it must break.
 MUTATIONS = {
-    'NoOvertakeCredit': ('        } else if phase == KeyPhase::Down {\n            KeyPhase::Up\n        } else {\n            KeyPhase::Overtaken(Instant::now())\n        };',
-                        '        } else {\n            KeyPhase::Up\n        };', 'HoldFollowsItsKey'),
-    'NoOtherKeyGuard': ('if state.down && state.kind != kind {\n            return false;\n        }',
+    'NoOvertakeCredit': ('            } else if phase == KeyPhase::Down {\n                KeyPhase::Up\n            } else {\n                KeyPhase::Overtaken(Instant::now())\n            },\n        );\n',
+                        '            } else {\n                KeyPhase::Up\n            },\n        );\n', 'HoldFollowsItsKey'),
+    'NoOtherKeyGuard': ('        // One Hold at a time: another Hold key means nothing until its own key is up.\n        if state.hold.is_some() && state.hold_row != Some(row) {\n            return false;\n        }\n',
                         '', 'HoldFollowsItsKey'),
-    'UncountedLoss': ('self.lost += unseen - u64::from(fresh);', '', 'EachPressCountedOnce'),
-    'ForgetIgnoredKey': ('        // Every key follows its own events, even while the other key\'s hold ignores them.\n        state.phases[index] = if down {\n            if overtaken {\n                KeyPhase::Up\n            } else {\n                KeyPhase::Down\n            }\n        } else if phase == KeyPhase::Down {\n            KeyPhase::Up\n        } else {\n            KeyPhase::Overtaken(Instant::now())\n        };\n        // One hold at a time: the other key means nothing until this one is up.\n        if state.down && state.kind != kind {\n            return false;\n        }',
-                         '        // One hold at a time: the other key means nothing until this one is up.\n        if state.down && state.kind != kind {\n            return false;\n        }\n        state.phases[index] = if down {\n            if overtaken {\n                KeyPhase::Up\n            } else {\n                KeyPhase::Down\n            }\n        } else if phase == KeyPhase::Down {\n            KeyPhase::Up\n        } else {\n            KeyPhase::Overtaken(Instant::now())\n        };', 'FreeKeyStartsHold'),
-    # AltGr alone: a hold that waits to be told from a chord (#387).
-    'ChordIgnored': ('                state.altgr[kind as usize] = AltGrWait::Chord;\n', '', 'ChordNeverHolds'),
-    'StaleWaitConfirms': ('            if current != wait {\n                return false;\n            }\n', '', 'ChordNeverHolds'),
-    'ReleaseCreditsWaiting': ('AltGrWait::Idle | AltGrWait::Holding => Self::step(state, kind, false, None),\n                AltGrWait::Waiting { .. } | AltGrWait::Chord => false,',
-                              'AltGrWait::Idle | AltGrWait::Holding | AltGrWait::Waiting { .. } | AltGrWait::Chord => {\n                    Self::step(state, kind, false, None)\n                }', 'FreeKeyStartsHold'),
+    'UncountedLoss': ('                self.lost += 1;\n                continue;\n',
+                        '                continue;\n', 'EachPressCountedOnce'),
+    'ForgetIgnoredKey': ("        // Every key follows its own events, even while another key's Hold ignores them.\n        state.phases.insert(\n            row,\n            if down {\n                if overtaken {\n                    KeyPhase::Up\n                } else {\n                    KeyPhase::Down\n                }\n            } else if phase == KeyPhase::Down {\n                KeyPhase::Up\n            } else {\n                KeyPhase::Overtaken(Instant::now())\n            },\n        );\n        if mode != KeyMode::Hold {\n            if !down {\n                return false;\n            }\n            state.presses += 1;\n            state.kind = action;\n            state.mode = mode;\n            state.since = since;\n            state.push(Impulse {\n                number: state.presses,\n                row,\n                action,\n                mode,\n                at: Order::next(),\n                release: Cutoff::default(),\n                since,\n            });\n            return true;\n        }\n        // One Hold at a time: another Hold key means nothing until its own key is up.\n        if state.hold.is_some() && state.hold_row != Some(row) {\n            return false;\n        }\n",
+                        "        // One Hold at a time: another Hold key means nothing until its own key is up.\n        if state.hold.is_some() && state.hold_row != Some(row) {\n            return false;\n        }\n        // Every key follows its own events, even while another key's Hold ignores them.\n        state.phases.insert(\n            row,\n            if down {\n                if overtaken {\n                    KeyPhase::Up\n                } else {\n                    KeyPhase::Down\n                }\n            } else if phase == KeyPhase::Down {\n                KeyPhase::Up\n            } else {\n                KeyPhase::Overtaken(Instant::now())\n            },\n        );\n        if mode != KeyMode::Hold {\n            if !down {\n                return false;\n            }\n            state.presses += 1;\n            state.kind = action;\n            state.mode = mode;\n            state.since = since;\n            state.push(Impulse {\n                number: state.presses,\n                row,\n                action,\n                mode,\n                at: Order::next(),\n                release: Cutoff::default(),\n                since,\n            });\n            return true;\n        }\n", 'FreeKeyStartsCapture'),
+    'ChordIgnored': ('                state.altgr.insert(row, AltGrWait::Chord);\n',
+                        '', 'ChordNeverHolds'),
+    'StaleWaitConfirms': ('            if current != wait {\n                return false;\n            }\n',
+                        '', 'ChordNeverHolds'),
+    'ReleaseCreditsWaiting': ('                AltGrWait::Idle | AltGrWait::Holding => {\n                    Self::step(state, row, bind.action, bind.mode, false, None)\n                }\n                AltGrWait::Waiting { .. } | AltGrWait::Chord => false,\n',
+                        '                AltGrWait::Idle\n                | AltGrWait::Holding\n                | AltGrWait::Waiting { .. }\n                | AltGrWait::Chord => {\n                    Self::step(state, row, bind.action, bind.mode, false, None)\n                }\n', 'FreeKeyStartsCapture'),
 }
 
 

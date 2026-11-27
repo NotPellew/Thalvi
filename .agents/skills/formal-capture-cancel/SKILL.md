@@ -41,6 +41,12 @@ that failed in delivery (`undelivered`) when it sets the status's failure kind,
 after `Settling::settle` has already decided what reaches the host. That is a
 label on the status, not a delivery path, so the mapped actions are unchanged.
 
+The keybinds change (#654) lets a Toggle or Stop key end a key capture while it runs
+(`Engine::on_stop`), and a Hold row's release still ends its own capture. It adds no control,
+cancel, pause, quit or delivery path: the ending is a key press the capture already watched,
+and `Engine::capture`'s cancel branch and `Runner::capture`'s ending requests are unchanged, as
+are the bounds and the model's actions.
+
 `Engine::capture` now also records the delivery route on a delivered capture's
 metrics line, after `set_state(Listening)` and after the outcome has already
 been decided. That write is not a delivery path and adds no cancellation or

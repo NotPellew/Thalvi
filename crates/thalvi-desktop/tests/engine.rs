@@ -23,7 +23,7 @@ use thalvi_desktop::engine::{
 };
 use thalvi_desktop::feed::{Clip, Fed, Feed, FeedEnd, Feeder};
 use thalvi_desktop::frame::{FRAME_SAMPLES, Frame};
-use thalvi_desktop::hold::{HoldInput, HoldKind, Refusal};
+use thalvi_desktop::hold::{Action, HoldInput, KeyBind, KeyMode, KeyName, Refusal};
 use thalvi_desktop::host::WindowApp;
 use thalvi_desktop::metrics::{RecordKinds, Recorder};
 use thalvi_desktop::models::CatalogSpeech;
@@ -3614,7 +3614,7 @@ async fn cue_timings_are_not_written_when_metrics_are_off() {
 
 /// Runs a hold then its capture on the engine, as a caller would.
 fn hold_task(engine: TestEngine, frames: FakeFrames) -> JoinHandle<CaptureOutcome> {
-    capture_in(engine, frames, WakeTrigger::Hold, None)
+    capture_in(engine, frames, WakeTrigger::Key, None)
 }
 
 impl Rig {
@@ -3837,7 +3837,7 @@ async fn cancelling_a_hold_from_outside_ends_it_cancelled_and_the_release_does_n
             let (mut rig, mut engine, mut frames) = Rig::new("{}");
             let task = tokio::task::spawn_local(async move {
                 let trigger = engine.listen(&mut frames).await.unwrap();
-                assert_eq!(trigger, WakeTrigger::Hold);
+                assert_eq!(trigger, WakeTrigger::Key);
                 let outcome = engine.capture(&mut frames, None).await;
                 // The key is still down; listening goes on without starting anything.
                 let next =
@@ -4060,13 +4060,13 @@ async fn an_interrupted_listener_keeps_a_hold_or_reports_a_tap_before_it_resumes
                     .await
                     .unwrap()
                     .unwrap(),
-                WakeTrigger::Hold,
+                WakeTrigger::Key,
                 "the next fresh press still captures"
             );
         } else {
             assert_eq!(
                 result.unwrap().unwrap(),
-                WakeTrigger::Hold,
+                WakeTrigger::Key,
                 "HANDOFF_PRESS_SILENTLY_DROPPED"
             );
             assert_eq!(engine.take_ignored(), []);
@@ -4091,7 +4091,7 @@ async fn a_new_press_after_the_callers_last_check_survives_resuming_the_listener
             .await
             .expect("the next press must start a hold")
             .unwrap(),
-        WakeTrigger::Hold
+        WakeTrigger::Key
     );
     assert!(
         engine.take_ignored().is_empty(),
@@ -4114,7 +4114,7 @@ async fn a_key_already_down_when_listening_starts_waits_for_its_next_press() {
             assert!(!task.is_finished(), "its release starts nothing");
             rig.key.set(true);
             settle().await;
-            assert_eq!(finished(task).await.unwrap(), WakeTrigger::Hold);
+            assert_eq!(finished(task).await.unwrap(), WakeTrigger::Key);
         })
         .await;
 }
@@ -4239,10 +4239,10 @@ async fn the_wake_word_starts_a_capture_only_with_wake_words_on_and_the_hold_key
     // (config, switched before listening, input, what listen returns, whether the wake model scored)
     let cases = [
         ("{}", None, Wake, Some(WakeTrigger::Capture), true),
-        ("{}", None, Hold, Some(WakeTrigger::Hold), true),
+        ("{}", None, Hold, Some(WakeTrigger::Key), true),
         (OFF, None, Wake, None, false),
-        (OFF, None, Hold, Some(WakeTrigger::Hold), false),
-        (OFF, None, WakeThenHold, Some(WakeTrigger::Hold), false),
+        (OFF, None, Hold, Some(WakeTrigger::Key), false),
+        (OFF, None, WakeThenHold, Some(WakeTrigger::Key), false),
         ("{}", Some(false), Wake, None, false),
         (OFF, Some(true), Wake, Some(WakeTrigger::Capture), true),
     ];
@@ -4278,6 +4278,15 @@ async fn the_wake_word_starts_a_capture_only_with_wake_words_on_and_the_hold_key
         .await;
 }
 
+/// The `AltGr` row the engine tests press directly, as the Windows hook would.
+fn altgr() -> KeyBind {
+    KeyBind::new(
+        Action::Dictate,
+        KeyMode::Hold,
+        KeyName::parse("AltRight").unwrap(),
+    )
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_hold_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhile() {
     LocalSet::new()
@@ -4286,7 +4295,7 @@ async fn a_hold_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhi
             let task = hold_task(engine, frames);
             settle().await;
             // AltGr goes down alone; the user starts talking before the wait is over.
-            let wait = rig.key.press_alone(HoldKind::Dictate);
+            let wait = rig.key.press_alone(0);
             rig.at(80).await;
             rig.feed.send(quiet(3));
             settle().await;
@@ -4294,7 +4303,7 @@ async fn a_hold_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhi
             rig.feed.send(quiet(4));
             settle().await;
             rig.at(200).await;
-            rig.key.confirm_alone(HoldKind::Dictate, wait);
+            rig.key.confirm_alone(0, &altgr(), wait);
             settle().await;
             rig.server.ready();
             settle().await;
@@ -4493,7 +4502,7 @@ async fn a_hold_sends_what_was_queued_before_its_release_and_nothing_queued_afte
                     let label = format!("case {case}, with a full tap while pending: {tap}");
                     let (mut rig, mut engine, mut frames) = Rig::new("{}");
                     let task = tokio::task::spawn_local(async move {
-                        assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                        assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Key);
                         let outcome = engine.capture(&mut frames, None).await;
                         let ignored = engine.take_ignored();
                         engine.finish().await;
@@ -4571,7 +4580,7 @@ async fn a_hold_abandoned_before_its_capture_leaves_nothing_for_the_next_wake_ca
         .run_until(async {
             let (mut rig, mut engine, mut frames) = Rig::new("{}");
             let task = tokio::task::spawn_local(async move {
-                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Key);
                 // A cancel landed while the window was bound: the capture never ran.
                 assert_eq!(
                     engine.listen(&mut frames).await.unwrap(),
@@ -4747,7 +4756,7 @@ async fn a_frame_published_after_pending_poll_but_before_release_is_not_lost() {
                 publication: Publication::BeforeRelease,
             };
             let task = tokio::task::spawn_local(async move {
-                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Key);
                 let outcome = engine.capture(&mut frames, None).await;
                 engine.finish().await;
                 outcome
@@ -4794,7 +4803,7 @@ async fn continuation_published_during_a_poll_reaches_the_recognizer_only_while_
                     publication: Publication::Continuation { release },
                 };
                 let task = tokio::task::spawn_local(async move {
-                    assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                    assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Key);
                     engine.capture(&mut frames, None).await
                 });
                 rig.press().await;
@@ -5053,7 +5062,7 @@ async fn a_hold_still_behind_fifteen_seconds_after_release_pastes_what_it_has_an
             let (mut rig, mut engine, mut frames) = Rig::new("{}");
             rig.server.behind(true);
             let task = tokio::task::spawn_local(async move {
-                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Key);
                 let outcome = engine.capture(&mut frames, None).await;
                 let note = engine.take_release_note();
                 engine.finish().await;
@@ -5648,7 +5657,7 @@ async fn writing_uses_the_bound_app_prompt_and_records_only_the_prompt_source() 
                         Rig::recording(&config, Recorder::in_dir(kinds, &dir).unwrap());
                     let trigger = match ask {
                         Ask::Ending => WakeTrigger::Capture,
-                        Ask::Key => WakeTrigger::Hold,
+                        Ask::Key => WakeTrigger::Key,
                     };
                     let task = capture_in(engine, frames, trigger, window);
                     ask.say(&mut rig, words).await;
@@ -5729,7 +5738,7 @@ async fn nothing_is_written_unless_it_is_asked_for() {
                 );
                 let (mut rig, engine, frames) = Rig::new(&config);
                 let task = if name == "hold key" {
-                    let task = capture_in(engine, frames, WakeTrigger::Hold, Some(WindowApp::new("kitty", "secret-title")));
+                    let task = capture_in(engine, frames, WakeTrigger::Key, Some(WindowApp::new("kitty", "secret-title")));
                     rig.hold().await;
                     rig.say(1000, Say::Partial("tell Anna I'm late write that out"))
                         .await;
@@ -7266,7 +7275,7 @@ async fn a_hold_release_returns_the_paste_before_the_accepted_cue_finishes() {
                 rig.cues.never_finishes(Cue::Accepted);
                 rig.cues.mutes(&rig.gate);
                 let task = tokio::task::spawn_local(async move {
-                    assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                    assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Key);
                     let outcome = engine.capture(&mut frames, None).await;
                     (outcome, engine)
                 });
@@ -7313,7 +7322,7 @@ async fn a_microphone_error_while_listening_does_not_cut_the_previous_accepted_c
             let (mut rig, mut engine, mut frames) = Rig::new("{}");
             rig.cues.set_length(Cue::Accepted, ms(1000));
             let task = tokio::task::spawn_local(async move {
-                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Key);
                 assert_eq!(
                     engine.capture(&mut frames, None).await,
                     accepted(CaptureRoute::Paste, "hello world")
@@ -7412,7 +7421,7 @@ async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
             rig.cues.mutes(&rig.gate);
             rig.cues.set_length(Cue::Accepted, ms(10_000));
             let task = tokio::task::spawn_local(async move {
-                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Hold);
+                assert_eq!(engine.listen(&mut frames).await.unwrap(), WakeTrigger::Key);
                 let outcome = engine.capture(&mut frames, None).await;
                 (outcome, engine, frames)
             });
@@ -7444,7 +7453,7 @@ async fn the_next_hold_cuts_the_old_end_cue_and_hears_words_from_the_press() {
                 // A frame can arrive after the cut cue opens the gate and before listen returns.
                 assert!(rig.gate.is_enabled());
                 rig.feed.send(quiet(54));
-                assert_eq!(listen.await.unwrap(), WakeTrigger::Hold);
+                assert_eq!(listen.await.unwrap(), WakeTrigger::Key);
             }
             let task = tokio::task::spawn_local(async move {
                 let outcome = engine.capture(&mut frames, None).await;
@@ -7625,6 +7634,172 @@ async fn speaking_more_words_cancels_a_live_submit_preview_without_timing_out() 
                 finished(task).await,
                 CaptureOutcome::Cancelled { .. }
             ));
+        })
+        .await;
+}
+
+/// A key row the tests press, as Settings → Keys holds it.
+fn bind(action: Action, mode: KeyMode, key: &str) -> KeyBind {
+    KeyBind::new(action, mode, KeyName::parse(key).unwrap())
+}
+
+impl Rig {
+    /// The key of row `row` goes down at the current time, as a bind or the hook reports it.
+    async fn press_row(&self, row: usize, bind: &KeyBind) {
+        settle().await;
+        self.key.key(row, bind, true);
+        settle().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_toggle_key_starts_on_a_press_and_ends_and_pastes_on_the_next() {
+    LocalSet::new()
+        .run_until(async {
+            let dir = record_dir("toggle-metrics");
+            let recorder = Recorder::in_dir(METRICS_ONLY, &dir).unwrap();
+            let (mut rig, engine, frames) = Rig::recording("{}", recorder);
+            let toggle = bind(Action::Dictate, KeyMode::Toggle, "F9");
+            let task = capture_in(engine, frames, WakeTrigger::Key, None);
+            settle().await;
+            rig.press_row(0, &toggle).await;
+            rig.server.ready();
+            settle().await;
+            rig.at(230).await;
+            rig.say(300, Say::Final("hello")).await;
+            rig.press_row(0, &toggle).await;
+            rig.at(700).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "hello"));
+
+            let lines = read_lines(&dir.join("metrics.jsonl"));
+            let start = lines
+                .iter()
+                .find(|line| line["event"] == "desktop_hold_start")
+                .expect("a hold start");
+            assert_eq!(start["mode"], "toggle");
+            assert_eq!(start["action"], "dictate");
+            let end = lines
+                .iter()
+                .find(|line| line["event"] == "desktop_hold_end")
+                .expect("a hold end");
+            assert_eq!(end["outcome"], "toggled");
+            assert_eq!(end["mode"], "toggle");
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_key_ends_a_capture_started_by_another_rows_action_and_delivers_that_action() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let dictate = bind(Action::Dictate, KeyMode::Toggle, "F8");
+            let stop = bind(Action::Write, KeyMode::Stop, "F7");
+            let task = capture_in(engine, frames, WakeTrigger::Key, None);
+            settle().await;
+            rig.press_row(0, &dictate).await;
+            rig.server.ready();
+            settle().await;
+            rig.at(230).await;
+            rig.say(300, Say::Final("dear team")).await;
+            rig.press_row(1, &stop).await;
+            rig.at(700).await;
+            assert_eq!(
+                finished(task).await,
+                accepted(CaptureRoute::Paste, "dear team"),
+                "the Stop row is a Write row, but the capture started as Dictate"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stop_key_with_nothing_running_is_refused_visibly_and_the_next_key_still_starts() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let stop = bind(Action::Dictate, KeyMode::Stop, "F7");
+            let toggle = bind(Action::Dictate, KeyMode::Toggle, "F9");
+            let task = capture_in(engine, frames, WakeTrigger::Key, None);
+            settle().await;
+            rig.press_row(0, &stop).await;
+            rig.press_row(1, &toggle).await;
+            assert!(
+                rig.notices()
+                    .contains(&Refusal::NothingToStop.notice().to_owned()),
+                "{:?}",
+                rig.notices()
+            );
+            rig.server.ready();
+            settle().await;
+            rig.at(230).await;
+            rig.say(300, Say::Final("hello")).await;
+            rig.press_row(1, &toggle).await;
+            rig.at(700).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "hello"));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_start_key_pressed_while_a_capture_runs_is_refused_visibly_and_the_capture_goes_on() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let toggle = bind(Action::Dictate, KeyMode::Toggle, "F9");
+            let start = bind(Action::Write, KeyMode::Start, "F7");
+            let task = capture_in(engine, frames, WakeTrigger::Key, None);
+            settle().await;
+            rig.press_row(0, &toggle).await;
+            rig.server.ready();
+            settle().await;
+            rig.at(230).await;
+            rig.say(300, Say::Final("hello")).await;
+            rig.press_row(1, &start).await;
+            assert!(
+                rig.notices()
+                    .contains(&Refusal::Capturing.notice().to_owned()),
+                "{:?}",
+                rig.notices()
+            );
+            assert!(
+                !task.is_finished(),
+                "a refused Start leaves the capture running"
+            );
+            rig.press_row(0, &toggle).await;
+            rig.at(700).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "hello"));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_toggle_that_waited_to_be_told_from_a_chord_keeps_the_words_said_meanwhile() {
+    LocalSet::new()
+        .run_until(async {
+            let (mut rig, engine, frames) = Rig::new("{}");
+            let toggle = bind(Action::Dictate, KeyMode::Toggle, "AltRight");
+            let task = capture_in(engine, frames, WakeTrigger::Key, None);
+            settle().await;
+            let wait = rig.key.press_alone(0);
+            // AltGr is still alone and the user speaks before its wait runs out.
+            rig.feed.send(quiet(3));
+            settle().await;
+            rig.at(120).await;
+            rig.key.confirm_alone(0, &toggle, wait);
+            settle().await;
+            rig.server.ready();
+            settle().await;
+            rig.at(230).await;
+            rig.say(300, Say::Final("hello")).await;
+            rig.press_row(0, &toggle).await;
+            rig.at(700).await;
+            assert_eq!(finished(task).await, accepted(CaptureRoute::Paste, "hello"));
+            assert_eq!(
+                tags(&rig.sent())[0],
+                3,
+                "the frame said during the wait came first"
+            );
         })
         .await;
 }

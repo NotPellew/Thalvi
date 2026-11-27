@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatBuild, type ChatModelInfo, type CurrentApp, type Draft, type HistoryEntry, type HoldKeyDefaults, type LiveEntry, type LookStyles, type OverlayPreviewState, type SpeechEntry, type SwitchState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
+import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatBuild, type ChatModelInfo, type CurrentApp, type Draft, type HistoryEntry, type KeyDefaults, type LiveEntry, type LookStyles, type OverlayPreviewState, type SpeechEntry, type SwitchState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
 import { applyPatch, type SettingsPatch } from "./patch.ts";
 
 export const CHAT_MODEL: ChatModelInfo = {
@@ -35,8 +35,10 @@ export const SETTINGS: Settings = {
   look: "neon",
   update_channel: "stable",
   recordings: { metrics: true, text: false, audio: false },
-  hold_key: "Alt+KeyZ",
-  write_key: "Alt+KeyX",
+  keys: [
+    { action: "dictate", mode: "hold", key: "Alt+KeyZ" },
+    { action: "write", mode: "hold", key: "Alt+KeyX" },
+  ],
   writing: null,
   writing_default_prompt: "Write what I dictated as clear text.",
   history: { enabled: true, limit: 200 },
@@ -199,7 +201,14 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     getHoldKeyUnavailable: vi.fn<() => Promise<string | null>>(() => Promise.resolve(null)),
     getAppStylesUnavailable: vi.fn<() => Promise<string | null>>(() => Promise.resolve(null)),
     getCurrentApp: vi.fn<() => Promise<CurrentApp | null>>(() => Promise.resolve(null)),
-    getHoldKeyDefaults: vi.fn<() => Promise<HoldKeyDefaults>>(() => Promise.resolve({ hold_key: "Alt+KeyZ", write_key: "Alt+KeyX" })),
+    getKeyDefaults: vi.fn<() => Promise<KeyDefaults>>(() =>
+      Promise.resolve({
+        keys: [
+          { action: "dictate", mode: "hold", key: "Alt+KeyZ" },
+          { action: "write", mode: "hold", key: "Alt+KeyX" },
+        ],
+      }),
+    ),
     getStartAtLogin: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),
     setStartAtLogin: vi.fn<(on: boolean) => Promise<void>>(() => Promise.resolve()),
     getMenuEntry: vi.fn<() => Promise<SwitchState>>(() => Promise.resolve({ kind: "available", on: false, problem: null })),

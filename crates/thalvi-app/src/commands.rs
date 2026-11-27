@@ -867,11 +867,14 @@ pub fn get_current_app(state: State<'_, AppState>) -> Option<CurrentApp> {
     CurrentApp::of(state.host().recent_app(), &state.link.last_writing_window)
 }
 
-/// The hold and write keys this desktop starts with, named as in the settings.
+/// The key rows this desktop starts with, as the settings name them.
 #[tauri::command]
-pub fn get_hold_key_defaults() -> Value {
+pub fn get_key_defaults() -> Value {
     let (hold, write) = Desktop::default_hold_keys();
-    json!({"hold_key": hold.to_string(), "write_key": write.to_string()})
+    json!({"keys": [
+        {"action": "dictate", "mode": "hold", "key": hold.to_string()},
+        {"action": "write", "mode": "hold", "key": write.to_string()},
+    ]})
 }
 
 #[tauri::command]
@@ -966,8 +969,11 @@ mod tests {
     fn the_defaults_the_ui_restores_are_this_desktops_keys_as_the_settings_name_them() {
         let (hold, write) = Desktop::default_hold_keys();
         assert_eq!(
-            get_hold_key_defaults(),
-            json!({"hold_key": hold.to_string(), "write_key": write.to_string()})
+            get_key_defaults(),
+            json!({"keys": [
+                {"action": "dictate", "mode": "hold", "key": hold.to_string()},
+                {"action": "write", "mode": "hold", "key": write.to_string()},
+            ]})
         );
     }
 
