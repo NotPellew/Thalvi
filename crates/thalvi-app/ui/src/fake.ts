@@ -226,6 +226,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     getSettings: () => Promise.resolve(structuredClone(saved)),
     // Generated from what the desktop resolves; a Rust test keeps it in step.
     getLookStyles: () => Promise.resolve(fixture as LookStyles),
+    onThemeChanged: () => undefined,
     previewOverlay: (state: OverlayPreviewState, scale: number) => {
       const ratio = Math.round(scale);
       const width = 460 * ratio;

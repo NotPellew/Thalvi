@@ -1577,6 +1577,11 @@
       "unit": "toggle"
     }
   ],
+  "schemes": {
+    "gunmetal": "dark",
+    "holo": "dark",
+    "neon": "light"
+  },
   "values": {
     "gunmetal": {
       "border.width": 5,
@@ -1641,21 +1646,21 @@
     },
     "neon": {
       "border.width": 1,
-      "colors.accent": "#2bff88",
-      "colors.background": "#020617",
-      "colors.border": "#12315e",
-      "colors.muted": "#9cc7b4",
-      "colors.on_accent": "#02120a",
-      "colors.raised": "#061a3d",
-      "colors.secondary": "#3b82f6",
-      "colors.state.done": "#2bff88",
-      "colors.state.failed": "#ff6b5e",
-      "colors.state.live": "#12315e",
-      "colors.state.pending": "#ffc24b",
-      "colors.state.quiet": "#9cc7b4",
-      "colors.state.working": "#9cc7b499",
-      "colors.surface": "#04122e",
-      "colors.text": "#eafff3",
+      "colors.accent": "#007a43",
+      "colors.background": "#e8eff7",
+      "colors.border": "#b9cbdd",
+      "colors.muted": "#3d5a73",
+      "colors.on_accent": "#ffffff",
+      "colors.raised": "#d3e2f3",
+      "colors.secondary": "#0b3d91",
+      "colors.state.done": "#007a43",
+      "colors.state.failed": "#b42318",
+      "colors.state.live": "#b9cbdd",
+      "colors.state.pending": "#8a5a00",
+      "colors.state.quiet": "#3d5a73",
+      "colors.state.working": "#3d5a7399",
+      "colors.surface": "#f7fbff",
+      "colors.text": "#07182e",
       "font.family": "system-ui, -apple-system, \"Segoe UI\", sans-serif",
       "font.mono_family": "ui-monospace, \"SF Mono\", SFMono-Regular, Menlo, Consolas, monospace",
       "font.scale": 1.0,
@@ -1665,7 +1670,7 @@
       "motion.pulse": true,
       "shape.radius": 6,
       "spacing.scale": 1.0,
-      "surface.opacity": 0.92
+      "surface.opacity": 0.94
     }
   }
 }

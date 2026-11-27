@@ -51,6 +51,7 @@ export const WAKE_MODELS_INFO: WakeModelInfo[] = [
 /** The custom properties a test needs to see applied; the real set comes from the look model. */
 export const LOOK_STYLES: LookStyles = {
   properties: [],
+  schemes: { gunmetal: "dark", holo: "dark", neon: "dark" },
   looks: {
     gunmetal: { "--neon": "#6bf8ff", "--bg": "#0f1012", "--editor-bg": "#101418" },
     holo: { "--neon": "#6bf8ff", "--bg": "#0c1820", "--editor-bg": "#101418" },
@@ -148,6 +149,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const rebuildingListeners: ((rebuilding: boolean) => void)[] = [];
   const elsewhereListeners: (() => void)[] = [];
+  const themeListeners: (() => void)[] = [];
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const pageListeners: ((page: string) => void)[] = [];
   const updateListeners: ((state: UpdateState) => void)[] = [];
@@ -174,6 +176,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     getRebuilding: vi.fn(() => Promise.resolve(false)),
     onRebuilding: vi.fn((listener: (rebuilding: boolean) => void) => rebuildingListeners.push(listener)),
     onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
+    onThemeChanged: vi.fn((listener: () => void) => themeListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
     getLookStyles: vi.fn<(styles?: LookStyles) => Promise<LookStyles>>(() => Promise.resolve(structuredClone(lookStyles))),
     previewOverlay: vi.fn<(state: OverlayPreviewState, scale: number) => Promise<ArrayBuffer>>((state) => Promise.resolve(previewBuffer(state))),
@@ -266,6 +269,10 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     },
     changedElsewhere: () => {
       for (const listener of elsewhereListeners) listener();
+    },
+    themeChanged: (styles: LookStyles) => {
+      lookStyles = styles;
+      for (const listener of themeListeners) listener();
     },
     update: (next: UpdateState) => {
       updateState = next;
