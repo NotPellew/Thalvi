@@ -396,7 +396,11 @@ impl<R: CommandRunner> Host for Hyprland<R> {
     }
 
     fn watch_field(&self, target: &Window) -> Result<Box<dyn FieldProbe>, FieldLimit> {
-        field::probe(target)
+        Ok(field::probe(target, |window| {
+            Hyprland::system()
+                .active()
+                .is_ok_and(|active| active == *window)
+        }))
     }
 
     fn writing_target(&self, target: &Window) -> Result<WindowApp, AppMatchLimit> {

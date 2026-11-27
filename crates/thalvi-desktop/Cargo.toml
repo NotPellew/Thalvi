@@ -42,6 +42,7 @@ smithay-client-toolkit.workspace = true
 wayland-client.workspace = true
 x11rb.workspace = true
 xkbcommon.workspace = true
+zbus.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
