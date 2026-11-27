@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatBuild, type ChatModelInfo, type CurrentApp, type Draft, type HistoryEntry, type HoldKeyDefaults, type LiveEntry, type LookStyles, type OverlayPreviewState, type SpeechEntry, type SwitchState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
+import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatBuild, type ChatModelInfo, type CurrentApp, type Draft, type HistoryEntry, type HoldKeyDefaults, type Learning, type LiveEntry, type LookStyles, type OverlayPreviewState, type SpeechEntry, type SwitchState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
 import { applyPatch, type SettingsPatch } from "./patch.ts";
 
 export const CHAT_MODEL: ChatModelInfo = {
@@ -27,7 +27,7 @@ export const SETTINGS: Settings = {
     "scratch that": "scratch",
     "never mind": "cancel",
   },
-  stt: { entries: [{ kind: "realtime", id: "direct", name: "Realtime speech server", active: true, address: "ws://127.0.0.1:8012", model: "nemotron" }] },
+  stt: { entries: [{ kind: "realtime", id: "direct", name: "Realtime speech server", active: true, address: "ws://127.0.0.1:8012", model: "nemotron" }], learn_from_corrections: false },
   apps: { slack: { classes: ["Slack"], executables: [], input_keys: ["ctrl", "k"] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com", label: "docs" }],
   overlay: { show: true, draft: true },
@@ -167,6 +167,11 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   // What the desktop holds after each patch it accepted.
   let held = structuredClone(settings);
   const applied: Settings[] = [];
+  const learningListeners: ((learning: Learning) => void)[] = [];
+  let learning: Learning = { suggestions: [], limit: null };
+  const tellLearning = (): void => {
+    for (const listener of learningListeners) listener(structuredClone(learning));
+  };
   const backend = {
     getStatus: vi.fn(() => Promise.resolve(initial)),
     onStatus: vi.fn((listener: (status: Status) => void) => statusListeners.push(listener)),
@@ -195,6 +200,19 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     deleteHistoryEntry: vi.fn<(id: number) => Promise<void>>(() => Promise.resolve()),
     clearHistory: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     getDraft: vi.fn<() => Promise<Draft | null>>(() => Promise.resolve(null)),
+    getLearning: vi.fn<() => Promise<Learning>>(() => Promise.resolve(structuredClone(learning))),
+    acceptSuggestion: vi.fn<(word: string) => Promise<void>>((word) => {
+      learning = { ...learning, suggestions: learning.suggestions.filter((suggestion) => suggestion.word !== word) };
+      settings = { ...structuredClone(settings), stt: { ...settings.stt, phrases: [...(settings.stt.phrases ?? []), word] } };
+      tellLearning();
+      return Promise.resolve();
+    }),
+    dismissSuggestion: vi.fn<(word: string) => Promise<void>>((word) => {
+      learning = { ...learning, suggestions: learning.suggestions.filter((suggestion) => suggestion.word !== word) };
+      tellLearning();
+      return Promise.resolve();
+    }),
+    onLearningChanged: vi.fn((listener: (learning: Learning) => void) => { learningListeners.push(listener); }),
     editDraft: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
     copyText: vi.fn<(text: string) => Promise<void>>(() => Promise.resolve()),
     discardDraft: vi.fn<() => Promise<void>>(() => Promise.resolve()),
@@ -269,6 +287,10 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     },
     changedElsewhere: () => {
       for (const listener of elsewhereListeners) listener();
+    },
+    learningChanged: (next: Learning) => {
+      learning = structuredClone(next);
+      tellLearning();
     },
     themeChanged: (styles: LookStyles) => {
       lookStyles = styles;

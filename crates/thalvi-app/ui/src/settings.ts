@@ -313,7 +313,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     showLook(loaded.look);
     live.opened = () => undefined;
     pages = buildPages({
-      settings: loaded, backend, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply, showLook, lookStyles,
+      settings: loaded, backend, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, holdKeyDefaults, startAtLogin, menuEntry, live, apply, reloadSettings: () => { load(typingNow()); }, showLook, lookStyles,
     });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {

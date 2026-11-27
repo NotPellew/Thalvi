@@ -100,7 +100,7 @@ function device(model?: string, active = true): OnDeviceEntry {
 }
 
 function stt(entries: SpeechEntry[]): Settings["stt"] {
-  return { entries };
+  return { entries, learn_from_corrections: false };
 }
 
 /** Settings whose live entry in use is the on-device model, beside a realtime speech server entry not in use. */
@@ -196,7 +196,7 @@ describe("pages", () => {
           "Streaming servers": ["streaming servers · speech servers"],
           "After-you-stop servers": ["after-you-stop servers · speech servers"],
           "On this computer": ["on this computer"],
-          "Word list": ["word list"],
+          "Word list": ["word list", "learn from my corrections"],
         },
       },
       {
@@ -1151,6 +1151,74 @@ describe("the word list", () => {
     await settle();
     expect(wordHint()).toBe(cant("On this computer"));
     expect(stub.backend.wordListSupport).not.toHaveBeenCalled();
+  });
+});
+
+describe("learning from corrections", () => {
+  const LIMIT = "Thalvi can't reach this desktop's accessibility service.";
+  const SUGGESTION = { word: "Cybrex2", heard: "Cyber X2" };
+
+  async function openLearning(limit: string | null = null, suggestions = [SUGGESTION]) {
+    const stub = stubBackend();
+    stub.learningChanged({ suggestions: structuredClone(suggestions), limit });
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    return stub;
+  }
+
+  const suggestions = (): HTMLElement[] => Array.from(rowOf("Word list").querySelectorAll<HTMLElement>(".suggestion"));
+
+  it("saves the switch with its explanation and shows why watching is not available", async () => {
+    const stub = await openLearning(null, []);
+    const input = control("Learn from my corrections", "input");
+    expect(input.checked).toBe(false);
+    expect(rowOf("Learn from my corrections").textContent).toContain("After a paste, Thalvi reads the field you pasted into for up to 5 minutes.");
+    expect(rowOf("Learn from my corrections").textContent).not.toContain(LIMIT);
+
+    flip(input);
+    await settle();
+    expect(sent(stub).stt.learn_from_corrections).toBe(true);
+
+    stub.learningChanged({ suggestions: [], limit: LIMIT });
+    await settle();
+    expect(rowOf("Learn from my corrections").textContent).toContain(LIMIT);
+  });
+
+  it("lists a corrected name under the word list and follows the change event", async () => {
+    const stub = await openLearning();
+    expect(suggestions()).toHaveLength(1);
+    expect(suggestions()[0]?.textContent).toContain("Cybrex2");
+    expect(suggestions()[0]?.textContent).toContain("(you corrected “Cyber X2”)");
+
+    stub.learningChanged({ suggestions: [{ word: "Thalvi", heard: "Talvi" }], limit: null });
+    await settle();
+    expect(suggestions()).toHaveLength(1);
+    expect(suggestions()[0]?.textContent).toContain("Thalvi");
+    expect(suggestions()[0]?.textContent).toContain("(you corrected “Talvi”)");
+
+    stub.learningChanged({ suggestions: [], limit: null });
+    await settle();
+    expect(suggestions()).toEqual([]);
+    expect(stub.backend.getLearning).toHaveBeenCalled();
+  });
+
+  it("adds a suggested name to the word list when Add is chosen", async () => {
+    const stub = await openLearning();
+    within(suggestions()[0] as HTMLElement, "Add").click();
+    await settle();
+    expect(stub.backend.acceptSuggestion).toHaveBeenCalledExactlyOnceWith("Cybrex2");
+    expect(Array.from(rowOf("Word list").querySelectorAll(".chip > span")).map((chip) => chip.textContent)).toEqual(["Cybrex2"]);
+    expect(suggestions()).toEqual([]);
+  });
+
+  it("takes a suggestion away without adding it when Dismiss is chosen", async () => {
+    const stub = await openLearning();
+    within(suggestions()[0] as HTMLElement, "Dismiss").click();
+    await settle();
+    expect(stub.backend.dismissSuggestion).toHaveBeenCalledExactlyOnceWith("Cybrex2");
+    expect(suggestions()).toEqual([]);
+    expect(rowOf("Word list").querySelectorAll(".chip")).toHaveLength(0);
   });
 });
 
@@ -3740,9 +3808,9 @@ describe("updates", () => {
 
 describe("history", () => {
   const ENTRIES: HistoryEntry[] = [
-    { id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted" },
-    { id: 20, timestamp_ms: Date.UTC(2026, 10, 2, 18, 5), text: "The window was gone.", target: null, outcome: "failed" },
-    { id: 10, timestamp_ms: Date.UTC(2026, 10, 1, 7, 0), text: "Never mind this one", target: "Firefox", outcome: "cancelled" },
+    { id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted", corrected: null },
+    { id: 20, timestamp_ms: Date.UTC(2026, 10, 2, 18, 5), text: "The window was gone.", target: null, outcome: "failed", corrected: null },
+    { id: 10, timestamp_ms: Date.UTC(2026, 10, 1, 7, 0), text: "Never mind this one", target: "Firefox", outcome: "cancelled", corrected: null },
   ];
 
   async function openHistory(...lists: (HistoryEntry[] | Error)[]) {
@@ -3772,6 +3840,17 @@ describe("history", () => {
       { time: "2026-11-01T07:00:00.000Z", target: "Firefox", outcome: "Cancelled", text: "Never mind this one" },
     ]);
     expect(cards().every((card) => (card.querySelector("time")?.textContent ?? "") !== "")).toBe(true);
+  });
+
+  it("shows what was heard and the user's fix on an entry that carries them", async () => {
+    const heard = "send the cyber x2 build log to the team";
+    const fixed = "Send the Cybrex2 build log to the team.";
+    await openHistory([{ ...ENTRIES[0] as HistoryEntry, text: heard, corrected: fixed }, ENTRIES[1] as HistoryEntry]);
+    const [kept, plain] = cards();
+    expect(kept?.textContent).toContain(`Heard: ${heard}`);
+    expect(kept?.textContent).toContain(`Your fix: ${fixed}`);
+    expect(plain?.textContent).not.toContain("Heard:");
+    expect(plain?.textContent).not.toContain("Your fix:");
   });
 
   it("says so when nothing has been kept, and reads the list again whenever the page is opened", async () => {
@@ -3896,7 +3975,9 @@ describe("last dictation", () => {
     target: "foot",
     outcome: "failed",
     newerWaiting: false,
+    corrected: null,
   };
+  const FIX = "Remind me to call the dentist tomorrow morning.";
 
   async function openDraft(draft: Draft | null = DRAFT) {
     const stub = stubBackend();
@@ -3941,6 +4022,28 @@ describe("last dictation", () => {
       expect(notes()[0], outcome).toBe(sentence);
       expect(buttons(), outcome).toEqual(["Copy text", "Reset to original", "Discard"]);
     }
+  });
+
+  it.each([
+    ["no fix was kept", null, DRAFT.text, []],
+    ["a fix was kept", FIX, FIX, [`Heard: ${DRAFT.original}`, `Your fix: ${FIX}`]],
+  ] as const)("starts from %s and shows the heard and fixed lines", async (_case, corrected, expectedText, expectedNotes) => {
+    await openDraft({ ...DRAFT, corrected });
+    expect(area().value).toBe(expectedText);
+    for (const line of expectedNotes) expect(notes()).toContain(line);
+    if (corrected === null) expect(notes().some((line) => line.startsWith("Heard:"))).toBe(false);
+  });
+
+  it("keeps the user's own edit instead of the fix when the draft is read again", async () => {
+    const stub = await openDraft({ ...DRAFT, corrected: FIX });
+    edit("My own edit.");
+    stub.backend.getDraft.mockImplementation(() => Promise.resolve({ ...DRAFT, corrected: FIX, text: "My own edit." }));
+    stub.emit({ state: "listening" });
+    await settle();
+    expect(area().value).toBe("My own edit.");
+    expect(stub.backend.editDraft).toHaveBeenLastCalledWith("My own edit.");
+    expect(notes()).toContain(`Heard: ${DRAFT.original}`);
+    expect(notes()).toContain(`Your fix: ${FIX}`);
   });
 
   it("keeps an edit without recognizing, copying or sending anything, and can reset it", async () => {
@@ -4079,7 +4182,7 @@ describe("last dictation", () => {
     ["Discard", section, "Discard the last dictation? This cannot be undone.", "Yes, discard", /^Discard$/, "Nothing to recover yet. The last dictation appears here, also when it failed or you cancelled it."],
   ] as const)("%s asks first: Keep changes nothing and returns to it, the yes acts once", async (action, scope, question, yes, name, after) => {
     const stub = stubBackend();
-    let entries: HistoryEntry[] = [{ id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted" }];
+    let entries: HistoryEntry[] = [{ id: 30, timestamp_ms: Date.UTC(2026, 10, 3, 9, 30), text: "Remind me to call.", target: "Slack", outcome: "accepted", corrected: null }];
     let draft: Draft | null = DRAFT;
     stub.backend.getHistory.mockImplementation(() => Promise.resolve(structuredClone(entries)));
     stub.backend.deleteHistoryEntry.mockImplementation(() => { entries = []; return Promise.resolve(); });

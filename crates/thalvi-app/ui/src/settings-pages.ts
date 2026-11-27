@@ -10,6 +10,7 @@ import type {
   HistoryEntry,
   HistoryOutcome,
   HoldKeyDefaults,
+  Learning,
   ScriptActionKind,
   ScriptSettings,
   AppSettings,
@@ -93,6 +94,8 @@ export interface PageContext {
   };
   /** Applies `change` on top of the settings now held; rejects with the plain reason it was refused, and then nothing changed. */
   apply: (change: (settings: Settings) => void, options?: ApplyOptions) => Promise<void>;
+  /** Reads the settings again after another part of the app saved them. */
+  reloadSettings: () => void;
 }
 
 export interface ApplyOptions {
@@ -635,6 +638,58 @@ function wordListTable({ settings, controls, apply }: PageContext): { node: HTML
       render();
     },
   };
+}
+
+/** The switch and the pending names, both driven by what learning holds in memory. */
+function learning({ settings, controls, backend, apply, reloadSettings }: PageContext): { switchRow: HTMLElement; suggestions: HTMLElement } {
+  const description = el("p", { class: "note ok" }, "After a paste, Thalvi reads the field you pasted into for up to 5 minutes. It keeps your fixed version in History and suggests names you corrected. Nothing leaves this computer.");
+  const limitNode = el("span", { class: "stack wide" });
+  const toggle = controls.toggle(settings.stt.learn_from_corrections, (wanted) => apply((next) => {
+    next.stt.learn_from_corrections = wanted;
+  }));
+  const switchRow = row("Learn from my corrections", "Off: Thalvi never reads another window.", {
+    node: el("span", { class: "stack wide" }, toggle.node, description, limitNode),
+    field: toggle.field,
+  });
+
+  const list = el("div", { class: "stack wide suggestions" });
+  const problem = note();
+  function render(next: Learning): void {
+    limitNode.replaceChildren(...(next.limit === null ? [] : [unavailable({ kind: "unavailable", reason: next.limit, line: null })]));
+    const before = Array.from(list.querySelectorAll<HTMLButtonElement>("button"));
+    const active = document.activeElement;
+    const position = active instanceof HTMLButtonElement ? before.indexOf(active) : -1;
+    list.replaceChildren(
+      ...next.suggestions.map(({ word, heard }) => {
+        const add = button("Add", () => {
+          say(problem, "");
+          backend.acceptSuggestion(word).then(reloadSettings, (error: unknown) => {
+            say(problem, errorText(error));
+          });
+        });
+        add.setAttribute("aria-label", `Add ${word}`);
+        const dismiss = button("Dismiss", () => {
+          say(problem, "");
+          backend.dismissSuggestion(word).catch((error: unknown) => {
+            say(problem, errorText(error));
+          });
+        }, "quiet");
+        dismiss.setAttribute("aria-label", `Dismiss ${word}`);
+        return el("div", { class: "trow suggestion", "data-word": word },
+          el("span", { class: "badge" }, word), " ",
+          el("span", { class: "unit" }, `(you corrected “${heard}”)`), " ",
+          add, " ", dismiss);
+      }),
+      problem,
+    );
+    if (position >= 0) {
+      const fallback = list.parentElement?.querySelector<HTMLElement>('input[aria-label="New word"]') ?? list;
+      focusAfterRemoval(Array.from(list.querySelectorAll<HTMLButtonElement>("button")), position, fallback);
+    }
+  }
+  backend.getLearning().then(render, () => undefined);
+  backend.onLearningChanged(render);
+  return { switchRow, suggestions: list };
 }
 
 /** The Wake words switch: off, Thalvi keeps listening but only the hold keys start a capture. */
@@ -2070,6 +2125,8 @@ function speech(context: PageContext): SpeechRows {
   const words = wordListTable(context);
   const wordProblem = note();
   words.node.append(wordProblem);
+  const learned = learning(context);
+  words.node.append(learned.suggestions);
   const wordListHint = "Names and terms, added one at a time.";
   const wordRow = row("Word list", wordListHint, words.node);
   const wordHint = wordRow.querySelector(".what small");
@@ -2135,7 +2192,7 @@ function speech(context: PageContext): SpeechRows {
     recognition: [
       el("div", { class: "grp" }, liveRow, nextDictation, summaryActions),
       ...groups.map(({ node }) => node),
-      el("div", { class: "grp" }, wordRow),
+      el("div", { class: "grp" }, wordRow, learned.switchRow),
     ],
     chat: [
       group("Writing"),
@@ -2657,7 +2714,11 @@ function entryCard(entry: HistoryEntry, remove: () => void, copyText: (text: str
   copy.setAttribute("aria-label", `Copy the entry from ${time.textContent}`);
   const [deleting, del] = confirmed("Delete", "Delete this entry? This cannot be undone.", "Yes, delete", "Keep", remove, `Delete the entry from ${time.textContent}`);
   del.classList.add("quiet");
-  return [el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), result, el("span", { class: "trow" }, copy, deleting)), del];
+  const kept = entry.corrected === null ? [] : [
+    el("p", { class: "corrected" }, `Heard: ${entry.text}`),
+    el("p", { class: "corrected" }, `Your fix: ${entry.corrected}`),
+  ];
+  return [el("article", { class: "entry", "data-outcome": entry.outcome }, header, el("p", {}, entry.text), ...kept, result, el("span", { class: "trow" }, copy, deleting)), del];
 }
 
 /** A button that asks before it acts: it is replaced by the question and a yes and a no. Returns the whole and the button. */
@@ -2681,6 +2742,11 @@ function confirmed(label: string, question: string, yes: string, no: string, act
   return [el("span", { class: "stack" }, ask, sure), ask];
 }
 
+/** The text a draft starts with: the cleanup until its own text was edited. */
+function startingText(draft: Draft): string {
+  return draft.corrected !== null && draft.text === draft.original ? draft.corrected : draft.text;
+}
+
 /** The last dictation: editable, with Copy, Reset and Discard. Editing sends and copies nothing. */
 function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; refresh: () => void } {
   let current: Draft | null = null;
@@ -2688,6 +2754,8 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   const outcome = el("p", { class: "note ok" });
   const newer = el("p", { class: "note why", hidden: true }, "A newer dictation is waiting. Discard this one to see it.");
   const text = el("textarea", { rows: "4", spellcheck: "false", "aria-label": "Last dictation text" });
+  const heardLine = el("p", { class: "note ok", hidden: true });
+  const fixLine = el("p", { class: "note ok", hidden: true });
   const done = el("p", { class: "note ok", role: "status", hidden: true });
   const problem = note();
   const copy = button("Copy text", () => {
@@ -2704,7 +2772,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   });
   const reset = button("Reset to original", () => {
     if (current === null) return;
-    text.value = current.original;
+    text.value = current.corrected ?? current.original;
     sync();
     saveEdit();
   }, "quiet");
@@ -2716,7 +2784,7 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
     });
   });
   discardButton.classList.add("quiet");
-  const editor = el("div", { class: "stack wide", hidden: true }, outcome, newer, text, el("span", { class: "trow" }, copy, reset, discard), done);
+  const editor = el("div", { class: "stack wide", hidden: true }, outcome, newer, text, heardLine, fixLine, el("span", { class: "trow" }, copy, reset, discard), done);
 
   function saveEdit(): void {
     latestRefresh += 1;
@@ -2727,14 +2795,14 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
   function sync(): void {
     if (current === null) return;
     copy.disabled = text.value.trim() === "";
-    reset.disabled = text.value === current.original;
+    reset.disabled = text.value === (current.corrected ?? current.original);
   }
   function show(next: Draft | null): void {
     if (next?.id !== current?.id) {
       say(done, "");
       say(problem, "");
     }
-    if (next !== null && next.id !== current?.id) text.value = next.text;
+    if (next !== null && next.id !== current?.id) text.value = startingText(next);
     current = next;
     const hadFocus = editor.contains(document.activeElement);
     empty.hidden = next !== null;
@@ -2745,6 +2813,10 @@ function lastDictation({ backend, live }: PageContext): { nodes: HTMLElement[]; 
     }
     outcome.textContent = next.target === null ? DRAFT_OUTCOMES[next.outcome] : `${DRAFT_OUTCOMES[next.outcome]} Meant for ${next.target}.`;
     newer.hidden = !next.newerWaiting;
+    heardLine.hidden = next.corrected === null;
+    heardLine.textContent = next.corrected === null ? "" : `Heard: ${next.original}`;
+    fixLine.hidden = next.corrected === null;
+    fixLine.textContent = next.corrected === null ? "" : `Your fix: ${next.corrected}`;
     sync();
   }
   // Bumped by every refresh and edit, so a slow answer never replaces a newer draft or an edit.

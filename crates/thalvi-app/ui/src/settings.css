@@ -123,6 +123,7 @@ textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .entry { border: var(--hairline) solid var(--card-edge); border-radius: var(--radius-entry); padding: var(--card-pad-y) var(--card-pad-x); display: grid; grid-template-columns: 1fr auto; gap: var(--entry-gap-y) var(--entry-gap-x); }
 .entry header { grid-column: 1; display: flex; flex-wrap: wrap; gap: var(--entry-head-gap-y) var(--entry-head-gap-x); font: var(--fs-12) var(--mono); color: var(--mut); }
 .entry p { grid-column: 1; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.entry p.corrected { color: var(--mut); }
 .entry .trow { grid-column: 2; grid-row: 1 / span 2; align-self: start; }
 /* An open question takes the whole width, so it never squeezes the text beside it. */
 .entry:has([role="group"]:not([hidden])) > .trow { grid-column: 1 / -1; grid-row: auto; justify-content: flex-end; }
@@ -168,6 +169,8 @@ code.line { display: block; padding: var(--code-pad-y) var(--code-pad-x); border
 .chips { display: flex; flex-wrap: wrap; gap: var(--stack-gap); }
 .chips:empty { display: none; }
 .chip { display: inline-flex; align-items: center; gap: var(--chip-gap); font: var(--fs-13) var(--mono); }
+.suggestions { align-items: stretch; }
+.suggestions .suggestion { flex-wrap: wrap; justify-content: flex-start; }
 #settings[data-look] main .chip > button { height: auto; padding: 0 var(--chip-right) 0 var(--chip-left); border: 0; background: none; box-shadow: none; font: var(--fs-13) var(--mono); text-transform: none; }
 #settings[data-look] main .chip > button:hover { color: var(--neon); background: none; }
 
