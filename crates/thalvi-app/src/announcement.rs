@@ -187,6 +187,12 @@ pub(crate) mod tests {
         }
     }
 
+    fn thinking() -> Status {
+        Status::Thinking {
+            target: Some("Editor".to_owned()),
+        }
+    }
+
     fn cleaning_up() -> Status {
         Status::CleaningUp {
             target: Some("Editor".to_owned()),
@@ -250,13 +256,9 @@ pub(crate) mod tests {
             finishing(),
             transcribing(),
             finishing(),
-            Status::Thinking {
-                target: Some("Editor".to_owned()),
-            },
+            thinking(),
             writing(),
-            Status::Thinking {
-                target: Some("Editor".to_owned()),
-            },
+            thinking(),
             Status::Writing {
                 target: Some("Editor".to_owned()),
                 text: format!("{SECRET}, more"),

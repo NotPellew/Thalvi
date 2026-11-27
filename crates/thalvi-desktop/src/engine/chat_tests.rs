@@ -69,7 +69,7 @@ async fn writing_uses_the_owned_runtime_and_a_second_crash_stays_failed() {
     let (cues, _) = FakeCuePlayer::new();
     let (_key, hold) = watch::channel(crate::hold::KeyState::default());
     let states = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let status = std::rc::Rc::clone(&states);
+    let recorded = std::rc::Rc::clone(&states);
     let (mut engine, _) = Engine::new(
         Parts {
             recognizer,
@@ -80,7 +80,7 @@ async fn writing_uses_the_owned_runtime_and_a_second_crash_stays_failed() {
             chat: Some(chat),
             hold,
             notice: Box::new(|_| {}),
-            status: Box::new(move |state| status.borrow_mut().push(state.clone())),
+            status: Box::new(move |state| recorded.borrow_mut().push(state.clone())),
             spotter: None,
             spotter_off: None,
         },
