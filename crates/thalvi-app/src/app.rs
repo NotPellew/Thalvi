@@ -1464,6 +1464,32 @@ mod tests {
         })
     }
 
+    fn save_look(saves: &SyncedConfig, applied: &Mutex<Vec<FormApplication>>, look: Look) {
+        saves
+            .save_form(
+                |current| {
+                    let mut settings = crate::settings::settings_json(current)?;
+                    settings["look"] = serde_json::json!(look);
+                    Ok(((), Some(settings)))
+                },
+                |current, config, write| {
+                    let mut expected = current.clone();
+                    expected.look = look;
+                    write()?;
+                    saves.set(config);
+                    applied
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(FormApplication {
+                            expected,
+                            sent: config.clone(),
+                        });
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
     #[test]
     fn overlapping_saves_leave_the_file_and_the_running_config_agreeing() {
         for switch_last in [true, false] {
@@ -1494,28 +1520,7 @@ mod tests {
         let form = |look: Look| {
             writer(&saves, &applied, &line, move |saves, applied| {
                 for _ in 0..50 {
-                    saves
-                        .save_form(
-                            |current| {
-                                let mut settings = crate::settings::settings_json(current)?;
-                                settings["look"] = serde_json::json!(look);
-                                Ok(((), Some(settings)))
-                            },
-                            |current, config, write| {
-                                let mut expected = current.clone();
-                                expected.look = look;
-                                write()?;
-                                saves.set(config);
-                                applied.lock().unwrap_or_else(PoisonError::into_inner).push(
-                                    FormApplication {
-                                        expected,
-                                        sent: config.clone(),
-                                    },
-                                );
-                                Ok(())
-                            },
-                        )
-                        .unwrap();
+                    save_look(saves, applied, look);
                 }
             })
         };
