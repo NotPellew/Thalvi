@@ -13,7 +13,7 @@ use super::{
     App, AppMatchLimit, Delivered, HoldReport, HoldSource, Host, HostError, MAYBE_PASTED, Modifier,
     PasteText, RequestServer, StatusAnnouncer, WebUrl, WindowApp,
 };
-use crate::hold::{Action, HoldChange, KeyBind, KeyName};
+use crate::hold::{HoldChange, KeyBind, KeyName};
 pub use overlay::{OverlayPlan, OverlaySurface, OverlayWaker};
 pub use win32::Real;
 
