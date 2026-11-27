@@ -79,9 +79,9 @@ impl PromptSource {
 /// not letters or digits one space, trimmed. The same function reads a phrase and what was said.
 #[must_use]
 pub fn normalize(text: &str) -> String {
-    text.split(|c: char| !c.is_alphanumeric())
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -916,6 +916,7 @@ mod tests {
             opening("Write me", "ME"),
             opening("schreib eine nachricht", "NACHRICHT"),
             opening("wow", "WOW"),
+            opening("never mindi", "MIND"),
         ];
         let writing = with_openings(Some("FALLBACK"), rules.clone()).unwrap();
         let default = with_openings(None, rules).unwrap();
@@ -929,6 +930,7 @@ mod tests {
             ("Schreib eine Nachricht an Jörg!", "NACHRICHT"),
             ("wow, that is loud", "WOW"),
             ("wowser that is loud", "FALLBACK"),
+            ("Never mindİ, call me", "MIND"),
             ("please write me an email", "FALLBACK"),
             ("write", "FALLBACK"),
             ("", "FALLBACK"),

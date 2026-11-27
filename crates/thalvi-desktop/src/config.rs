@@ -1212,6 +1212,11 @@ mod tests {
                 json!([{"phrase": "write me an e mail", "prompt": "Short."}]),
             ),
             (
+                "openings",
+                json!([{"phrase": "Never mindİ", "prompt": "p"}]),
+                json!([{"phrase": "never mindi", "prompt": "p"}]),
+            ),
+            (
                 "apps",
                 json!([
                     {"app": " kitty ", "prompt": " One line. "},

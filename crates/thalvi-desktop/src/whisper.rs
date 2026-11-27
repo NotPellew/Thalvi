@@ -95,10 +95,10 @@ impl WhisperBackend {
     pub fn description(self) -> &'static str {
         match self {
             Self::Cpu => {
-                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts. Text appears only after you stop speaking. On the CPU it is slow: the text can take as long as you spoke, or longer. The language is detected automatically; only English and German have been tried."
+                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts. Text appears only after you stop speaking. On the CPU it is slow: the text can take as long as you spoke, or longer. The language is detected automatically; only English and German have been tried. Whisper Turbo can miss words after you switch languages mid-dictation. End the current dictation and start a new one when you switch languages."
             }
             Self::Vulkan => {
-                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts on your graphics card through Vulkan. Text appears while you speak, because the capture so far is read again on the GPU about every second, which is extra GPU work; the final text replaces it after you stop. Its speed on your GPU is untested. If no GPU is found, it says so; pick the CPU entry then. The language is detected automatically; only English and German have been tried."
+                "Experimental. OpenAI's Whisper Turbo, run by a helper that Thalvi starts on your graphics card through Vulkan. Text appears while you speak, because the capture so far is read again on the GPU about every second, which is extra GPU work; the final text replaces it after you stop. Its speed on your GPU is untested. If no GPU is found, it says so; pick the CPU entry then. The language is detected automatically; only English and German have been tried. Whisper Turbo can miss words after you switch languages mid-dictation. End the current dictation and start a new one when you switch languages."
             }
         }
     }
