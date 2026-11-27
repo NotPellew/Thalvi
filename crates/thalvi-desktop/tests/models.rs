@@ -932,6 +932,11 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
         ]
     );
     for model in &before {
+        assert!(
+            model.description.contains("Whisper Turbo can miss words after you switch languages mid-dictation. End the current dictation and start a new one when you switch languages."),
+            "{} should explain the risk and workaround before download",
+            model.name
+        );
         assert_eq!(model.size, 574_041_195 + 885_098);
         assert_eq!(model.license, "MIT");
         assert_eq!(model.source, "https://huggingface.co/ggerganov/whisper.cpp");
