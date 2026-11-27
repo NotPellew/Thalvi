@@ -23,6 +23,15 @@ deferred reload after download, and waiting for an on-device load. Their mapped 
 switching happens after capture; notices, metrics and endpoint payload changes
 add no delivery path. `Control::Overlay` (8df760f) returns false from `Requests::ends`, so it never sets `ended` and neither admits nor blocks delivery, the same as `Apply` for this property; it is not one of the modeled controls. No product promise or bound changed in this maintenance.
 
+Learning from corrections (#776) adds a synchronous `Host::watch_field` call in
+`Delivery::paste_in`, only after the terminal hold-back and before `deliver`. It returns at once and
+does no I/O, so no field read holds back the paste. `Finished.field` carries the unresolved probe,
+and the watch task `Runner::capture` spawns after settling resolves it in `spawn_blocking` before
+`learn::watch` starts its 250 ms reads. A newer paste, the switch going off or quit stops that watch;
+no await, queue step or write to `Requests::ended` is added before the final empty receive. Both
+awaits (probe resolution, then field reads) live in a task spawned after delivery and cannot retract
+a paste. Model actions, cancellation writes and bounds are unchanged.
+
 Status announcements (#394) publish engine states and streaming hold releases
 in order. Display reads the same states and the screen reader can also hear
 Finishing when a released hold is waiting for its last words. These synchronous

@@ -19,6 +19,7 @@ pub mod frame;
 pub mod history;
 pub mod hold;
 pub mod host;
+pub mod learn;
 pub mod local;
 pub mod metrics;
 pub mod models;

@@ -17,6 +17,7 @@ mod windows;
 use std::fmt;
 use std::path::Path;
 
+use crate::learn::{FieldLimit, FieldProbe};
 use crate::report::UserError;
 
 pub use line::{MAX_REQUEST, refusal};
@@ -323,6 +324,13 @@ pub trait Host: Send + Sync {
     /// Whether `target` is a terminal that the paste shortcut pastes into, where a pasted line
     /// break can run a command.
     fn is_terminal(&self, target: &Self::Target) -> bool;
+
+    /// Arms a watch for the field the next paste will reach. Call just before `deliver`; return
+    /// at once and do no I/O here, so the paste never waits for a field.
+    ///
+    /// # Errors
+    /// Why this desktop cannot read that app's field.
+    fn watch_field(&self, target: &Self::Target) -> Result<Box<dyn FieldProbe>, FieldLimit>;
 
     /// Binds the focused window.
     ///

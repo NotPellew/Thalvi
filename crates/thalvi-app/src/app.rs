@@ -23,6 +23,7 @@ use thalvi_desktop::hold::HoldKind;
 use thalvi_desktop::host::{
     Desktop, HoldSource, HoldWatch, Host, HostError, RequestServer, refusal,
 };
+use thalvi_desktop::learn::Learning;
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{CatalogHead, SpeechDownloads};
 use thalvi_desktop::speech_device::SpeechDevices;
@@ -290,6 +291,8 @@ pub struct AppState {
     pub history: Arc<history::Store>,
     /// The last dictation, shared with the engine thread that offers each new one.
     pub drafts: Arc<Drafts>,
+    /// Suggestions and the latest field limit, shared with the engine and the commands.
+    pub learning: Arc<Learning>,
     /// Delivers for the engine thread and copies for the commands, so both record the same metrics.
     pub delivery: Arc<Delivery<Desktop>>,
     /// The latest failure shown, for "Copy last error" in the tray and `copy-error`.
@@ -352,11 +355,16 @@ impl AppState {
             Desktop::detect().map_err(|error| error.to_string())?,
         ));
         let speech_devices = Arc::new(SpeechDevices::new(Adapters::default()));
+        let learning = Arc::new(Learning::default());
+        let stores = crate::runner::StoreHandles {
+            history: Arc::clone(&history),
+            drafts: Arc::clone(&drafts),
+            learning: Arc::clone(&learning),
+        };
         let link = EngineLink::start(
             config.clone(),
             Arc::clone(&delivery),
-            Arc::clone(&history),
-            Arc::clone(&drafts),
+            stores,
             Arc::clone(&speech_devices),
             // An update restarts the app as it was: a paused microphone stays closed.
             marker.as_ref().is_some_and(|marker| marker.paused),
@@ -376,6 +384,7 @@ impl AppState {
             speech_devices,
             history,
             drafts,
+            learning,
             delivery,
             last_error: LastError::default(),
             tray: OnceLock::new(),
@@ -787,6 +796,9 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::delete_history_entry,
             commands::clear_history,
             commands::get_draft,
+            commands::get_learning,
+            commands::accept_suggestion,
+            commands::dismiss_suggestion,
             commands::edit_draft,
             commands::copy_text,
             commands::discard_draft,
@@ -835,7 +847,15 @@ fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), Stri
     state.restore_login(app);
     state.restore_menu_entry(&menu_entry::System::from_env());
     start_overlay(app, &state);
+    let learning = Arc::clone(&state.learning);
+    let handle = app.clone();
     app.manage(state);
+    tauri::async_runtime::spawn(async move {
+        let mut changed = learning.changed();
+        while changed.changed().await.is_ok() {
+            let _ = handle.emit("thalvi://learning-changed", learning.view());
+        }
+    });
     serve_requests(app);
     create_windows(app).map_err(|error| error.to_string())?;
     if first_start {

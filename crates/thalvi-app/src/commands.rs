@@ -19,6 +19,7 @@ use thalvi_desktop::draft::DraftView;
 use thalvi_desktop::entries::{self, Realtime};
 use thalvi_desktop::history::{Entry, HistoryError, Store as History};
 use thalvi_desktop::host::{AppMatchLimit, Desktop, Host, WebUrl, WindowApp};
+use thalvi_desktop::learn::LearningView;
 use thalvi_desktop::metrics::{Event, Recorder};
 use thalvi_desktop::models::{
     CatalogHead, ListedSpeech, ModelError, ModelFiles, ModelStore, SpeechDownloads,
@@ -805,6 +806,46 @@ pub fn get_draft(state: State<'_, AppState>) -> Option<DraftView> {
     state.drafts.view()
 }
 
+/// The pending name suggestions and why the last field could not be watched.
+#[tauri::command]
+pub fn get_learning(state: State<'_, AppState>) -> LearningView {
+    state.learning.view()
+}
+
+/// Adds a suggested name to the word list through the ordinary settings save.
+///
+/// # Errors
+/// When the suggestion is gone or the settings could not be saved.
+#[tauri::command]
+pub fn accept_suggestion(word: String, state: State<'_, AppState>) -> Result<(), String> {
+    if !state.learning.has(&word) {
+        return Err("That suggestion is no longer available.".to_owned());
+    }
+    let learning = Arc::clone(&state.learning);
+    let ((), saved) = save(&state, |current| {
+        Ok(((), Some(add_to_word_list(current, &word)?)))
+    })?;
+    if saved {
+        learning.remove(&word);
+    }
+    Ok(())
+}
+
+/// Takes a suggestion off the list without adding it.
+#[tauri::command]
+pub fn dismiss_suggestion(word: String, state: State<'_, AppState>) {
+    state.learning.remove(&word);
+}
+
+/// The settings form that adds `word` to the word list, over the config read under the save lock.
+fn add_to_word_list(current: &DesktopConfig, word: &str) -> Result<Value, String> {
+    let mut phrases = current.stt.phrases.phrases().to_vec();
+    if !phrases.iter().any(|known| known.eq_ignore_ascii_case(word)) {
+        phrases.push(word.to_owned());
+    }
+    merged(current, &json!({"stt": {"phrases": phrases}}))
+}
+
 /// Keeps the edited text. Nothing is recognized, copied or pasted.
 #[tauri::command]
 pub fn edit_draft(text: String, state: State<'_, AppState>) -> Result<(), String> {
@@ -933,6 +974,22 @@ mod tests {
     use thalvi_desktop::models::{Asset, ModelKind, SpeechAssets};
 
     use super::*;
+
+    #[test]
+    fn accepting_a_suggestion_saves_the_word_through_the_settings_form() {
+        let dir = std::env::temp_dir().join(format!("thalvi-accept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = crate::settings::Store::new(Some(dir.join("desktop.json"))).unwrap();
+        let config = DesktopConfig::from_json_str("{}").unwrap();
+        let form = add_to_word_list(&config, "Cybrex2").unwrap();
+        let saved = store.save(form, &config).unwrap();
+        assert_eq!(saved.stt.phrases.phrases(), ["Cybrex2"]);
+        let again = store
+            .save(add_to_word_list(&saved, "Cybrex2").unwrap(), &saved)
+            .unwrap();
+        assert_eq!(again.stt.phrases.phrases(), ["Cybrex2"], "no duplicate");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_current_app_prefers_recent_focus_falls_back_and_is_absent_on_gnome() {

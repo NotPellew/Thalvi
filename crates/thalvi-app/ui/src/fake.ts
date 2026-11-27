@@ -1,7 +1,7 @@
 // Dev-only backend for `?fake`. `at` pins status, `look` picks the look, and `fail` and `slow` take comma-separated Settings operations.
 
 import { DownloadFailure } from "./contract.ts";
-import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatModelInfo, type Draft, type HistoryEntry, type LookStyles, type OverlayPreviewState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
+import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatModelInfo, type Draft, type HistoryEntry, type Learning, type LookStyles, type OverlayPreviewState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 import fixture from "./look-styles.json";
 import { applyPatch } from "./patch.ts";
@@ -58,6 +58,7 @@ const SETTINGS: Settings = {
       { kind: "open_ai", id: "gateway", name: "LLM Gateway", active: false, address: "https://gw.example/v1", model: "whisper-1", request: "transcriptions", language: "", has_key: true },
       { kind: "on_device", id: "on-device", name: "On this computer", active: true, model: "nemotron_160ms" },
     ],
+    learn_from_corrections: false,
   },
   apps: { slack: { classes: ["Slack"], executables: ["slack.exe"], input_keys: [] } },
   scripts: [{ phrase: "open the docs", action: "open_url", destination: "https://example.com/docs", label: "docs" }],
@@ -198,7 +199,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
 
   const now = Date.now();
   let history: HistoryEntry[] = [
-    { id: 3, timestamp_ms: now - 60_000, text: "Remind me to call the dentist tomorrow morning.", target: "Slack", outcome: "accepted" },
+    { id: 3, timestamp_ms: now - 60_000, text: "Remind me to call the dentist tomorow morning.", target: "Slack", outcome: "accepted", corrected: "Remind me to call the dentist tomorrow morning." },
     { id: 2, timestamp_ms: now - 3_600_000, text: "Thalvi could not reach the window that was open when you started.", target: null, outcome: "failed" },
     { id: 1, timestamp_ms: now - 86_400_000, text: "Hey, I'm running a few minutes late", target: "Firefox", outcome: "cancelled" },
   ];
@@ -209,6 +210,17 @@ export function fakeBackend(params: URLSearchParams): Backend {
     target: "Slack",
     outcome: "failed",
     newerWaiting: false,
+    corrected: "Remind me to call the dentist tomorrow morning.",
+  };
+  const learningListeners: ((learning: Learning) => void)[] = [];
+  let learning: Learning = {
+    suggestions: params.has("suggestions") ? [{ word: "Cybrex2", heard: "Cyber X2" }] : [],
+    limit: params.has("learning-limit")
+      ? "Thalvi can't reach this desktop's accessibility service."
+      : null,
+  };
+  const tellLearning = (): void => {
+    for (const listener of learningListeners) listener(structuredClone(learning));
   };
   let startAtLogin = false;
   let menuEntry = false;
@@ -282,6 +294,19 @@ export function fakeBackend(params: URLSearchParams): Backend {
       return Promise.resolve();
     },
     getDraft: () => Promise.resolve(structuredClone(draft)),
+    getLearning: () => Promise.resolve(structuredClone(learning)),
+    acceptSuggestion: (word) => {
+      learning = { ...learning, suggestions: learning.suggestions.filter((suggestion) => suggestion.word !== word) };
+      saved.stt.phrases = [...(saved.stt.phrases ?? []), word];
+      tellLearning();
+      return Promise.resolve();
+    },
+    dismissSuggestion: (word) => {
+      learning = { ...learning, suggestions: learning.suggestions.filter((suggestion) => suggestion.word !== word) };
+      tellLearning();
+      return Promise.resolve();
+    },
+    onLearningChanged: (listener) => learningListeners.push(listener),
     editDraft: (text) => {
       if (draft) draft.text = text;
       return Promise.resolve();

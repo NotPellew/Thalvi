@@ -28,6 +28,7 @@ use thalvi_desktop::hold::{HoldInput, KeyState, Presses, Refusal};
 use thalvi_desktop::host::{
     Desktop, HoldReport, Host, StatusAnnouncer, WindowApp, status_announcer,
 };
+use thalvi_desktop::learn::{FieldLimit, FieldProbe, Learning, watch};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
 use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError};
@@ -119,6 +120,13 @@ pub struct AudioStatus {
     pub problem: Option<String>,
 }
 
+/// The in-memory stores the engine and the commands share.
+pub(crate) struct StoreHandles {
+    pub(crate) history: Arc<History>,
+    pub(crate) drafts: Arc<Drafts>,
+    pub(crate) learning: Arc<Learning>,
+}
+
 /// The app's side of the engine thread.
 pub struct EngineLink {
     control: mpsc::UnboundedSender<Control>,
@@ -143,13 +151,17 @@ impl EngineLink {
     pub fn start(
         config: DesktopConfig,
         delivery: Arc<Delivery<Desktop>>,
-        history: Arc<History>,
-        drafts: Arc<Drafts>,
+        stores: StoreHandles,
         devices: Arc<SpeechDevices>,
         paused: bool,
         whisper_helpers: PathBuf,
     ) -> Result<Self, String> {
-        let (link, ends, stopped) = Self::wire_with(&config, paused, status_announcer());
+        let (link, ends, stopped) = Self::wire_with(
+            &config,
+            paused,
+            status_announcer(),
+            Arc::clone(&stores.learning),
+        );
         let (ready_tx, ready) = std_mpsc::channel();
         std::thread::Builder::new()
             .name("thalvi-engine".to_owned())
@@ -173,7 +185,7 @@ impl EngineLink {
                 };
                 LocalSet::new().block_on(
                     &runtime,
-                    ends.run(config, paused, rig, delivery, history, drafts),
+                    ends.run(config, paused, rig, delivery, stores.history, stores.drafts),
                 );
                 finish_runtime(runtime, &stopped);
             })
@@ -186,13 +198,14 @@ impl EngineLink {
 
     #[cfg(test)]
     fn wire(config: &DesktopConfig, paused: bool) -> (Self, RunnerEnds, std_mpsc::Sender<()>) {
-        Self::wire_with(config, paused, None)
+        Self::wire_with(config, paused, None, Arc::new(Learning::default()))
     }
 
     fn wire_with(
         config: &DesktopConfig,
         paused: bool,
         announcer: Option<Arc<dyn StatusAnnouncer>>,
+        learning: Arc<Learning>,
     ) -> (Self, RunnerEnds, std_mpsc::Sender<()>) {
         let last_writing_window = Arc::new(Mutex::new(None));
         let (control, control_rx) = mpsc::unbounded_channel();
@@ -210,6 +223,7 @@ impl EngineLink {
             problem: None,
         });
         let (feeding_tx, feeding) = watch::channel(false);
+        let (watch_enabled, watch_enabled_rx) = watch::channel(config.stt.learn_from_corrections());
         let (quitting, quitting_rx) = watch::channel(false);
         let (key, key_state) = HoldInput::new();
         let (stopped_tx, stopped) = std_mpsc::channel();
@@ -234,6 +248,9 @@ impl EngineLink {
             key: key_state,
             quitting: quitting_rx,
             last_writing_window,
+            learning,
+            watch_enabled,
+            watch_enabled_rx,
         };
         (link, ends, stopped_tx)
     }
@@ -343,6 +360,9 @@ struct RunnerEnds {
     key: watch::Receiver<KeyState>,
     quitting: watch::Receiver<bool>,
     last_writing_window: Arc<Mutex<Option<WindowApp>>>,
+    learning: Arc<Learning>,
+    watch_enabled: watch::Sender<bool>,
+    watch_enabled_rx: watch::Receiver<bool>,
 }
 
 impl RunnerEnds {
@@ -355,6 +375,7 @@ impl RunnerEnds {
         history: Arc<History>,
         drafts: Arc<Drafts>,
     ) {
+        let _watch_guard = self.watch_enabled_rx;
         Runner::new(
             config,
             delivery,
@@ -371,6 +392,8 @@ impl RunnerEnds {
                 feeding: self.feeding,
                 paused,
                 last_writing_window: self.last_writing_window,
+                learning: self.learning,
+                watch_enabled: self.watch_enabled,
             },
         )
         .run()
@@ -1046,6 +1069,8 @@ struct Shared<S: Rig> {
     feeding: Arc<watch::Sender<bool>>,
     /// Whether listening starts paused.
     paused: bool,
+    learning: Arc<Learning>,
+    watch_enabled: watch::Sender<bool>,
 }
 
 struct Runner<S: Rig> {
@@ -1081,6 +1106,10 @@ struct Runner<S: Rig> {
     key: Presses,
     key_state: watch::Receiver<KeyState>,
     quitting: watch::Receiver<bool>,
+    learning: Arc<Learning>,
+    watch_enabled: watch::Sender<bool>,
+    /// Stops the field watch of the previous delivery when a newer one arrives.
+    watch_cancel: Option<oneshot::Sender<()>>,
 }
 
 impl<S: Rig> Runner<S> {
@@ -1117,6 +1146,9 @@ impl<S: Rig> Runner<S> {
             key: Presses::new(shared.key.clone()),
             key_state: shared.key,
             quitting: shared.quitting,
+            learning: shared.learning,
+            watch_enabled: shared.watch_enabled,
+            watch_cancel: None,
         }
     }
 
@@ -1124,6 +1156,7 @@ impl<S: Rig> Runner<S> {
         let config = self.config.clone();
         self.start(config).await;
         while let Flow::Continue = Box::pin(self.step()).await {}
+        stop_watch(&mut self.watch_cancel);
         if let Some(loading) = self.loading.take() {
             loading.abort();
         }
@@ -1618,6 +1651,14 @@ impl<S: Rig> Runner<S> {
         }
     }
 
+    /// Turns the field watch off at once when the switch goes off.
+    fn set_learning(&mut self, on: bool) {
+        if !on {
+            stop_watch(&mut self.watch_cancel);
+        }
+        self.watch_enabled.send_replace(on);
+    }
+
     fn pause(&mut self) {
         self.paused = true;
         self.reopen_failures = None;
@@ -1683,6 +1724,7 @@ impl<S: Rig> Runner<S> {
             self.publisher
                 .update(|view| view.wake_words = config.wake.enabled());
             self.take_history(&config);
+            self.set_learning(config.stt.learn_from_corrections());
             self.config = config;
             return;
         }
@@ -1725,6 +1767,7 @@ impl<S: Rig> Runner<S> {
                     view.wake_words = config.wake.enabled();
                 });
                 self.take_history(&config);
+                self.set_learning(config.stt.learn_from_corrections());
                 self.config = config;
                 self.load_speech_model();
                 self.open_microphone().await;
@@ -1742,6 +1785,7 @@ impl<S: Rig> Runner<S> {
         reason = "one capture's drive, settle and the notes it leaves are one sequence"
     )]
     async fn capture(&mut self) -> Flow {
+        stop_watch(&mut self.watch_cancel);
         let bound = {
             let Some(session) = self.session.as_ref() else {
                 return Flow::Continue;
@@ -1769,6 +1813,9 @@ impl<S: Rig> Runner<S> {
                 key,
                 publisher,
                 hold_problem,
+                learning,
+                watch_enabled,
+                watch_cancel,
                 ..
             } = &mut *self;
             let Some(Session {
@@ -1822,6 +1869,9 @@ impl<S: Rig> Runner<S> {
                         drafts,
                         config,
                         recorder: engine.recorder(),
+                        learning,
+                        watch_enabled,
+                        watch_cancel,
                     }
                     .settle(
                         &outcome,
@@ -1899,9 +1949,12 @@ impl<S: Rig> Runner<S> {
 struct Settling<'a, H: Host + 'static> {
     delivery: &'a Delivery<H>,
     history: &'a Arc<History>,
-    drafts: &'a Drafts,
+    drafts: &'a Arc<Drafts>,
     config: &'a DesktopConfig,
     recorder: &'a Recorder,
+    learning: &'a Arc<Learning>,
+    watch_enabled: &'a watch::Sender<bool>,
+    watch_cancel: &'a mut Option<oneshot::Sender<()>>,
 }
 
 impl<H: Host + 'static> Settling<'_, H> {
@@ -1909,7 +1962,7 @@ impl<H: Host + 'static> Settling<'_, H> {
     /// meanwhile, and keeps what was dictated once. An ended capture reaches no host and is kept
     /// as cancelled.
     async fn settle(
-        &self,
+        &mut self,
         outcome: &CaptureOutcome,
         cleanup: Option<&(String, String)>,
         ended: bool,
@@ -1917,7 +1970,7 @@ impl<H: Host + 'static> Settling<'_, H> {
         key: &mut Presses,
         refuse: impl Fn(Refusal, u64),
     ) -> Option<Finished> {
-        let finished = if ended {
+        let mut finished = if ended {
             None
         } else {
             // The presses so far were the capture's; a later one finds the user waiting.
@@ -1930,8 +1983,69 @@ impl<H: Host + 'static> Settling<'_, H> {
             )
             .await
         };
-        self.keep(outcome, cleanup, ended, finished.as_ref(), bound);
+        let (entry, draft) = self.keep(outcome, cleanup, ended, finished.as_ref(), bound);
+        if let Some(field) = finished.as_mut().and_then(|finished| finished.field.take()) {
+            match field {
+                Err(limit) => self.learning.limit(limit),
+                Ok(field) => self.start_watch(outcome, field, entry, draft),
+            }
+        }
         finished
+    }
+
+    fn start_watch(
+        &mut self,
+        outcome: &CaptureOutcome,
+        probe: Box<dyn FieldProbe>,
+        entry: Option<oneshot::Receiver<Option<u64>>>,
+        draft: Option<u64>,
+    ) {
+        self.learning.clear_limit();
+        let (cancel, cancel_rx) = oneshot::channel();
+        stop_watch(self.watch_cancel);
+        *self.watch_cancel = Some(cancel);
+        let pasted = match outcome {
+            CaptureOutcome::Accepted(request) => request.text.clone(),
+            _ => String::new(),
+        };
+        let known = self.config.stt.phrases.phrases().to_vec();
+        let enabled = self.watch_enabled.subscribe();
+        let (history, drafts, learning) = (
+            Arc::clone(self.history),
+            Arc::clone(self.drafts),
+            Arc::clone(self.learning),
+        );
+        let history_config = self.config.history;
+        let metrics = self.recorder.metrics();
+        tokio::spawn(async move {
+            let for_probe = pasted.clone();
+            let field = tokio::task::spawn_blocking(move || probe.field(&for_probe))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(FieldLimit::Desktop(
+                        "Thalvi could not read the field in time.",
+                    ))
+                });
+            let field = match field {
+                Ok(field) => field,
+                Err(limit) => {
+                    learning.limit(limit);
+                    return;
+                }
+            };
+            let learned = watch(Ok(field), &pasted, &known, enabled, cancel_rx, &metrics).await;
+            if let Some(corrected) = learned.corrected.clone() {
+                if let Some(entry) = entry
+                    && let Ok(Some(id)) = entry.await
+                {
+                    history.set_corrected_in_background(history_config, id, corrected.clone());
+                }
+                if let Some(id) = draft {
+                    drafts.set_corrected(id, corrected);
+                }
+            }
+            learning.offer(learned);
+        });
     }
 
     fn keep(
@@ -1941,7 +2055,7 @@ impl<H: Host + 'static> Settling<'_, H> {
         ended: bool,
         finished: Option<&Finished>,
         bound: &Bound<H::Target>,
-    ) {
+    ) -> (Option<oneshot::Receiver<Option<u64>>>, Option<u64>) {
         let cancelled;
         let kept = match outcome {
             CaptureOutcome::Accepted(request) if ended => {
@@ -1958,19 +2072,22 @@ impl<H: Host + 'static> Settling<'_, H> {
             CaptureOutcome::Accepted(request) if request.route == CaptureRoute::Task
         );
         let window = (!task).then(|| bound.window()).flatten();
-        if let Some(mut capture) = Capture::of(kept, finished, window) {
+        let entry = Capture::of(kept, finished, window).map(|mut capture| {
             if let Some((how, _)) = cleanup {
                 capture.cleanup = Some(how.clone());
             }
             self.history
-                .record_in_background(self.config.history, capture);
-        }
-        if !task
+                .record_in_background(self.config.history, capture)
+        });
+        let draft = if !task
             && let Some(draft) =
                 Draft::with_raw(kept, finished, bound, cleanup.map(|(_, raw)| raw.clone()))
         {
-            self.drafts.offer(draft);
-        }
+            Some(self.drafts.offer(draft))
+        } else {
+            None
+        };
+        (entry, draft)
     }
 }
 
@@ -2084,6 +2201,13 @@ fn pressed(key: &mut Presses) -> u64 {
     u64::from(key.take().is_some()) + key.take_lost()
 }
 
+/// Stops the field watch of an earlier delivery.
+fn stop_watch(slot: &mut Option<oneshot::Sender<()>>) {
+    if let Some(cancel) = slot.take() {
+        let _ = cancel.send(());
+    }
+}
+
 /// Runs `delivery`, calling `refuse` for each press of the hold key meanwhile.
 async fn while_delivering<T>(
     delivery: impl Future<Output = T>,
@@ -2138,6 +2262,10 @@ fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
         update_channel: old.update_channel,
         themes: old.themes.clone(),
         wake: new.wake.clone().with_enabled(old.wake.enabled()),
+        stt: thalvi_desktop::config::SttConfig {
+            learn_from_corrections: old.stt.learn_from_corrections,
+            ..new.stt.clone()
+        },
         ..new.clone()
     }
 }
@@ -2349,6 +2477,7 @@ mod controls;
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::future::Future;
     use std::rc::Rc;
     use std::time::Duration;
@@ -3516,16 +3645,86 @@ mod tests {
         }
     }
 
+    type FieldReads = VecDeque<Result<String, thalvi_desktop::learn::FieldEnd>>;
+
+    /// The reads a watched field will give.
+    #[derive(Clone, Default)]
+    struct FieldSource(Arc<Mutex<(FieldReads, usize)>>);
+
+    impl FieldSource {
+        fn text(&self, text: &str) {
+            self.0.lock().unwrap().0.push_back(Ok(text.to_owned()));
+        }
+
+        fn end(&self, end: thalvi_desktop::learn::FieldEnd) {
+            self.0.lock().unwrap().0.push_back(Err(end));
+        }
+
+        fn reads(&self) -> usize {
+            self.0.lock().unwrap().1
+        }
+    }
+
+    struct TestField {
+        source: FieldSource,
+    }
+
+    impl thalvi_desktop::learn::Field for TestField {
+        fn text(&mut self) -> Result<String, thalvi_desktop::learn::FieldEnd> {
+            let mut source = self.source.0.lock().unwrap();
+            source.1 += 1;
+            source.0.pop_front().unwrap_or(Ok(String::new()))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestProbe {
+        source: FieldSource,
+    }
+
+    impl thalvi_desktop::learn::FieldProbe for TestProbe {
+        fn field(
+            self: Box<Self>,
+            _pasted: &str,
+        ) -> Result<Box<dyn thalvi_desktop::learn::Field>, thalvi_desktop::learn::FieldLimit>
+        {
+            Ok(Box::new(TestField {
+                source: self.source,
+            }))
+        }
+    }
+
     /// The window and the calls a host saw.
     #[derive(Clone, Default)]
     pub(super) struct TestHost(
         pub(super) Arc<Mutex<Vec<&'static str>>>,
         pub(super) Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<Option<TestProbe>>>,
+        Arc<Mutex<Option<thalvi_desktop::learn::FieldLimit>>>,
     );
 
     impl TestHost {
         fn called(&self, call: &'static str) {
             self.0.lock().unwrap().push(call);
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.0.lock().unwrap().clone()
+        }
+
+        fn watching(source: FieldSource) -> Self {
+            Self(
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Some(TestProbe { source }))),
+                Arc::new(Mutex::new(None)),
+            )
+        }
+
+        fn limit(limit: thalvi_desktop::learn::FieldLimit) -> Self {
+            let host = Self::default();
+            *host.3.lock().unwrap() = Some(limit);
+            host
         }
     }
 
@@ -3538,6 +3737,19 @@ mod tests {
 
         fn is_terminal(&self, _: &String) -> bool {
             false
+        }
+
+        fn watch_field(
+            &self,
+            _: &String,
+        ) -> Result<Box<dyn thalvi_desktop::learn::FieldProbe>, thalvi_desktop::learn::FieldLimit>
+        {
+            self.called("watch_field");
+            if let Some(limit) = self.3.lock().unwrap().clone() {
+                return Err(limit);
+            }
+            let probe = self.2.lock().unwrap().clone().unwrap_or_default();
+            Ok(Box::new(probe))
         }
 
         fn writing_target(
@@ -3629,17 +3841,23 @@ mod tests {
         let delivery = Delivery::new(host.clone());
         let recorder = Recorder::disabled();
         let history = Arc::new(History::at(dir.join("history.json")));
-        let drafts = Drafts::default();
+        let drafts = Arc::new(Drafts::default());
         let config = DesktopConfig::from_json_str("{}").unwrap();
         let bound = delivery.bind(&recorder).await;
         let (_input, state) = HoldInput::new();
         let mut key = Presses::new(state);
+        let learning = Arc::new(Learning::default());
+        let (watch_enabled, _) = watch::channel(true);
+        let mut watch_cancel = None;
         let finished = Settling {
             delivery: &delivery,
             history: &history,
             drafts: &drafts,
             config: &config,
             recorder: &recorder,
+            learning: &learning,
+            watch_enabled: &watch_enabled,
+            watch_cancel: &mut watch_cancel,
         }
         .settle(outcome, None, ended, &bound, &mut key, |_, _| {})
         .await;
@@ -3658,6 +3876,196 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let calls = host.0.lock().unwrap().clone();
         (finished, calls, entries, drafts.view())
+    }
+
+    async fn settle_watching(
+        host: TestHost,
+        config: &str,
+        outcome: &CaptureOutcome,
+        dir: &std::path::Path,
+    ) -> (
+        Option<Finished>,
+        Arc<History>,
+        Arc<Drafts>,
+        Arc<Learning>,
+        watch::Sender<bool>,
+        Option<oneshot::Sender<()>>,
+    ) {
+        let delivery = Delivery::new(host);
+        let config = DesktopConfig::from_json_str(config).unwrap();
+        let history = Arc::new(History::at(dir.join("history.json")));
+        let drafts = Arc::new(Drafts::default());
+        let learning = Arc::new(Learning::default());
+        let (enabled, enabled_rx) = watch::channel(true);
+        let mut cancel = None;
+        let bound = delivery.bind(&Recorder::disabled()).await;
+        let (_input, state) = HoldInput::new();
+        let mut key = Presses::new(state);
+        let finished = Settling {
+            delivery: &delivery,
+            history: &history,
+            drafts: &drafts,
+            config: &config,
+            recorder: &Recorder::disabled(),
+            learning: &learning,
+            watch_enabled: &enabled,
+            watch_cancel: &mut cancel,
+        }
+        .settle(outcome, None, false, &bound, &mut key, |_, _| {})
+        .await;
+        let _ = enabled_rx;
+        (finished, history, drafts, learning, enabled, cancel)
+    }
+
+    #[tokio::test]
+    async fn a_paste_with_learning_on_sets_the_history_and_draft_fixes_and_offers_the_name() {
+        let dir =
+            std::env::temp_dir().join(format!("thalvi-learning-runner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let source = FieldSource::default();
+        source.text("before Cyber X2 after");
+        source.text("before Cybrex2 after");
+        source.end(thalvi_desktop::learn::FieldEnd::FocusLeft);
+        let host = TestHost::watching(source.clone());
+        let (finished, history, drafts, learning, _enabled, _cancel) = settle_watching(
+            host.clone(),
+            r#"{"stt":{"learn_from_corrections":true}}"#,
+            &request(CaptureRoute::Paste, "Cyber X2"),
+            &dir,
+        )
+        .await;
+        assert!(finished.expect("a delivered paste").delivered);
+        assert!(host.calls().contains(&"watch_field"));
+
+        let view = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let view = learning.view();
+                if !view.suggestions.is_empty() {
+                    return view;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the field watch ended");
+        assert_eq!(view.suggestions[0].word, "Cybrex2");
+        assert_eq!(view.suggestions[0].heard, "Cyber X2");
+
+        let entries = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let entries = history.list().unwrap();
+                if entries
+                    .first()
+                    .is_some_and(|entry| entry.corrected.is_some())
+                {
+                    return entries;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the history entry was written");
+        assert_eq!(entries[0].text, "Cyber X2");
+        assert_eq!(entries[0].corrected.as_deref(), Some("Cybrex2"));
+        let draft = drafts.view().expect("the draft is shown");
+        assert_eq!(draft.original, "Cyber X2");
+        assert_eq!(draft.text, "Cybrex2");
+        assert_eq!(draft.corrected.as_deref(), Some("Cybrex2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn only_a_paste_with_learning_on_arms_a_probe() {
+        let dir = std::env::temp_dir().join(format!("thalvi-learning-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cases = [
+            (
+                "the switch on",
+                r#"{"stt":{"learn_from_corrections":true}}"#,
+                CaptureRoute::Paste,
+                true,
+            ),
+            ("the switch off", "{}", CaptureRoute::Paste, false),
+            (
+                "a submit",
+                r#"{"stt":{"learn_from_corrections":true}}"#,
+                CaptureRoute::Submit,
+                false,
+            ),
+        ];
+        for (label, config, route, watches) in cases {
+            let host = TestHost::watching(FieldSource::default());
+            let (_, _, _, _, _enabled, _cancel) =
+                settle_watching(host.clone(), config, &request(route, "cyber x2"), &dir).await;
+            assert_eq!(host.calls().contains(&"watch_field"), watches, "{label}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_field_limit_is_kept_for_the_switch() {
+        let dir =
+            std::env::temp_dir().join(format!("thalvi-learning-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let host = TestHost::limit(thalvi_desktop::learn::FieldLimit::NoAccessibility);
+        let (_, _, _, learning, _enabled, _cancel) = settle_watching(
+            host.clone(),
+            r#"{"stt":{"learn_from_corrections":true}}"#,
+            &request(CaptureRoute::Paste, "cyber x2"),
+            &dir,
+        )
+        .await;
+        let view = learning.view();
+        assert_eq!(
+            view.limit.as_deref(),
+            Some("Thalvi can't reach this desktop's accessibility service."),
+            "{view:?}"
+        );
+        assert_eq!(view.suggestions, Vec::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_newer_delivery_stops_the_watch_already_running() {
+        let dir =
+            std::env::temp_dir().join(format!("thalvi-learning-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let source = FieldSource::default();
+        source.text("before cyber x2 after");
+        for _ in 0..1000 {
+            source.text("before Cybrex2 after");
+        }
+        let host = TestHost::watching(source.clone());
+        let (_, _, _, learning, _enabled, mut cancel) = settle_watching(
+            host,
+            r#"{"stt":{"learn_from_corrections":true}}"#,
+            &request(CaptureRoute::Paste, "cyber x2"),
+            &dir,
+        )
+        .await;
+        let mut changed = learning.changed();
+        let before = *changed.borrow_and_update();
+        // `Runner::capture` calls this before the next delivery is admitted.
+        stop_watch(&mut cancel);
+        assert!(
+            cancel.is_none(),
+            "the newer delivery took the old watch's cancel"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                changed.changed().await.expect("the watch is still alive");
+                if *changed.borrow_and_update() > before {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the older watch stopped when the newer capture arrived");
+        assert!(
+            source.reads() < 1000,
+            "the watch did not run to its five-minute limit"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -3758,6 +4166,7 @@ mod tests {
             headline: "Done".to_owned(),
             causes: Vec::new(),
             task_target: None,
+            field: None,
         };
         assert_eq!(
             delivered(
@@ -4023,6 +4432,8 @@ mod tests {
                 feeding: ends.feeding,
                 paused: false,
                 last_writing_window: ends.last_writing_window,
+                learning: ends.learning,
+                watch_enabled: ends.watch_enabled,
             },
         );
         for show in [true, false] {
@@ -4652,7 +5063,12 @@ mod tests {
             }
             let opens = Rc::new(Cell::new(0));
             let feed = Rc::new(RefCell::new(None));
-            let (link, ends, _) = EngineLink::wire_with(&options.config, paused, options.announcer);
+            let (link, ends, _) = EngineLink::wire_with(
+                &options.config,
+                paused,
+                options.announcer,
+                Arc::new(Learning::default()),
+            );
             let lab = MicLab {
                 opens: Rc::clone(&opens),
                 missing: Rc::new(Cell::new(missing)),
@@ -4667,7 +5083,12 @@ mod tests {
                 first_open: Rc::new(RefCell::new(options.first_open)),
             };
             let texts = Arc::new(Mutex::new(Vec::new()));
-            let host = TestHost(Arc::new(Mutex::new(Vec::new())), Arc::clone(&texts));
+            let host = TestHost(
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::clone(&texts),
+                Arc::new(Mutex::new(None)),
+                Arc::new(Mutex::new(None)),
+            );
             let status = link.status_updates();
             let audio = link.audio_updates();
             let feeding = link.feeding_updates();

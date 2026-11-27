@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { DownloadFailure, errorText } from "./contract.ts";
-import type { AudioStatus, Backend, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, Level, LookStyles, OverlayPreviewState, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, ChatModelInfo, CurrentApp, Draft, HistoryEntry, HoldKeyDefaults, Learning, Level, LookStyles, OverlayPreviewState, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 /** The rejection of `download_speech_model`, which carries `{ message, causes }`, as a typed error. */
 function downloadFailure(rejection: unknown): DownloadFailure {
@@ -61,6 +61,14 @@ export function tauriBackend(): Backend {
     deleteHistoryEntry: (id) => invoke<undefined>("delete_history_entry", { id }),
     clearHistory: () => invoke<undefined>("clear_history"),
     getDraft: () => invoke<Draft | null>("get_draft"),
+    getLearning: () => invoke<Learning>("get_learning"),
+    acceptSuggestion: (word) => invoke<undefined>("accept_suggestion", { word }),
+    dismissSuggestion: (word) => invoke<undefined>("dismiss_suggestion", { word }),
+    onLearningChanged: (listener) => {
+      void listen<Learning>("thalvi://learning-changed", (event) => {
+        listener(event.payload);
+      });
+    },
     editDraft: (text) => invoke<undefined>("edit_draft", { text }),
     copyText: (text) => invoke<undefined>("copy_text", { text }),
     discardDraft: () => invoke<undefined>("discard_draft"),

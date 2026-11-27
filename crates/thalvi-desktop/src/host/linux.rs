@@ -17,6 +17,7 @@ use super::{
     OverlayFrame, PasteText, RequestServer, WebUrl, WindowApp, channel,
 };
 use crate::hold::{HoldChange, HoldKey, HoldKind};
+use crate::learn::{FieldLimit, FieldProbe};
 pub use announce::status_announcer;
 
 /// The desktop session Thalvi runs in.
@@ -307,6 +308,15 @@ impl Host for Desktop {
             (Self::Hyprland(host), Target::Window(window)) => host.is_terminal(window),
             (Self::Gnome(host), Target::Clipboard(clipboard)) => host.is_terminal(clipboard),
             _ => false,
+        }
+    }
+
+    fn watch_field(&self, target: &Target) -> Result<Box<dyn FieldProbe>, FieldLimit> {
+        match (self, target) {
+            (Self::Hyprland(host), Target::Window(window)) => host.watch_field(window),
+            _ => Err(FieldLimit::Desktop(
+                "Learning from corrections isn't available on this desktop yet.",
+            )),
         }
     }
 

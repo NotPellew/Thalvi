@@ -226,6 +226,8 @@ export interface Settings {
     entries: SpeechEntry[];
     /** Spellings recognition favours; absent when empty. */
     phrases?: string[];
+    /** Whether Thalvi watches a field after a paste; the form shows it whether or not it is on. */
+    learn_from_corrections?: boolean;
   };
   apps: Record<string, AppSettings>;
   scripts: ScriptSettings[];
@@ -257,6 +259,8 @@ export interface HistoryEntry {
   text: string;
   target: string | null;
   outcome: HistoryOutcome;
+  /** The user's cleanup of the pasted span, when one was kept. */
+  corrected?: string | null;
 }
 
 export type DraftOutcome = "delivered" | "cancelled" | "failed" | "maybePartial";
@@ -274,6 +278,20 @@ export interface Draft {
   newerWaiting: boolean;
   /** The words as recognized, when a cleanup pasted something else. */
   raw?: string | null;
+  /** The user's cleanup of the pasted span, which Copy uses without their own edits. */
+  corrected?: string | null;
+}
+
+/** A name the user corrected, with what Thalvi wrote. */
+export interface Suggestion {
+  word: string;
+  heard: string;
+}
+
+/** The in-memory suggestions and why the last field could not be watched. */
+export interface Learning {
+  suggestions: Suggestion[];
+  limit: string | null;
 }
 
 /** A speech model Thalvi can download, as the Rust catalog describes it. */
@@ -380,6 +398,13 @@ export interface Backend {
   clearHistory(): Promise<void>;
   /** The last dictation, or null when there is none. */
   getDraft(): Promise<Draft | null>;
+  /** The pending name suggestions and why the last field could not be watched. */
+  getLearning?(): Promise<Learning>;
+  /** Adds a suggested name to the word list through the normal settings save. */
+  acceptSuggestion?(word: string): Promise<void>;
+  dismissSuggestion?(word: string): Promise<void>;
+  /** Fires when a suggestion or the field limit changes. */
+  onLearningChanged?(listener: (learning: Learning) => void): void;
   /** Keeps the edited text; nothing is recognized, copied or typed. */
   editDraft(text: string): Promise<void>;
   /** Puts the text on the clipboard through the desktop; rejects with the plain reason it could not. */

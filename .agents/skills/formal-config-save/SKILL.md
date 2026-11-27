@@ -126,6 +126,13 @@ unchanged.
 
 The opt-in dictation cleanup (#465) adds one agent test in `agent.rs`. `settings_set` is unchanged: the new field is refused by the same config load as every other writing field. No writer of `desktop.json` or `AppState::config` is added, so the model and its three invariants are unchanged.
 
+Learning from corrections (#776) adds one form field, `stt.learn_from_corrections`, that the
+existing Settings form and `settings set` load and save; it is held only when on. `accept_suggestion`
+adds an accepted name to `stt.phrases` through `commands::save` → `AppState::save_form`, the one
+locked writer already modeled as the Settings form writer; it takes no new lock, temporary name or
+config snapshot outside it. The new Tauri commands and the app's event relay only read the config or
+in-memory learning state. Model, writers and three invariants are unchanged.
+
 The experimental Whisper entry (#481) adds no writer:
 `commands.rs` lists the Whisper models, words their device line and downloads their files into the model
 store, `app.rs` passes the packaged helper folder into `AppState::start`, and `agent.rs` names the model in

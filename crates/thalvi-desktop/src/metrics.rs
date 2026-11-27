@@ -111,6 +111,8 @@ pub enum Event {
     /// One overlay show: from the status that asked for it to the first frame attached, or to the
     /// failure when the surface never appeared. `ok` or that failure.
     OverlayShown,
+    /// One watch of a field after a paste: why it ended, reads, suggestions and duration. Never text.
+    FieldWatch,
 }
 
 impl Event {
@@ -151,6 +153,7 @@ impl Event {
             Self::AudioGap => "desktop_audio_gap",
             Self::Update => "desktop_update",
             Self::OverlayShown => "desktop_overlay_shown",
+            Self::FieldWatch => "desktop_field_watch",
         }
     }
 }
