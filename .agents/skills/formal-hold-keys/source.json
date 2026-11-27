@@ -1,8 +1,8 @@
 {
-  "sync_commit": "3587b211502291cac0baab1064304116b19a473c",
+  "sync_commit": "1d61288baf9bece708676c2a91c35fb3a002ace1",
   "files": {
     "crates/thalvi-desktop/src/hold.rs": {
-      "sha256": "f4bfb6b0c640326a2eba92bab5df817c87c28acaab78a564388561e80d43ea6b",
+      "sha256": "53a8985d8a64e3648527bf4977b4720fd2183a7b738550bb8fb5b00056eb2b30",
       "functions": [
         "KeyState",
         "KeyBind",
