@@ -246,10 +246,21 @@ fn kept_in_context(tongue: Tongue, text: &str, tokens: &[Word], at: usize, last:
                         || word == "hundred"
                         || english_scale(word).is_some())
             };
-            // Digits are a number only with no letter glued to them, so "2FA" is a word.
+            // Digits are a number only with no letter glued to them but "am" or "pm", so "2FA" is a
+            // word and "2pm" a number.
             let digits_start = |rest: &str| {
                 let after = rest.trim_start_matches(|character: char| character.is_ascii_digit());
-                after.len() < rest.len() && !after.starts_with(char::is_alphabetic)
+                let digits = after.len() < rest.len();
+                let after = match after.get(..2) {
+                    Some(suffix)
+                        if suffix.eq_ignore_ascii_case("am")
+                            || suffix.eq_ignore_ascii_case("pm") =>
+                    {
+                        &after[2..]
+                    }
+                    _ => after,
+                };
+                digits && !after.starts_with(char::is_alphabetic)
             };
             let digits_end = |rest: &str| {
                 let before = rest.trim_end_matches(|character: char| character.is_ascii_digit());
