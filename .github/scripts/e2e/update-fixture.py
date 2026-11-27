@@ -234,9 +234,12 @@ class Desktop:
              "address": "ws://127.0.0.1:9", "model": "unused"},
         ]}})
 
-    def start(self, case):
+    def publish(self, case):
         with urlopen(Request(f"{self.origin}/offer/{case}", method="POST"), timeout=5) as reply:
             require(reply.status == 204, f"Could not publish {case} fixture")
+
+    def start(self, case):
+        self.publish(case)
         with (self.out / f"{case}.log").open("wb") as log:
             self.app = subprocess.Popen([self.launch], stdout=log, stderr=subprocess.STDOUT, env=self.env)
         wait_for(f"{case} app to answer settings get", lambda: self.cli("settings", "get"))
@@ -341,6 +344,7 @@ def drive(package, out, origin):
         for case, step, outcome in [("signature", "download", "signature"), ("install", "install", "not_applied")]:
             desktop.start(case)
             event = wait_for(case, lambda: desktop.metric(step, outcome, VERSION_A), 120)
+            desktop.publish("empty")
             wait_for("A to answer after the failure", lambda: desktop.cli("settings", "get"))
             require(case != "signature" or desktop.app.poll() is None, "A exited after rejecting the signature")
             if case == "install":
@@ -348,10 +352,13 @@ def drive(package, out, origin):
             desktop.theme_intact()
             after = sha256(desktop.config)
             require(after == baseline, f"{case} changed desktop.json")
+            exit_code = desktop.stop() if case == "signature" else desktop.app.wait(timeout=10)
+            require(exit_code == 0, f"The original Thalvi process exited with {exit_code}")
             receipt[case] = {"update": event, "before_sha256": baseline, "after_sha256": after,
-                             "app_exit_code": desktop.stop()}
+                             "app_exit_code": exit_code}
             write_json(out / "update-receipt.json", receipt)
-        desktop.start("success")
+        desktop.publish("success")
+        desktop.save({"update_channel": "development"})
         event = wait_for("B to report a successful install after restart", lambda: desktop.metric("install", "ok", VERSION_B), 180)
         wait_for("B to answer settings get", lambda: desktop.cli("settings", "get"))
         desktop.theme_intact()
