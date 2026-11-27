@@ -1,8 +1,8 @@
 {
-  "sync_commit": "3d0ec71d93667248bd0fb04a76599c08f4188a02",
+  "sync_commit": "6fddb591c91ca24ae00ce4c45126de8f7f65b6d5",
   "files": {
     "crates/thalvi-app/src/runner.rs": {
-      "sha256": "c68e9f2204e71f7c81196c8e2971aa8db168b775c3fa13953382bd2f18728807",
+      "sha256": "8f7d2a8a67f3293769dd49dfb36f061d49a528f39f7754113866466c812649ef",
       "functions": [
         "Requests::take",
         "Requests::read_queued",
@@ -12,7 +12,7 @@
       ]
     },
     "crates/thalvi-desktop/src/engine.rs": {
-      "sha256": "759a8bc5b9b7e70b8249492a4e29be447e680050c81b3cc4a4f464334f40961a",
+      "sha256": "47a36daefcc1c35351623c8858dc1911c23539f6d24cabcc3648d795e400e527",
       "functions": [
         "EngineHandle::cancel",
         "Engine::capture",
@@ -39,7 +39,7 @@
       ]
     },
     "crates/thalvi-desktop/src/delivery.rs": {
-      "sha256": "e9f91d41bdac01094cac04b65219d2bb8c88463af4ba054235bc520c7deefac0",
+      "sha256": "c410505459e5c290387225f71fab6b0163745ac1cf16c7594ddaf916a2e0072a",
       "functions": [
         "Delivery::finish",
         "Delivery::paste_in",
