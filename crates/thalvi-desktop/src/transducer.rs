@@ -1319,20 +1319,19 @@ impl<B: Backend> Replayed<B> {
         let live = self.words(&self.shown[offset..start]);
         let tail = self.words(&frames);
         let cut = start - offset;
-        let (left, right) = match Self::overlap(&live, &tail) {
-            Some(pair) => pair,
-            None => {
-                let Some(word) = tail.iter().find(|word| word.start.frame >= cut) else {
-                    return Ok(None);
-                };
-                (
-                    WordStart {
-                        frame: cut,
-                        token: 0,
-                    },
-                    word.start,
-                )
-            }
+        let (left, right) = if let Some(pair) = Self::overlap(&live, &tail) {
+            pair
+        } else {
+            let Some(word) = tail.iter().find(|word| word.start.frame >= cut) else {
+                return Ok(None);
+            };
+            (
+                WordStart {
+                    frame: cut,
+                    token: 0,
+                },
+                word.start,
+            )
         };
         let keep = offset + left.frame;
         let join = offset + right.frame;
