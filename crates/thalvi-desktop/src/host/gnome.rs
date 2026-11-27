@@ -13,6 +13,7 @@ use super::{
     WindowApp,
 };
 use crate::hold::{HoldChange, KeyBind};
+use crate::learn::{FieldLimit, FieldProbe};
 
 /// Where GNOME dictation goes: there is no window to bind, so the text waits on the clipboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +91,18 @@ impl<R: CommandRunner, T: Toolkit> Host for Gnome<R, T> {
     // Nothing is ever pasted here, so no line can run.
     fn is_terminal(&self, _target: &Clipboard) -> bool {
         false
+    }
+
+    fn watch_field(&self, _target: &Clipboard) -> Result<Box<dyn FieldProbe>, FieldLimit> {
+        Err(FieldLimit::Desktop(
+            "Learning from corrections isn't available on this desktop yet.",
+        ))
+    }
+
+    fn learn_fields(&self, _on: bool) -> Result<(), FieldLimit> {
+        Err(FieldLimit::Desktop(
+            "Learning from corrections isn't available on this desktop yet.",
+        ))
     }
 
     fn writing_target(&self, _target: &Clipboard) -> Result<WindowApp, AppMatchLimit> {

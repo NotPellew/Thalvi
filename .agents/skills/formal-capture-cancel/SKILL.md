@@ -17,11 +17,29 @@ after the user cancels or pauses.
 
 The sync commit and its source hashes are recorded in `source.json`. The notes below say why each covered change since the model was written left its actions unchanged.
 
+The listener repair for #776 calls a `LearnFields` callback from `Runner::run` at start and from
+`Runner::set_learning` when the switch changes. The callback only tells the desktop to open or close
+its a11y connection; it adds no await, control receive, queue step or write to `Requests::ended`
+before the final empty receive, so the mapped actions and both bounds are unchanged.
+
 Covers: crates/thalvi-app/src/runner.rs crates/thalvi-desktop/src/engine.rs crates/thalvi-desktop/src/engine/submit_preview.rs crates/thalvi-desktop/src/recognizer.rs crates/thalvi-desktop/src/delivery.rs crates/thalvi-desktop/src/realtime.rs crates/thalvi-desktop/src/openai_live.rs crates/thalvi-desktop/src/local.rs '.agents/skills/formal-capture-cancel/**'
 They include buffered live recognition,
 deferred reload after download, and waiting for an on-device load. Their mapped actions remain below. Microphone
 switching happens after capture; notices, metrics and endpoint payload changes
 add no delivery path. `Control::Overlay` (8df760f) returns false from `Requests::ends`, so it never sets `ended` and neither admits nor blocks delivery, the same as `Apply` for this property; it is not one of the modeled controls. No product promise or bound changed in this maintenance.
+
+Learning from corrections (#776) adds a synchronous `Host::watch_field` call in
+`Delivery::paste_in`, only after the terminal hold-back and before `deliver`. It returns at once and
+does no I/O, so no field read holds back the paste. `Finished.field` carries the unresolved probe,
+and the watch task `Runner::capture` spawns after settling resolves it in `spawn_blocking` before
+`learn::watch` starts its 250 ms reads. A newer paste, the switch going off or quit stops that watch;
+no await, queue step or write to `Requests::ended` is added before the final empty receive. Both
+awaits (probe resolution, then field reads) live in a task spawned after delivery and cannot retract
+a paste. Model actions, cancellation writes and bounds are unchanged.
+
+The kept fix (#776) is now written to History, and that write awaited, before `Learning::offer`
+tells Settings to reread it. That await is a third one in the same watch task spawned after
+delivery, so it cannot hold back or retract a paste; actions, writes and bounds are unchanged.
 
 Status announcements (#394) publish engine states and streaming hold releases
 in order. Display reads the same states and the screen reader can also hear

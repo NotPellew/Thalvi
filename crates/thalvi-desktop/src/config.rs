@@ -100,8 +100,10 @@ struct RawDesktopConfig {
     capture_limits: CaptureLimits,
     #[serde(default)]
     endings: Endings,
+    /// Read as JSON so the learning switch can be added without changing the speech entries'
+    /// reader; the entries and their strictness are validated in `build`.
     #[serde(default)]
-    stt: RawStt,
+    stt: serde_json::Value,
     #[serde(default)]
     apps: BTreeMap<String, RawApp>,
     #[serde(default)]
@@ -337,8 +339,19 @@ fn build(
         .microphone
         .map(|name| nonempty(&name, "microphone"))
         .transpose()?;
-    let (entries, phrases) = raw
-        .stt
+    let mut stt = match raw.stt {
+        serde_json::Value::Null => serde_json::Map::new(),
+        serde_json::Value::Object(map) => map,
+        other => return Err(format!("stt must be an object, not {other}.")),
+    };
+    let learn_from_corrections = match stt.remove("learn_from_corrections") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(on)) => on,
+        Some(_) => return Err("stt.learn_from_corrections must be true or false.".to_owned()),
+    };
+    let raw_stt: RawStt = serde_json::from_value(serde_json::Value::Object(stt))
+        .map_err(|error: serde_json::Error| error.to_string())?;
+    let (entries, phrases) = raw_stt
         .entries(raw.server)
         .map_err(|error: EntryError| error.to_string())?;
     Ok(DesktopConfig {
@@ -347,7 +360,11 @@ fn build(
         ending_pause: raw.ending_pause,
         capture_limits: raw.capture_limits,
         endings: raw.endings,
-        stt: SttConfig { entries, phrases },
+        stt: SttConfig {
+            entries,
+            phrases,
+            learn_from_corrections,
+        },
         apps,
         scripts,
         overlay: raw.overlay,
@@ -551,6 +568,17 @@ pub struct SttConfig {
     pub entries: Entries,
     /// Spellings recognition favours, on this computer and on a recognizer that boosts phrases.
     pub phrases: WordList,
+    /// Whether Thalvi learns from a cleanup of the text it pasted. Off by default, so the file
+    /// keeps the switch only when it is on.
+    pub learn_from_corrections: bool,
+}
+
+impl SttConfig {
+    /// Whether Thalvi watches a field after a paste to learn from its cleanup.
+    #[must_use]
+    pub fn learn_from_corrections(&self) -> bool {
+        self.learn_from_corrections
+    }
 }
 
 impl Serialize for SttConfig {
@@ -560,10 +588,13 @@ impl Serialize for SttConfig {
             entries: &'a Entries,
             #[serde(skip_serializing_if = "WordList::is_empty")]
             phrases: &'a WordList,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            learn_from_corrections: Option<bool>,
         }
         FileStt {
             entries: &self.entries,
             phrases: &self.phrases,
+            learn_from_corrections: self.learn_from_corrections.then_some(true),
         }
         .serialize(serializer)
     }

@@ -332,6 +332,13 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
     if let Some(wake) = settings.get_mut("wake").and_then(Value::as_object_mut) {
         wake.insert("enabled".to_owned(), config.wake.enabled().into());
     }
+    // The file keeps this switch only when it is on; the form always shows it.
+    if let Some(stt) = settings.get_mut("stt").and_then(Value::as_object_mut) {
+        stt.insert(
+            "learn_from_corrections".to_owned(),
+            config.stt.learn_from_corrections().into(),
+        );
+    }
     for entry in entries_of(&mut settings) {
         if let Some(key) = entry.remove("api_key") {
             entry.insert(
@@ -896,6 +903,32 @@ mod tests {
         assert!(!off.wake.enabled());
         assert_eq!(kept, json!(false));
         assert!(!reloaded.wake.enabled(), "it survives a restart");
+        assert_eq!(absent, None);
+    }
+
+    #[test]
+    fn the_form_always_shows_the_learning_switch_and_the_file_keeps_it_only_when_on() {
+        let (store, dir) = store("learning-switch");
+        let file = || -> Value {
+            serde_json::from_str(&std::fs::read_to_string(&store.path).unwrap()).unwrap()
+        };
+        let defaults = store_defaults();
+        let mut settings = settings_json(&defaults).unwrap();
+        assert_eq!(settings["stt"]["learn_from_corrections"], json!(false));
+
+        settings["stt"]["learn_from_corrections"] = json!(true);
+        let on = store.save(settings.clone(), &defaults).unwrap();
+        assert_eq!(file()["stt"]["learn_from_corrections"], json!(true));
+        assert!(on.stt.learn_from_corrections());
+        assert!(
+            store.load().unwrap().stt.learn_from_corrections(),
+            "it survives a restart"
+        );
+
+        settings["stt"]["learn_from_corrections"] = json!(false);
+        store.save(settings, &defaults).unwrap();
+        let absent = file()["stt"].get("learn_from_corrections").cloned();
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(absent, None);
     }
 

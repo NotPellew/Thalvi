@@ -100,7 +100,7 @@ function device(model?: string, active = true): OnDeviceEntry {
 }
 
 function stt(entries: SpeechEntry[]): Settings["stt"] {
-  return { entries };
+  return { entries, learn_from_corrections: false };
 }
 
 /** Settings whose live entry in use is the on-device model, beside a realtime speech server entry not in use. */
@@ -196,7 +196,7 @@ describe("pages", () => {
           "Streaming servers": ["streaming servers · speech servers"],
           "After-you-stop servers": ["after-you-stop servers · speech servers"],
           "On this computer": ["on this computer"],
-          "Word list": ["word list"],
+          "Word list": ["word list", "learn from my corrections"],
         },
       },
       {
@@ -1151,6 +1151,88 @@ describe("the word list", () => {
     await settle();
     expect(wordHint()).toBe(cant("On this computer"));
     expect(stub.backend.wordListSupport).not.toHaveBeenCalled();
+  });
+});
+
+describe("learning from corrections", () => {
+  const LIMIT = "Thalvi can't reach this desktop's accessibility service.";
+  const DESCRIPTION = [
+    "Keeps your fixes to a paste and suggests names.",
+    "Reads the field you pasted into, for 5 minutes.",
+  ];
+  const SUGGESTION = { word: "Cybrex2", heard: "Cyber X2" };
+
+  async function openLearning(limit: string | null = null, suggestions = [SUGGESTION]) {
+    const stub = stubBackend();
+    stub.learningChanged({ suggestions: structuredClone(suggestions), limit });
+    mountSettings(root, stub.backend);
+    await settle();
+    goTo("recognition");
+    return stub;
+  }
+
+  const suggestions = (): HTMLElement[] => Array.from(rowOf("Word list").querySelectorAll<HTMLElement>(".suggestion"));
+  const suggestedLabel = (): HTMLElement | null => rowOf("Word list").querySelector<HTMLElement>(".suggested");
+
+  it("saves the switch with its explanation and shows why watching is not available", async () => {
+    const stub = await openLearning(null, []);
+    const input = control("Learn from my corrections", "input");
+    expect(input.checked).toBe(false);
+    expect(Array.from(rowOf("Learn from my corrections").querySelectorAll(".what small"), (line) => line.textContent)).toEqual(DESCRIPTION);
+    expect(rowOf("Learn from my corrections").querySelector(".ctl input[type=checkbox]")).not.toBeNull();
+    expect(rowOf("Learn from my corrections").textContent).not.toContain(LIMIT);
+
+    flip(input);
+    await settle();
+    expect(sent(stub).stt.learn_from_corrections).toBe(true);
+
+    stub.learningChanged({ suggestions: [], limit: LIMIT });
+    await settle();
+    expect(rowOf("Learn from my corrections").textContent).toContain(LIMIT);
+  });
+
+  it("lists a corrected name under the word list and follows the change event", async () => {
+    const stub = await openLearning();
+    expect(suggestedLabel()?.textContent).toBe("Suggested");
+    expect(suggestedLabel()?.hidden).toBe(false);
+    expect(suggestions()).toHaveLength(1);
+    const line = suggestions()[0]?.querySelector<HTMLElement>(".trow");
+    expect(line?.querySelector(".badge")?.textContent).toBe("Cybrex2");
+    expect(suggestions()[0]?.querySelector("small.unit")?.textContent).toBe("(you corrected “Cyber X2”)");
+    expect(within(suggestions()[0] as HTMLElement, "Add").closest(".trow")).toBe(line);
+    expect(within(suggestions()[0] as HTMLElement, "Dismiss").closest(".trow")).toBe(line);
+    expect(suggestions()[0]?.textContent).toContain("Cybrex2");
+    expect(suggestions()[0]?.textContent).toContain("(you corrected “Cyber X2”)");
+
+    stub.learningChanged({ suggestions: [{ word: "Thalvi", heard: "Talvi" }], limit: null });
+    await settle();
+    expect(suggestions()).toHaveLength(1);
+    expect(suggestions()[0]?.textContent).toContain("Thalvi");
+    expect(suggestions()[0]?.textContent).toContain("(you corrected “Talvi”)");
+
+    stub.learningChanged({ suggestions: [], limit: null });
+    await settle();
+    expect(suggestions()).toEqual([]);
+    expect(suggestedLabel()?.hidden).toBe(true);
+    expect(stub.backend.getLearning).toHaveBeenCalled();
+  });
+
+  it("adds a suggested name to the word list when Add is chosen", async () => {
+    const stub = await openLearning();
+    within(suggestions()[0] as HTMLElement, "Add").click();
+    await settle();
+    expect(stub.backend.acceptSuggestion).toHaveBeenCalledExactlyOnceWith("Cybrex2");
+    expect(Array.from(rowOf("Word list").querySelectorAll(".chip > span")).map((chip) => chip.textContent)).toEqual(["Cybrex2"]);
+    expect(suggestions()).toEqual([]);
+  });
+
+  it("takes a suggestion away without adding it when Dismiss is chosen", async () => {
+    const stub = await openLearning();
+    within(suggestions()[0] as HTMLElement, "Dismiss").click();
+    await settle();
+    expect(stub.backend.dismissSuggestion).toHaveBeenCalledExactlyOnceWith("Cybrex2");
+    expect(suggestions()).toEqual([]);
+    expect(rowOf("Word list").querySelectorAll(".chip")).toHaveLength(0);
   });
 });
 
@@ -3804,13 +3886,32 @@ describe("history", () => {
     expect(cards().every((card) => (card.querySelector("time")?.textContent ?? "") !== "")).toBe(true);
   });
 
-  it("says so when nothing has been kept, and reads the list again whenever the page is opened", async () => {
-    const stub = await openHistory([], ENTRIES);
+  it("shows the fix as an entry's text with one Heard line, and nothing extra without a fix", async () => {
+    const heard = "send the cyber x2 build log to the team";
+    const fixed = "Send the Cybrex2 build log to the team.";
+    await openHistory([{ ...ENTRIES[0] as HistoryEntry, text: heard, corrected: fixed }, ENTRIES[1] as HistoryEntry]);
+    const [kept, plain] = cards();
+    expect(kept?.querySelector("p:not(.corrected)")?.textContent).toBe(fixed);
+    expect(kept?.querySelectorAll(".corrected")).toHaveLength(1);
+    expect(kept?.querySelector(".corrected")?.textContent).toBe(`Heard: ${heard}`);
+    expect(kept?.textContent).not.toContain("Your fix:");
+    expect(plain?.querySelector("p:not(.corrected)")?.textContent).toBe("The window was gone.");
+    expect(plain?.querySelector(".corrected")).toBeNull();
+    expect(plain?.textContent).not.toContain("Heard:");
+    expect(plain?.textContent).not.toContain("Your fix:");
+  });
+
+  it("says so when nothing has been kept, and reads the list again when the page is opened or a fix arrives", async () => {
+    const fixed = "Remind me to call Cybrex2.";
+    const stub = await openHistory([], ENTRIES, [{ ...ENTRIES[0] as HistoryEntry, corrected: fixed }]);
     expect(root.querySelector(".entries")?.textContent).toBe("Nothing has been kept yet.");
     expect(stub.backend.getHistory).toHaveBeenCalledTimes(1);
     goTo("history");
     await settle();
     expect(cards()).toHaveLength(3);
+    stub.learningChanged({ suggestions: [], limit: null });
+    await settle();
+    expect(cards().map((card) => shown(card).text)).toEqual([fixed]);
   });
 
   it("deletes one entry by id and shows the list without it", async () => {
@@ -3873,7 +3974,9 @@ describe("history", () => {
   });
 
   it("copies exactly one entry's text and says so on that row, or says why it could not", async () => {
-    const stub = await openHistory(ENTRIES);
+    const heard = "send the cyber x2 build log to the team";
+    const fixed = "Send the Cybrex2 build log to the team.";
+    const stub = await openHistory([{ ...ENTRIES[0] as HistoryEntry, text: heard, corrected: fixed }, ...ENTRIES.slice(1)]);
     const rows = cards();
     within(rows[1] as HTMLElement, "Copy").click();
     await settle();
@@ -3884,6 +3987,7 @@ describe("history", () => {
     stub.backend.copyText.mockRejectedValueOnce("The clipboard is locked.");
     within(rows[0] as HTMLElement, "Copy").click();
     await settle();
+    expect(stub.backend.copyText).toHaveBeenLastCalledWith(fixed);
     expect(rows.map((card) => card.querySelector(".note")?.textContent ?? "")).toEqual(["The clipboard is locked.", "Copied to the clipboard.", ""]);
   });
 
@@ -3926,7 +4030,9 @@ describe("last dictation", () => {
     target: "foot",
     outcome: "failed",
     newerWaiting: false,
+    corrected: null,
   };
+  const FIX = "Remind me to call the dentist tomorrow morning.";
 
   async function openDraft(draft: Draft | null = DRAFT) {
     const stub = stubBackend();
@@ -3971,6 +4077,34 @@ describe("last dictation", () => {
       expect(notes()[0], outcome).toBe(sentence);
       expect(buttons(), outcome).toEqual(["Copy text", "Reset to original", "Discard"]);
     }
+  });
+
+  it.each([
+    ["no fix was kept", null, DRAFT.text, []],
+    ["a fix was kept", FIX, FIX, [`Heard: ${DRAFT.original}`]],
+  ] as const)("starts from %s and shows only what was heard", async (_case, corrected, expectedText, expectedNotes) => {
+    await openDraft({ ...DRAFT, corrected });
+    expect(area().value).toBe(expectedText);
+    for (const line of expectedNotes) expect(notes()).toContain(line);
+    expect(notes().some((line) => line.startsWith("Your fix:"))).toBe(false);
+    if (corrected === null) expect(notes().some((line) => line.startsWith("Heard:"))).toBe(false);
+  });
+
+  it("takes a fix that arrives later, but keeps the user's own edit instead", async () => {
+    const stub = await openDraft();
+    stub.backend.getDraft.mockImplementation(() => Promise.resolve({ ...DRAFT, corrected: FIX, text: FIX }));
+    stub.learningChanged({ suggestions: [], limit: null });
+    await settle();
+    expect(area().value).toBe(FIX);
+    expect(notes()).toContain(`Heard: ${DRAFT.original}`);
+    edit("My own edit.");
+    stub.backend.getDraft.mockImplementation(() => Promise.resolve({ ...DRAFT, corrected: FIX, text: "My own edit." }));
+    stub.emit({ state: "listening" });
+    await settle();
+    expect(area().value).toBe("My own edit.");
+    expect(stub.backend.editDraft).toHaveBeenLastCalledWith("My own edit.");
+    expect(notes()).toContain(`Heard: ${DRAFT.original}`);
+    expect(notes().some((line) => line.startsWith("Your fix:"))).toBe(false);
   });
 
   it("keeps an edit without recognizing, copying or sending anything, and can reset it", async () => {

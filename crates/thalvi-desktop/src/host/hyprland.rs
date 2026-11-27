@@ -1,5 +1,6 @@
 //! Hyprland host: hyprctl, wtype and wl-copy.
 
+mod field;
 mod hold_binds;
 
 use std::fmt;
@@ -15,6 +16,7 @@ use super::{
     PasteText, Shortcut, WebUrl, WindowApp,
 };
 use crate::hold::{HoldChange, KeyBind, KeyName};
+use crate::learn::{FieldLimit, FieldProbe};
 use hold_binds::{Events, Installed};
 
 /// The window as Hyprland identifies it; the pid tells a reused address from the original window.
@@ -391,6 +393,19 @@ impl<R: CommandRunner> Host for Hyprland<R> {
 
     fn is_terminal(&self, target: &Window) -> bool {
         is_terminal(target)
+    }
+
+    fn watch_field(&self, target: &Window) -> Result<Box<dyn FieldProbe>, FieldLimit> {
+        Ok(field::probe(target, |window| {
+            Hyprland::system()
+                .active()
+                .is_ok_and(|active| active == *window)
+        }))
+    }
+
+    fn learn_fields(&self, on: bool) -> Result<(), FieldLimit> {
+        field::listen(on);
+        Ok(())
     }
 
     fn writing_target(&self, target: &Window) -> Result<WindowApp, AppMatchLimit> {

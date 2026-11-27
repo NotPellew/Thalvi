@@ -10,6 +10,7 @@ use crate::capture::CaptureRoute;
 use crate::config::DesktopConfig;
 use crate::engine::{CaptureOutcome, EngineState};
 use crate::host::{Delivered, Host, HostError, PasteText, WindowApp};
+use crate::learn::{FieldLimit, FieldProbe};
 use crate::metrics::{Event, Recorder};
 use crate::report::{UserError, causes};
 use crate::tasks::{self, Task};
@@ -57,7 +58,6 @@ impl UserError for TerminalLines {
 }
 
 /// What delivering a capture came to.
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finished {
     /// The text reached its destination; otherwise it is kept on the clipboard when possible.
     pub delivered: bool,
@@ -75,6 +75,10 @@ pub struct Finished {
     /// chose a task; `None` for other routes and when no task could be chosen. Never the
     /// window bound at wake.
     pub task_target: Option<String>,
+    /// The probe armed before a pasted capture, or why none could be armed. Only on the paste
+    /// route with learning on and a paste that reached a window. Resolving it belongs to the
+    /// watch, never to delivery.
+    pub field: Option<Result<Box<dyn FieldProbe>, FieldLimit>>,
 }
 
 impl Finished {
@@ -87,6 +91,7 @@ impl Finished {
             headline: "Delivered".to_owned(),
             causes: Vec::new(),
             task_target: None,
+            field: None,
         }
     }
 
@@ -99,6 +104,7 @@ impl Finished {
             headline,
             causes: Vec::new(),
             task_target: None,
+            field: None,
         }
     }
 }
@@ -173,10 +179,24 @@ where
             CaptureOutcome::Accepted(request) => Some(match request.route {
                 // The engine writes a Write request out and hands on a Paste; one that arrives
                 // unwritten is pasted as recognized, never invented.
-                CaptureRoute::Paste | CaptureRoute::Write => {
-                    self.paste_in(recorder, bound, &request.text, false).await
+                CaptureRoute::Paste => {
+                    self.paste_in(
+                        recorder,
+                        bound,
+                        &request.text,
+                        false,
+                        config.stt.learn_from_corrections(),
+                    )
+                    .await
                 }
-                CaptureRoute::Submit => self.paste_in(recorder, bound, &request.text, true).await,
+                CaptureRoute::Write => {
+                    self.paste_in(recorder, bound, &request.text, false, false)
+                        .await
+                }
+                CaptureRoute::Submit => {
+                    self.paste_in(recorder, bound, &request.text, true, false)
+                        .await
+                }
                 CaptureRoute::Task => self.run_task(recorder, config, &request.text).await,
             }),
         }
@@ -188,6 +208,7 @@ where
         bound: &Bound<H::Target>,
         text: &str,
         enter: bool,
+        learn: bool,
     ) -> Finished {
         if text.is_empty() && !enter {
             return Finished::kept(
@@ -195,12 +216,16 @@ where
                 "Nothing to paste".to_owned(),
             );
         }
+        let mut armed = None;
         let result = match (&bound.0, PasteText::new(text)) {
             (Ok(target), Ok(pasted)) => {
                 if !enter && pasted.as_str().contains('\n') && self.host.is_terminal(target) {
                     return self.keep(recorder, text, &TerminalLines).await;
                 }
                 let target = target.clone();
+                if learn {
+                    armed = Some(self.host.watch_field(&target));
+                }
                 self.call(recorder, "deliver", move |host| {
                     host.deliver(&target, &pasted, enter)
                 })
@@ -218,8 +243,14 @@ where
                     (Delivered::OnClipboard, true) => "Copied — press Ctrl+V then Enter",
                     (Delivered::OnClipboard, false) => "Copied — press Ctrl+V to paste",
                 };
+                let field = match (armed, delivered) {
+                    (Some(Err(limit)), _) => Some(Err(limit)),
+                    (Some(Ok(probe)), Delivered::InWindow) => Some(Ok(probe)),
+                    _ => None,
+                };
                 Finished {
                     text_delivery: Some(delivered),
+                    field,
                     ..Finished::delivered(notice.to_owned())
                 }
             }
@@ -341,14 +372,35 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::fakes::{FakeHost, FakeWindow};
+    use super::fakes::{FakeFieldSource, FakeHost, FakeProbe, FakeWindow};
     use super::*;
     use crate::audio::AudioError;
     use crate::capture::CaptureRequest;
     use crate::engine::CaptureError;
+    use crate::learn::{Field, FieldEnd, FieldProbe, watch as learn_watch};
     use crate::metrics::RecordKinds;
     use crate::recognizer::{ConnectFailure, Detail, RecognizerError, SpeechSource};
+    use std::sync::{Mutex, mpsc};
     use std::time::Duration;
+
+    /// A probe whose field resolution waits for the test to release it.
+    struct BlockingProbe {
+        entered: mpsc::Sender<()>,
+        release: Arc<Mutex<mpsc::Receiver<()>>>,
+        source: FakeFieldSource,
+    }
+
+    impl FieldProbe for BlockingProbe {
+        fn field(self: Box<Self>, _pasted: &str) -> Result<Box<dyn Field>, FieldLimit> {
+            let _ = self.entered.send(());
+            let _ = self
+                .release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv();
+            Ok(self.source.field())
+        }
+    }
 
     const CONFIG: &str = r#"{
         "apps": {"editor": {"classes": ["Code"]}},
@@ -506,6 +558,145 @@ mod tests {
 
     fn calls(calls: &[&str]) -> Vec<String> {
         calls.iter().map(|call| (*call).to_owned()).collect()
+    }
+
+    #[tokio::test]
+    async fn only_a_paste_with_learning_on_arms_and_resolves_a_field_probe() {
+        let source = FakeFieldSource::default();
+        source.text("before cyber x2 after");
+        let cases = [
+            (
+                "paste with the switch on",
+                accepted(CaptureRoute::Paste, "cyber x2"),
+                FakeHost::default().watching(FakeProbe::new(source.clone())),
+                r#"{"stt":{"learn_from_corrections":true}}"#,
+                true,
+            ),
+            (
+                "paste with the switch off",
+                accepted(CaptureRoute::Paste, "cyber x2"),
+                FakeHost::default().watching(FakeProbe::new(source.clone())),
+                "{}",
+                false,
+            ),
+            (
+                "submit",
+                accepted(CaptureRoute::Submit, "cyber x2"),
+                FakeHost::default().watching(FakeProbe::new(source.clone())),
+                r#"{"stt":{"learn_from_corrections":true}}"#,
+                false,
+            ),
+            (
+                "a terminal hold-back",
+                accepted(CaptureRoute::Paste, "line\nbreak"),
+                FakeHost::default()
+                    .terminal()
+                    .watching(FakeProbe::new(source.clone())),
+                r#"{"stt":{"learn_from_corrections":true}}"#,
+                false,
+            ),
+        ];
+        for (label, outcome, host, json, watches) in cases {
+            let delivery = Delivery::new(host.clone());
+            let config = DesktopConfig::from_json_str(json).unwrap();
+            let bound = delivery.bind(&Recorder::disabled()).await;
+            let finished = delivery
+                .finish(&outcome, &bound, &config, &Recorder::disabled())
+                .await
+                .expect("an accepted capture is settled");
+            assert_eq!(
+                host.calls().contains(&"watch_field".to_owned()),
+                watches,
+                "{label}"
+            );
+            assert_eq!(finished.field.is_some(), watches, "{label}");
+        }
+
+        let limit = FakeHost::default().watching(FakeProbe::unavailable(
+            crate::learn::FieldLimit::NoAccessibility,
+        ));
+        let delivery = Delivery::new(limit.clone());
+        let config =
+            DesktopConfig::from_json_str(r#"{"stt":{"learn_from_corrections":true}}"#).unwrap();
+        let bound = delivery.bind(&Recorder::disabled()).await;
+        let finished = delivery
+            .finish(
+                &accepted(CaptureRoute::Paste, "cyber x2"),
+                &bound,
+                &config,
+                &Recorder::disabled(),
+            )
+            .await
+            .expect("an accepted capture is settled");
+        assert!(
+            matches!(
+                finished.field,
+                Some(Err(crate::learn::FieldLimit::NoAccessibility))
+            ),
+            "the reason reaches the runner"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocking_probe_never_holds_back_delivery_and_the_watch_resumes_after_it() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let source = FakeFieldSource::default();
+        source.text("before cyber x2 after");
+        source.text("before Cybrex2 after");
+        source.end(FieldEnd::FocusLeft);
+        let host = FakeHost::default().watching_boxed(Box::new(BlockingProbe {
+            entered: entered_tx,
+            release: Arc::new(Mutex::new(release_rx)),
+            source,
+        }));
+        let delivery = Delivery::new(host);
+        let config =
+            DesktopConfig::from_json_str(r#"{"stt":{"learn_from_corrections":true}}"#).unwrap();
+        let bound = delivery.bind(&Recorder::disabled()).await;
+        let finished = tokio::time::timeout(
+            Duration::from_secs(2),
+            delivery.finish(
+                &accepted(CaptureRoute::Paste, "cyber x2"),
+                &bound,
+                &config,
+                &Recorder::disabled(),
+            ),
+        )
+        .await
+        .expect("delivery did not wait for the field")
+        .expect("an accepted capture is settled");
+        assert!(finished.delivered, "the paste was admitted");
+        let Some(Ok(probe)) = finished.field else {
+            panic!("a probe was handed on");
+        };
+        assert!(
+            entered_rx.try_recv().is_err(),
+            "the paste path did not resolve the probe"
+        );
+        let task = tokio::spawn(async move {
+            let field = tokio::task::spawn_blocking(move || probe.field("cyber x2"))
+                .await
+                .expect("the probe task");
+            let (_enabled, enabled_rx) = tokio::sync::watch::channel(true);
+            let (_cancel, cancel_rx) = tokio::sync::oneshot::channel();
+            learn_watch(
+                field,
+                "cyber x2",
+                &[],
+                enabled_rx,
+                cancel_rx,
+                &Recorder::disabled().metrics(),
+            )
+            .await
+        });
+        let entered = tokio::task::spawn_blocking(move || entered_rx.recv())
+            .await
+            .expect("the entry task");
+        assert!(entered.is_ok(), "the watch resolved the probe");
+        release_tx.send(()).expect("the watch is still waiting");
+        let learned = task.await.expect("the watch task");
+        assert_eq!(learned.corrected.as_deref(), Some("Cybrex2"));
     }
 
     #[tokio::test]

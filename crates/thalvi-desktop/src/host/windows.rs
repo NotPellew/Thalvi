@@ -14,6 +14,7 @@ use super::{
     PasteText, RequestServer, StatusAnnouncer, WebUrl, WindowApp,
 };
 use crate::hold::{HoldChange, KeyBind, KeyName};
+use crate::learn::{FieldLimit, FieldProbe};
 pub use overlay::{OverlayPlan, OverlaySurface, OverlayWaker};
 pub use win32::Real;
 
@@ -279,6 +280,18 @@ impl<A: Win32> Host for Windows<A> {
 
     fn is_terminal(&self, target: &Target) -> bool {
         target.terminal
+    }
+
+    fn watch_field(&self, _target: &Target) -> Result<Box<dyn FieldProbe>, FieldLimit> {
+        Err(FieldLimit::Desktop(
+            "Learning from corrections isn't available on this desktop yet.",
+        ))
+    }
+
+    fn learn_fields(&self, _on: bool) -> Result<(), FieldLimit> {
+        Err(FieldLimit::Desktop(
+            "Learning from corrections isn't available on this desktop yet.",
+        ))
     }
 
     fn capture_target(&self) -> Result<Target, HostError> {

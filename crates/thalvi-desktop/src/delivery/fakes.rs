@@ -3,9 +3,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use std::collections::VecDeque;
 
 use crate::host::{App, AppMatchLimit, Delivered, Host, HostError, PasteText, WebUrl, WindowApp};
+use crate::learn::{Field, FieldEnd, FieldLimit, FieldProbe};
 
 /// The window the fake host binds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,18 +20,110 @@ impl fmt::Display for FakeWindow {
     }
 }
 
+type FakeReads = VecDeque<Result<String, FieldEnd>>;
+
+/// The reads a fake field will give, shared with the test that drives them.
+#[derive(Clone, Default)]
+pub struct FakeFieldSource(Arc<Mutex<(FakeReads, usize)>>);
+
+impl FakeFieldSource {
+    /// Queues one read of `text`.
+    pub fn text(&self, text: impl Into<String>) {
+        self.0
+            .lock()
+            .expect("the fake field's lock")
+            .0
+            .push_back(Ok(text.into()));
+    }
+
+    /// Queues one read that ends the field visit.
+    pub fn end(&self, end: FieldEnd) {
+        self.0
+            .lock()
+            .expect("the fake field's lock")
+            .0
+            .push_back(Err(end));
+    }
+
+    /// A field that reads this source.
+    pub fn field(&self) -> Box<dyn Field> {
+        Box::new(FakeField {
+            source: self.clone(),
+        })
+    }
+}
+
+struct FakeField {
+    source: FakeFieldSource,
+}
+
+impl Field for FakeField {
+    fn text(&mut self) -> Result<String, FieldEnd> {
+        let mut source = self.source.0.lock().expect("the fake field's lock");
+        source.1 += 1;
+        source.0.pop_front().unwrap_or_else(|| Ok(String::new()))
+    }
+}
+
+/// Resolves into the field a test set up, or into a reason it cannot be watched.
+#[derive(Clone)]
+pub struct FakeProbe {
+    source: FakeFieldSource,
+    limit: Option<FieldLimit>,
+}
+
+impl FakeProbe {
+    /// A probe whose field reads `source`.
+    #[must_use]
+    pub fn new(source: FakeFieldSource) -> Self {
+        Self {
+            source,
+            limit: None,
+        }
+    }
+
+    /// Why this probe cannot watch a field.
+    #[must_use]
+    pub fn limit(&self) -> Option<FieldLimit> {
+        self.limit.clone()
+    }
+
+    /// A probe that cannot watch a field.
+    #[must_use]
+    pub fn unavailable(limit: FieldLimit) -> Self {
+        Self {
+            source: FakeFieldSource::default(),
+            limit: Some(limit),
+        }
+    }
+}
+
+impl FieldProbe for FakeProbe {
+    fn field(self: Box<Self>, _pasted: &str) -> Result<Box<dyn Field>, FieldLimit> {
+        match self.limit {
+            Some(limit) => Err(limit),
+            None => Ok(Box::new(FakeField {
+                source: self.source,
+            })),
+        }
+    }
+}
+
+#[derive(Clone)]
 enum Behavior {
     Fail(HostError),
     Panic,
 }
 
 /// Succeeds at everything unless told otherwise.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FakeHost {
-    calls: Mutex<Vec<String>>,
+    calls: Arc<Mutex<Vec<String>>>,
     behavior: BTreeMap<&'static str, Behavior>,
     clipboard_only: bool,
     terminal: bool,
+    probe: Arc<Mutex<Option<FakeProbe>>>,
+    boxed_probe: Arc<Mutex<Option<Box<dyn FieldProbe>>>>,
 }
 
 impl FakeHost {
@@ -49,6 +144,20 @@ impl FakeHost {
     #[must_use]
     pub fn terminal(mut self) -> Self {
         self.terminal = true;
+        self
+    }
+
+    /// Arms `probe` for the next paste.
+    #[must_use]
+    pub fn watching(self, probe: FakeProbe) -> Self {
+        *self.probe.lock().expect("the fake host's lock") = Some(probe);
+        self
+    }
+
+    /// Arms a custom probe for the next paste.
+    #[must_use]
+    pub fn watching_boxed(self, probe: Box<dyn FieldProbe>) -> Self {
+        *self.boxed_probe.lock().expect("the fake host's lock") = Some(probe);
         self
     }
 
@@ -92,6 +201,34 @@ impl Host for FakeHost {
 
     fn is_terminal(&self, _target: &FakeWindow) -> bool {
         self.terminal
+    }
+
+    fn learn_fields(&self, on: bool) -> Result<(), FieldLimit> {
+        self.record("learn_fields", format!("learn_fields:{on}"))
+            .map_err(|_| FieldLimit::Desktop("The fake host refused the field listener."))
+    }
+
+    fn watch_field(&self, _target: &FakeWindow) -> Result<Box<dyn FieldProbe>, FieldLimit> {
+        self.record("watch_field", "watch_field".to_owned())
+            .map_err(|_| FieldLimit::Desktop("The fake host refused the field probe."))?;
+        if let Some(probe) = self
+            .boxed_probe
+            .lock()
+            .expect("the fake host's lock")
+            .take()
+        {
+            return Ok(probe);
+        }
+        let probe = self
+            .probe
+            .lock()
+            .expect("the fake host's lock")
+            .clone()
+            .unwrap_or_else(|| FakeProbe::new(FakeFieldSource::default()));
+        match probe.limit() {
+            Some(limit) => Err(limit),
+            None => Ok(Box::new(probe)),
+        }
     }
 
     fn writing_target(&self, target: &FakeWindow) -> Result<WindowApp, AppMatchLimit> {

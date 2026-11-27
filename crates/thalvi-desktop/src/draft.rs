@@ -43,6 +43,8 @@ pub struct DraftView {
     pub newer_waiting: bool,
     /// The words as recognized, when a cleanup pasted something else; absent when they are `original`.
     pub raw: Option<String>,
+    /// The user's cleanup of the pasted span; Copy uses it when there are no edits of their own.
+    pub corrected: Option<String>,
 }
 
 /// One dictation: what was heard, the user's edits and where it was meant to go.
@@ -55,6 +57,9 @@ pub struct Draft {
     outcome: DraftOutcome,
     /// The words as recognized, when they differ from what was pasted.
     raw: Option<String>,
+    corrected: Option<String>,
+    /// Whether the user edited this draft; a reverted edit frees it for a newer dictation.
+    edited: bool,
 }
 
 impl Draft {
@@ -100,6 +105,8 @@ impl Draft {
             target: capture.target,
             outcome,
             raw,
+            corrected: None,
+            edited: false,
         })
     }
 }
@@ -126,19 +133,26 @@ impl Drafts {
 
     /// Makes `draft` the last dictation, unless the current one was edited: then it waits until
     /// the user discards the current one.
-    pub fn offer(&self, mut draft: Draft) {
+    pub fn offer(&self, mut draft: Draft) -> u64 {
         let mut slot = self.slot();
         slot.last_id += 1;
         draft.id = slot.last_id;
-        if slot
-            .current
-            .as_ref()
-            .is_some_and(|current| current.text != current.original)
-        {
+        if slot.current.as_ref().is_some_and(|current| current.edited) {
             slot.newer = Some(draft);
         } else {
             slot.current = Some(draft);
             slot.newer = None;
+        }
+        slot.last_id
+    }
+
+    /// Sets the user's cleanup on the draft a watch was started for.
+    pub fn set_corrected(&self, id: u64, corrected: String) {
+        let mut slot = self.slot();
+        if let Some(draft) = slot.current.as_mut().filter(|draft| draft.id == id) {
+            draft.corrected = Some(corrected);
+        } else if let Some(draft) = slot.newer.as_mut().filter(|draft| draft.id == id) {
+            draft.corrected = Some(corrected);
         }
     }
 
@@ -148,11 +162,19 @@ impl Drafts {
         slot.current.as_ref().map(|draft| DraftView {
             id: draft.id,
             original: draft.original.clone(),
-            text: draft.text.clone(),
+            text: if draft.edited {
+                draft.text.clone()
+            } else {
+                draft
+                    .corrected
+                    .clone()
+                    .unwrap_or_else(|| draft.text.clone())
+            },
             target: draft.target.clone(),
             outcome: draft.outcome,
             newer_waiting: slot.newer.is_some(),
             raw: draft.raw.clone(),
+            corrected: draft.corrected.clone(),
         })
     }
 
@@ -164,7 +186,10 @@ impl Drafts {
         self.slot()
             .current
             .as_mut()
-            .map(|draft| draft.text = text)
+            .map(|draft| {
+                draft.edited = text != draft.original;
+                draft.text = text;
+            })
             .ok_or(NoDraft)
     }
 
@@ -329,6 +354,32 @@ mod tests {
                 assert_eq!(view.raw.as_deref(), raw, "{label}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_late_watch_sets_the_fix_the_draft_copies_unless_the_user_edited_it() {
+        let drafts = Drafts::default();
+        let draft = left_by(FakeHost::default(), &paste_outcome("cyber x2"))
+            .await
+            .0
+            .expect("the pasted dictation has a draft");
+        let id = drafts.offer(draft);
+        let unfixed = serde_json::to_value(drafts.view().expect("the draft is shown")).unwrap();
+        assert_eq!(unfixed.get("corrected"), Some(&serde_json::Value::Null));
+        drafts.set_corrected(id, "Cybrex2".to_owned());
+        let view = drafts.view().expect("the draft is still shown");
+        assert_eq!(
+            (
+                view.original.as_str(),
+                view.text.as_str(),
+                view.corrected.as_deref()
+            ),
+            ("cyber x2", "Cybrex2", Some("Cybrex2"))
+        );
+        drafts.edit("my own fix".to_owned()).unwrap();
+        assert_eq!(drafts.view().unwrap().text, "my own fix");
+        drafts.edit("cyber x2".to_owned()).unwrap();
+        assert_eq!(drafts.view().unwrap().text, "Cybrex2", "a reverted edit");
     }
 
     #[tokio::test]

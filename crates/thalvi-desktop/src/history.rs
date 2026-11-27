@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 use crate::capture::CaptureRoute;
 use crate::delivery::Finished;
@@ -105,6 +106,9 @@ pub struct Entry {
     /// How a dictation cleanup ended, `cleaned` or `raw: <reason>`; absent when none ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<String>,
+    /// The user's cleanup of the pasted span, kept beside what was heard; absent when none arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrected: Option<String>,
 }
 
 /// A finished capture to record; the store adds the id and the time.
@@ -215,11 +219,17 @@ impl Store {
     /// Adds `capture` and drops the oldest entries past the limit; does nothing when history is
     /// off or the capture has no text.
     ///
+    /// The id of the entry written, so a watch that ends later can set its corrected span.
+    ///
     /// # Errors
     /// Fails when the file cannot be written or is damaged; the file is left as it was.
-    pub fn record(&self, config: HistoryConfig, capture: Capture) -> Result<(), HistoryError> {
+    pub fn record(
+        &self,
+        config: HistoryConfig,
+        capture: Capture,
+    ) -> Result<Option<u64>, HistoryError> {
         if !config.enabled() {
-            return Ok(());
+            return Ok(None);
         }
         let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let mut entries = self.read()?;
@@ -236,8 +246,33 @@ impl Store {
             target: capture.target,
             outcome: capture.outcome,
             cleanup: capture.cleanup,
+            corrected: None,
         });
         drop_oldest(&mut entries, config.limit());
+        self.write(&entries)?;
+        Ok(Some(id))
+    }
+
+    /// Sets the user's cleanup on the entry a watch was started for; `None` when history is off or
+    /// that entry is already gone.
+    ///
+    /// # Errors
+    /// Fails when the file cannot be read or written.
+    pub fn set_corrected(
+        &self,
+        config: HistoryConfig,
+        id: u64,
+        corrected: String,
+    ) -> Result<(), HistoryError> {
+        if !config.enabled() {
+            return Ok(());
+        }
+        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut entries = self.read()?;
+        let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
+            return Ok(());
+        };
+        entry.corrected = Some(corrected);
         self.write(&entries)
     }
 
@@ -261,8 +296,36 @@ impl Store {
 
     /// Like [`record`](Self::record) on a blocking thread, so the caller does not wait for the
     /// disk. A failure is logged; the capture and its delivery are never affected.
-    pub fn record_in_background(self: &Arc<Self>, config: HistoryConfig, capture: Capture) {
-        self.in_background(move |store| store.record(config, capture));
+    pub fn record_in_background(
+        self: &Arc<Self>,
+        config: HistoryConfig,
+        capture: Capture,
+    ) -> oneshot::Receiver<Option<u64>> {
+        let (send, receive) = oneshot::channel();
+        self.in_background(move |store| {
+            let recorded = store.record(config, capture);
+            let id = recorded.as_ref().ok().copied().flatten();
+            let _ = send.send(id);
+            recorded.map(drop)
+        });
+        receive
+    }
+
+    /// Like [`set_corrected`](Self::set_corrected) on a blocking thread; the receiver resolves
+    /// once the write has finished or failed, and a failure is logged.
+    pub fn set_corrected_in_background(
+        self: &Arc<Self>,
+        config: HistoryConfig,
+        id: u64,
+        corrected: String,
+    ) -> oneshot::Receiver<()> {
+        let (send, receive) = oneshot::channel();
+        self.in_background(move |store| {
+            let written = store.set_corrected(config, id, corrected);
+            let _ = send.send(());
+            written
+        });
+        receive
     }
 
     /// Like [`trim`](Self::trim) on a blocking thread, with failures logged.
@@ -421,6 +484,7 @@ mod tests {
             headline: String::new(),
             causes: Vec::new(),
             task_target: None,
+            field: None,
         }
     }
 
@@ -603,6 +667,34 @@ mod tests {
         assert_eq!(again[0].cleanup.as_deref(), Some("cleaned"));
         let raw = serde_json::to_value(&again[0]).unwrap();
         assert_eq!(raw["cleanup"], "cleaned");
+    }
+
+    #[test]
+    fn a_late_watch_sets_the_users_fix_on_the_entry_recorded_for_that_capture() {
+        let dir = TempDir::new("corrected");
+        let store = Store::at(dir.file());
+        let on = HistoryConfig::default();
+        let id = store
+            .record(on, capture("cyber x2"))
+            .unwrap()
+            .expect("the entry was recorded");
+        store.set_corrected(on, id, "Cybrex2".to_owned()).unwrap();
+        let entries = store.list().unwrap();
+        assert_eq!(entries[0].text, "cyber x2");
+        assert_eq!(entries[0].corrected.as_deref(), Some("Cybrex2"));
+        let file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.file()).unwrap()).unwrap();
+        assert_eq!(file[0]["corrected"], "Cybrex2");
+
+        let off = config(r#"{"enabled": false}"#);
+        store
+            .set_corrected(off, id, "Something else".to_owned())
+            .unwrap();
+        assert_eq!(
+            store.list().unwrap()[0].corrected.as_deref(),
+            Some("Cybrex2"),
+            "history that is off is left alone"
+        );
     }
 
     #[test]

@@ -57,6 +57,7 @@ cosmic-text = "0.19"
 smithay-client-toolkit = { version = "0.21", default-features = false }
 wayland-client = "0.31"
 x11rb = { version = "0.14", features = ["randr", "shape"] }
+zbus = "5.19"
 tokio = { version = "1", features = ["full"] }
 gtk = "0.18.2"
 tauri = { version = "2.12", features = ["tray-icon"] }
