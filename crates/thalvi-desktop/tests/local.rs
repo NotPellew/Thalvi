@@ -156,6 +156,10 @@ impl SpeechModel for Fake {
         self.release_limit
     }
 
+    fn holds_text_for_end(&self) -> bool {
+        self.held_back.is_some()
+    }
+
     fn stream(&self) -> FakeStream {
         FakeStream {
             script: self.script,
@@ -213,10 +217,6 @@ impl SpeechStream for FakeStream {
         Ok(self.held_back.take().map_or_else(Vec::new, |text| {
             vec![RecognizerEvent::Final(text.to_owned())]
         }))
-    }
-
-    fn holds_text_for_end(&self) -> bool {
-        self.held_back.is_some()
     }
 }
 
