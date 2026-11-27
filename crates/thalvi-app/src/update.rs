@@ -17,10 +17,17 @@ use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::settings::write_atomically;
 
+#[cfg(not(feature = "update-fixture"))]
 const STABLE_FEED: &str =
     "https://github.com/NotPellew/Thalvi/releases/latest/download/latest.json";
+#[cfg(not(feature = "update-fixture"))]
 const DEVELOPMENT_FEED: &str =
     "https://github.com/NotPellew/Thalvi/releases/download/desktop-dev/latest.json";
+
+#[cfg(feature = "update-fixture")]
+const STABLE_FEED: &str = env!("THALVI_UPDATE_FIXTURE_FEED");
+#[cfg(feature = "update-fixture")]
+const DEVELOPMENT_FEED: &str = STABLE_FEED;
 
 /// Where to install Thalvi by hand when an update cannot be applied.
 pub const RELEASES_PAGE: &str = "https://github.com/NotPellew/Thalvi/releases";

@@ -85,6 +85,8 @@ jobs:
     needs: gate
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      THALVI_RELEASE_BUILD: "1"
     strategy:
       fail-fast: true
       matrix:

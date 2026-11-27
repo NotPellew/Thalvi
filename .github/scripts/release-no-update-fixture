@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Reject an explicit fixture feature and require the build-time guard in the release package job.
+set -euo pipefail
+workflow=$1
+if grep -q 'update-fixture' "$workflow"; then
+  echo 'Release packages must not enable update-fixture.' >&2
+  exit 1
+fi
+if ! sed -n '/^  package:/,/^  publish:/p' "$workflow" | grep -x '      THALVI_RELEASE_BUILD: "1"' >/dev/null; then
+  echo 'The release package job must set THALVI_RELEASE_BUILD.' >&2
+  exit 1
+fi

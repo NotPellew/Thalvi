@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Build and exercise the Linux A/B AppImages in a private GNOME session.
+set -euo pipefail
+[[ $# -eq 1 ]] || { echo 'usage: update-ab OUT_DIR' >&2; exit 2; }
+exec /usr/bin/python3 "$(dirname "$0")/e2e/update-fixture.py" suite "$1"
