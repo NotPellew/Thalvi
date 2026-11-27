@@ -1,7 +1,7 @@
 // The Customize section: controls generated from the look descriptors, and a live preview.
 
 import { errorText, OVERLAY_PREVIEW_STATES } from "./contract.ts";
-import type { Backend, JsonObject, Look, LookProperty, LookStyles, LookValue, Settings } from "./contract.ts";
+import type { Backend, JsonObject, Look, LookProperty, LookScheme, LookStyles, LookValue, Settings } from "./contract.ts";
 import type { Field } from "./controls.ts";
 import { el } from "./dom.ts";
 import { LOOKS } from "./look.ts";
@@ -21,12 +21,9 @@ function isJsonObject(value: ReadonlyJson | undefined): value is ReadonlyJsonObj
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function filePath(id: string): string[] {
+function filePath(id: string, scheme: LookScheme): string[] {
   const parts = id.split(".");
-  if (parts[0] === "colors") {
-    return parts[1] === "state" ? ["colors", "dark", "state", ...parts.slice(2)] : ["colors", "dark", ...parts.slice(1)];
-  }
-  return parts;
+  return parts[0] === "colors" ? ["colors", scheme, ...parts.slice(1)] : parts;
 }
 
 function objectAt(root: JsonObject | undefined, path: readonly string[]): JsonObject | undefined;
@@ -212,12 +209,12 @@ export function customize(context: PageContext): HTMLElement[] {
     if (seen) void preview.draw();
   }
 
-  function set(id: string, value: LookValue): Promise<void> {
-    const path = filePath(id);
+  function set(path: string[], value: LookValue): Promise<void> {
+    const target = look;
     return apply((draft) => {
       draft.themes ??= { version: 1 };
-      const entry = draft.themes[look] ?? {};
-      draft.themes[look] = entry;
+      const entry = draft.themes[target] ?? {};
+      draft.themes[target] = entry;
       if (value === "") deleteLeaf(entry, path);
       else setLeaf(entry, path, value);
     }).then(afterChange);
@@ -225,18 +222,20 @@ export function customize(context: PageContext): HTMLElement[] {
 
   function reset(entry: FieldRow): void {
     say(entry.problem, "");
+    const target = look;
     void apply((draft) => {
-      deleteLeaf(draft.themes?.[look], entry.path);
+      deleteLeaf(draft.themes?.[target], entry.path);
     }).then(afterChange, (error: unknown) => { say(entry.problem, errorText(error)); });
   }
 
   function control(property: LookProperty): HTMLElement | null {
-    const value = styles?.values[look][property.id];
+    if (styles === null) return null;
+    const value = styles.values[look][property.id];
     if (value === undefined) return null;
-    const path = filePath(property.id);
+    const path = filePath(property.id, styles.schemes[look]);
     let field: Field;
     const commit = (wanted: LookValue): Promise<void> =>
-      set(property.id, wanted).then(
+      set(path, wanted).then(
         () => {
           entry.last = wanted;
           entry.shown = wanted;
@@ -359,6 +358,7 @@ export function customize(context: PageContext): HTMLElement[] {
     render();
   };
   live.lookStyles = (next: LookStyles) => {
+    if (styles?.schemes[look] !== next.schemes[look]) builtLook = null;
     styles = next;
     render();
   };

@@ -26,10 +26,10 @@ pub const OVERLAY_TITLE: &str = "Thalvi overlay";
 
 /// The host for the desktop Thalvi runs on, and its status overlay's own surface and waker.
 #[cfg(target_os = "linux")]
-pub use linux::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker, Session};
+pub use linux::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker, Session, status_announcer};
 /// The host for the desktop Thalvi runs on, and its status overlay's own surface and waker.
 #[cfg(target_os = "windows")]
-pub use windows::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker};
+pub use windows::{Desktop, OverlayPlan, OverlaySurface, OverlayWaker, status_announcer};
 
 /// One overlay frame: `width` × `height` pixels of premultiplied BGRA, row by row.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -173,6 +173,12 @@ impl RequestServer {
 /// key go if it was held.
 pub struct HoldWatch {
     _stop_on_drop: Box<dyn Send>,
+}
+
+/// Where Thalvi's status goes for the desktop's screen reader.
+pub trait StatusAnnouncer: Send + Sync {
+    /// Says `announcement` once, without taking focus from the window the user is in.
+    fn announce(&self, announcement: &str);
 }
 
 impl HoldWatch {

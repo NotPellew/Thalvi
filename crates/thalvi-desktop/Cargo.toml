@@ -33,6 +33,8 @@ tracing.workspace = true
 webrtc-vad.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+accesskit.workspace = true
+accesskit_unix.workspace = true
 gtk.workspace = true
 nix.workspace = true
 rustix.workspace = true

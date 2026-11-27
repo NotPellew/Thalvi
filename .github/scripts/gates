@@ -92,6 +92,7 @@ gate_server() {
   step python3 .github/scripts/lint-exceptions.test.py
   step python3 .github/scripts/test-hygiene
   step python3 .github/scripts/test-hygiene.test.py
+  step bash .agents/skills/verify-thalvi/scripts/thalvi-desktop-rig.test.sh
   step cargo lint
   tests --workspace
   RUSTDOCFLAGS="-D warnings" step cargo docs

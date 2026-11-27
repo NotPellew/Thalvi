@@ -68,6 +68,8 @@ async fn writing_uses_the_owned_runtime_and_a_second_crash_stays_failed() {
     let (wake, _) = FakeWake::new();
     let (cues, _) = FakeCuePlayer::new();
     let (_key, hold) = watch::channel(crate::hold::KeyState::default());
+    let states = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorded = std::rc::Rc::clone(&states);
     let (mut engine, _) = Engine::new(
         Parts {
             recognizer,
@@ -78,6 +80,11 @@ async fn writing_uses_the_owned_runtime_and_a_second_crash_stays_failed() {
             chat: Some(chat),
             hold,
             notice: Box::new(|_| {}),
+            status: Box::new(move |event| {
+                if let Feedback::State(state) = event {
+                    recorded.borrow_mut().push(state.clone());
+                }
+            }),
             spotter: None,
             spotter_off: None,
         },
@@ -108,6 +115,10 @@ async fn writing_uses_the_owned_runtime_and_a_second_crash_stays_failed() {
         );
     }
     assert_eq!(child.spawns(), 1);
+    assert!(matches!(
+        states.borrow().first(),
+        Some(EngineState::StartingChat { again: false })
+    ));
     child.exit(0);
     assert!(matches!(
         engine.write("hello".to_owned()).await,
