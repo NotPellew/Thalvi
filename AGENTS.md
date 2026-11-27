@@ -152,6 +152,9 @@ Locally, run checks in three stages; none replaces a required CI result.
 
 Fuzz targets live in `fuzz/fuzz_targets/`, a nightly-only workspace of its own; run one with
 `cargo fuzz run <target> -- -max_total_time=300` from `fuzz/`, under `dev-job`.
+Before a release, `.github/scripts/break-it` runs long property tests, every fuzz target and
+optionally mutants for hours (`--help`). Only a person, or an agent explicitly asked to, starts
+`break-it cloud`: it rents a paid Docker cloud sandbox.
 
 Run mutation testing locally only when an issue explicitly asks for it, and
 only `--in-diff` against the base with no desktop session and a throwaway
