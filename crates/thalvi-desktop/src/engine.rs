@@ -667,8 +667,6 @@ struct Live<S> {
     notice: Option<String>,
     /// For a live Submit, the overlay's confirmation that the full review text is visible.
     submit_preview: Option<LivePreview>,
-    /// A submit whose cleanup runs before its confirmation.
-    prepare: Option<CaptureRequest>,
 }
 
 /// What a live Submit waits for from the overlay before the quiet pause can commit.
@@ -821,6 +819,8 @@ enum Done {
     /// The user said "never mind".
     NeverMind(Option<String>),
     Accepted(CaptureRequest),
+    /// A submit must be cleaned before its confirmation is shown.
+    Prepare(CaptureRequest),
     Failed(CaptureError),
 }
 
@@ -1758,7 +1758,6 @@ where
             hold_route: held.map(Started::route),
             notice: None,
             submit_preview: None,
-            prepare: None,
         };
         self.publish(&live);
         Ok((live, backlog, released))
@@ -1906,14 +1905,15 @@ where
                     self.on_key(live, held, frames).await
                 }
             };
-            if let Some(request) = live.prepare.take() {
+            if let Some(done) = done {
+                let Done::Prepare(request) = done else {
+                    return (done, Instant::now());
+                };
                 // `decided` is the dictation final. The confirmation shows whatever this returns.
                 let decided = Instant::now();
                 if let Some(done) = self.prepare_submit(live, request, decided).await {
                     return (done, decided);
                 }
-            } else if let Some(done) = done {
-                return (done, Instant::now());
             }
         }
     }
@@ -1934,7 +1934,7 @@ where
                 ),
             ))),
             release => {
-                let done = self.finish_hold(live, held)?;
+                let done = self.finish_hold(live, held);
                 if let Release::Behind(at) = release {
                     self.release_waited(live, at, &done);
                 }
@@ -1959,7 +1959,7 @@ where
                 if matches!(live.release, Release::Behind(_)) {
                     self.release_caught_up(live, released);
                 }
-                self.hold_done(live, held)
+                Some(self.hold_done(live, held))
             }
             Ok(RecognizerEvent::Partial(text)) => {
                 if has_words(&text) {
@@ -1980,9 +1980,6 @@ where
                     self.lag(Event::FinalLag, live.heard.last.take());
                 }
                 let done = self.on_final(live, &text);
-                if live.prepare.is_some() {
-                    return None;
-                }
                 done.or_else(|| {
                     let released = live.released()?;
                     // A final covers one stretch of speech. While the recognizer has audio from
@@ -1993,21 +1990,21 @@ where
                     if matches!(live.release, Release::Behind(_)) {
                         self.release_caught_up(live, released);
                     }
-                    self.hold_done(live, held)
+                    Some(self.hold_done(live, held))
                 })
             }
         }
     }
 
     /// Ends a released hold with the text the recognizer has.
-    fn hold_done(&mut self, live: &mut Live<R::Session>, held: Option<&Started>) -> Option<Done> {
+    fn hold_done(&mut self, live: &mut Live<R::Session>, held: Option<&Started>) -> Done {
         if held.is_none()
             && let Some(pending) = live.text.pending()
         {
-            Some(Done::Accepted(CaptureRequest {
+            Done::Accepted(CaptureRequest {
                 route: pending.route,
                 text: pending.text.clone(),
-            }))
+            })
         } else {
             self.finish_hold(live, held)
         }
@@ -2116,25 +2113,22 @@ where
     }
 
     /// Ends a released hold: what was said, with the words still being recognized, is pasted.
-    fn finish_hold(&mut self, live: &mut Live<R::Session>, held: Option<&Started>) -> Option<Done> {
-        if let Some(partial) = live.partial.take().filter(|text| has_words(text)) {
-            if let Some(done) = self.on_final(live, &partial) {
-                return Some(done);
-            }
-            if live.prepare.is_some() {
-                return None;
-            }
+    fn finish_hold(&mut self, live: &mut Live<R::Session>, held: Option<&Started>) -> Done {
+        if let Some(partial) = live.partial.take().filter(|text| has_words(text))
+            && let Some(done) = self.on_final(live, &partial)
+        {
+            return done;
         }
         let text = live.text.text();
         if !has_words(&text) {
             self.hold_end = Some("empty");
-            return Some(Done::Failed(CaptureError::NothingHeard));
+            return Done::Failed(CaptureError::NothingHeard);
         }
         self.hold_end.get_or_insert("released");
-        Some(Done::Accepted(CaptureRequest {
+        Done::Accepted(CaptureRequest {
             route: held.map_or(CaptureRoute::Paste, Started::route),
             text,
-        }))
+        })
     }
 
     /// Records a recognizer that caught up after the release, and how long that took.
@@ -2252,11 +2246,10 @@ where
                 live.last_audio = now;
                 // A submit is cleaned before its confirmation is shown.
                 if self.cleans_before_confirm(&pending) {
-                    live.prepare = Some(CaptureRequest {
+                    return Some(Done::Prepare(CaptureRequest {
                         route: pending.route,
                         text: pending.text,
-                    });
-                    return None;
+                    }));
                 }
                 self.arm_pending(live);
             }
@@ -2461,6 +2454,10 @@ where
                 } else {
                     CaptureOutcome::cancelled_with(request.text)
                 }
+            }
+            // A submit is prepared inside the capture, before its confirmation.
+            Done::Prepare(_) => {
+                CaptureOutcome::cancelled_with(recoverable_text.unwrap_or_default())
             }
         };
         self.recorder.text(
