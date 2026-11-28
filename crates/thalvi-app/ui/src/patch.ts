@@ -39,14 +39,3 @@ export function settingsPatch(before: object, after: object): SettingsPatch {
   return patch;
 }
 
-/** `target` with `patch` merged in, as the desktop merges it; `target` is left alone. */
-export function applyPatch<T extends object>(target: T, patch: SettingsPatch): T {
-  const merged = new Map<string, unknown>(Object.entries(target));
-  for (const [key, value] of Object.entries(patch)) {
-    const was = merged.get(key);
-    if (value === null) merged.delete(key);
-    else if (isObject(value)) merged.set(key, applyPatch(isObject(was) ? was : {}, value));
-    else merged.set(key, value);
-  }
-  return Object.fromEntries(merged) as T;
-}

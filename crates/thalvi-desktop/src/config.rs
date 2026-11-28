@@ -484,14 +484,6 @@ pub struct SttConfig {
     pub learn_from_corrections: bool,
 }
 
-impl SttConfig {
-    /// Whether Thalvi watches a field after a paste to learn from its cleanup.
-    #[must_use]
-    pub fn learn_from_corrections(&self) -> bool {
-        self.learn_from_corrections
-    }
-}
-
 impl Serialize for SttConfig {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]

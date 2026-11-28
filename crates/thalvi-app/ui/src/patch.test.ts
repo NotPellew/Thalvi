@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Settings } from "./contract.ts";
-import { applyPatch, settingsPatch } from "./patch.ts";
+import { applyPatch } from "./fake.ts";
+import { settingsPatch } from "./patch.ts";
 import { SETTINGS } from "./testing.ts";
 
 describe("the patch of a change", () => {

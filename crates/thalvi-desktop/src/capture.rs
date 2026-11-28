@@ -434,12 +434,6 @@ impl CaptureSession {
         }
     }
 
-    /// Whether spoken phrases can end or edit this capture.
-    #[must_use]
-    pub fn has_endings(&self) -> bool {
-        self.spoken.is_some()
-    }
-
     /// Everything captured so far; an armed ending's phrase is still in it until delivery.
     #[must_use]
     pub fn text(&self) -> String {
@@ -1244,7 +1238,6 @@ mod tests {
 
     #[test]
     fn a_session_without_endings_keeps_every_ending_phrase_as_text() {
-        assert!(session().has_endings());
         for phrase in [
             "paste that",
             "finish dictation",
@@ -1254,7 +1247,6 @@ mod tests {
             "never mind",
         ] {
             let mut session = CaptureSession::without_endings();
-            assert!(!session.has_endings());
             let said = format!("fix the bug {phrase}");
             assert_eq!(
                 session.on_final(&said, Instant::now(), false),

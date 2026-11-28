@@ -244,55 +244,6 @@ impl Serialize for Writing {
 }
 
 impl Writing {
-    /// # Errors
-    /// Fails when `url` is not an `http` or `https` base URL without credentials, query or
-    /// fragment, `model` is blank, `prompt` is given and blank, an opening has no word in its
-    /// phrase, a blank prompt or the same normalized phrase as another, or an app style has a
-    /// blank app or prompt. `None` and the default text both mean the default prompt.
-    pub fn new(
-        url: &str,
-        model: &str,
-        api_key: String,
-        prompt: Option<&str>,
-        openings: Vec<Opening>,
-        apps: Vec<AppStyle>,
-    ) -> Result<Self, WritingSettingsError> {
-        Self::with_cleanup(url, model, api_key, prompt, openings, apps, false)
-    }
-
-    /// Like [`new`](Self::new), and `clean_dictation` is on only when an endpoint exists.
-    ///
-    /// # Errors
-    /// The errors of [`new`](Self::new).
-    pub fn with_cleanup(
-        url: &str,
-        model: &str,
-        api_key: String,
-        prompt: Option<&str>,
-        openings: Vec<Opening>,
-        apps: Vec<AppStyle>,
-        clean_dictation: bool,
-    ) -> Result<Self, WritingSettingsError> {
-        let url = base_url(url).ok_or(WritingSettingsError::Url)?;
-        let model = model.trim();
-        if model.is_empty() {
-            return Err(WritingSettingsError::Model);
-        }
-        Self::with_destination(
-            Destination::Manual(Endpoint {
-                url,
-                model: model.to_owned(),
-                key: api_key,
-            }),
-            None,
-            prompt,
-            openings,
-            apps,
-            clean_dictation,
-            true,
-        )
-    }
-
     fn with_destination(
         destination: Destination,
         chat_build: Option<crate::chat::Build>,
@@ -479,25 +430,6 @@ impl Writing {
             Destination::None => "",
         }
     }
-
-    /// Asks the endpoint to write `words` out, with nothing else about the user: the reply is
-    /// read piece by piece through [`Reply::next`].
-    ///
-    /// # Errors
-    /// [`WritingError::Certificate`], [`WritingError::Unreachable`] or [`WritingError::Status`]
-    /// when no answer starts.
-    pub async fn start(
-        &self,
-        client: &reqwest::Client,
-        words: &str,
-    ) -> Result<Reply, WritingError> {
-        let Destination::Manual(endpoint) = &self.destination else {
-            return Err(WritingError::NotInstalled);
-        };
-        endpoint
-            .ask(client, self.prompt_for(words, None), words)
-            .await
-    }
 }
 
 impl Endpoint {
@@ -505,16 +437,7 @@ impl Endpoint {
     ///
     /// # Errors
     /// The connection, status or response failure.
-    pub async fn ask_with(
-        &self,
-        client: &reqwest::Client,
-        prompt: &str,
-        words: &str,
-    ) -> Result<Reply, WritingError> {
-        self.ask(client, prompt, words).await
-    }
-
-    async fn ask(
+    pub async fn ask(
         &self,
         client: &reqwest::Client,
         system: &str,
@@ -803,6 +726,23 @@ fn read_line(line: &[u8]) -> Result<Line, WritingError> {
 mod tests {
     use super::*;
 
+    fn writing(
+        url: &str,
+        model: &str,
+        api_key: &str,
+        prompt: Option<&str>,
+        openings: Vec<Opening>,
+        apps: Vec<AppStyle>,
+    ) -> Result<Writing, WritingSettingsError> {
+        let mut raw = json!({"url": url, "model": model, "api_key": api_key});
+        if let Some(prompt) = prompt {
+            raw["prompt"] = json!(prompt);
+        }
+        raw["openings"] = serde_json::to_value(openings).unwrap();
+        raw["apps"] = serde_json::to_value(apps).unwrap();
+        Writing::try_from(serde_json::from_value::<RawWriting>(raw).unwrap())
+    }
+
     #[test]
     fn the_settings_are_checked_where_they_are_loaded_and_the_key_stays_out_of_debug_output() {
         let cases = [
@@ -824,24 +764,19 @@ mod tests {
             ("http://host/v1", "  ", Err(WritingSettingsError::Model)),
         ];
         for (url, model, expected) in cases {
-            let result = Writing::new(
-                url,
-                model,
-                "secret".to_owned(),
-                None,
-                Vec::new(),
-                Vec::new(),
-            )
-            .map(|writing| match writing.destination {
-                Destination::Manual(endpoint) => endpoint.url,
-                Destination::Computer { .. } | Destination::None => panic!("manual"),
-            });
+            let result =
+                writing(url, model, "secret", None, Vec::new(), Vec::new()).map(|writing| {
+                    match writing.destination {
+                        Destination::Manual(endpoint) => endpoint.url,
+                        Destination::Computer { .. } | Destination::None => panic!("manual"),
+                    }
+                });
             assert_eq!(result, expected.map(str::to_owned), "{url:?} {model:?}");
         }
-        let writing = Writing::new(
+        let writing = writing(
             "http://host/v1",
             "m",
-            "secret".to_owned(),
+            "secret",
             None,
             Vec::new(),
             Vec::new(),
@@ -865,14 +800,7 @@ mod tests {
         prompt: Option<&str>,
         openings: Vec<Opening>,
     ) -> Result<Writing, WritingSettingsError> {
-        Writing::new(
-            "http://host/v1",
-            "m",
-            String::new(),
-            prompt,
-            openings,
-            Vec::new(),
-        )
+        writing("http://host/v1", "m", "", prompt, openings, Vec::new())
     }
 
     #[test]
@@ -950,10 +878,10 @@ mod tests {
     }
 
     fn with_styles(styles: Vec<AppStyle>) -> Result<Writing, WritingSettingsError> {
-        Writing::new(
+        writing(
             "http://host/v1",
             "m",
-            String::new(),
+            "",
             Some("FALLBACK"),
             vec![opening("write me an email", "EMAIL")],
             styles,

@@ -951,14 +951,6 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
             && before[1].description.contains("untested"),
         "each card says its own trade-off"
     );
-    assert_eq!(
-        before
-            .iter()
-            .map(|model| model.word_list)
-            .collect::<Vec<_>>(),
-        [true, true]
-    );
-
     for asset in [WHISPER_TURBO.model, WHISPER_TURBO.vad] {
         fs::File::create(dir.join(asset.file_name))
             .and_then(|file| file.set_len(asset.size))
@@ -977,17 +969,6 @@ async fn the_whisper_entries_are_listed_with_one_shared_download_that_marks_both
     assert!(
         catalog.iter().all(|model| !model.cached),
         "the catalog is untouched"
-    );
-    assert_eq!(
-        catalog
-            .iter()
-            .map(|model| (model.name, model.word_list))
-            .collect::<Vec<_>>(),
-        [
-            ("nemotron_160ms", true),
-            ("unified_160ms", true),
-            ("parakeet_tdt_v3", true),
-        ]
     );
 }
 

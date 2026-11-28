@@ -2254,14 +2254,6 @@ function speech(context: PageContext): SpeechRows {
     const named = `${name} can't use the word list`;
     return named.length <= HINT_BUDGET ? named : "This recognizer can't use the word list";
   };
-  function wordListNotice(active: LiveEntry | undefined): string {
-    if (active?.kind !== "on_device") return wordListHint;
-    const name = active.model;
-    if (name === undefined) return wordListHint;
-    const info = speechModelList.find((known) => known.name === name);
-    if (info === undefined || info.word_list) return wordListHint;
-    return cantUse(active.name);
-  }
   function checkWordList(): void {
     const request = (wordListRequest += 1);
     const active = activeLive();
@@ -2272,7 +2264,7 @@ function speech(context: PageContext): SpeechRows {
       words.enable(true);
       return;
     }
-    if (wordHint) wordHint.textContent = wordListNotice(active);
+    if (wordHint) wordHint.textContent = wordListHint;
     if (active === undefined || active.kind !== "realtime") {
       words.enable(true);
       return;

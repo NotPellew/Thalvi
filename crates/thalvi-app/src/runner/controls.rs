@@ -317,13 +317,7 @@ impl Case {
             self.checkpoint().await;
             tokio::task::yield_now().await;
             let mut updates = self.link.status_updates();
-            while matches!(
-                *updates.borrow_and_update(),
-                Status::Working {
-                    cancellable: false,
-                    ..
-                }
-            ) {
+            while matches!(*updates.borrow_and_update(), Status::Working { .. }) {
                 updates.changed().await.unwrap();
             }
             tokio::task::spawn_blocking(|| ()).await.unwrap();
@@ -392,13 +386,7 @@ impl Case {
     fn stop_capture(&mut self) {
         let status = self.link.status();
         if !resting(&status)
-            && !matches!(
-                status,
-                Status::Working {
-                    cancellable: false,
-                    ..
-                }
-            )
+            && !matches!(status, Status::Working { .. })
             && let Some(id) = self.rig.recognition.lock().unwrap().capture
         {
             let id = format!("capture{id}");

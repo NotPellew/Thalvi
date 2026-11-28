@@ -79,21 +79,17 @@ pub enum Status {
     Working {
         target: Option<String>,
         route: CaptureRoute,
-        /// The capture can still be cancelled; delivery cannot be.
-        cancellable: bool,
     },
     /// A buffered live recognizer is transcribing a capture after release or a voice pause.
     Transcribing {
         target: Option<String>,
         route: CaptureRoute,
-        cancellable: bool,
     },
     /// A released hold whose recognizer was still behind is finishing the words said before the
     /// release; it can still be cancelled.
     Finishing {
         target: Option<String>,
         route: CaptureRoute,
-        cancellable: bool,
     },
     /// A dictation is being cleaned before it is pasted; it can still be cancelled.
     CleaningUp {
@@ -359,7 +355,6 @@ impl View {
             (Mode::Delivering(route), _) => Status::Working {
                 target,
                 route: *route,
-                cancellable: false,
             },
             (Mode::Done { route, notice }, EngineState::Listening) => Status::Done {
                 target,
@@ -411,27 +406,13 @@ impl View {
                 None,
                 preview.as_ref(),
             ),
-            EngineState::ConfirmingSubmit {
-                text,
-                pause,
-                preview,
-            } => self.pending_status(
-                target,
-                CaptureRoute::Submit,
-                text,
-                false,
-                Some(*pause),
-                Some(preview),
-            ),
             EngineState::TranscribingLive { route } => Status::Transcribing {
                 target,
                 route: *route,
-                cancellable: true,
             },
             EngineState::Finishing { route } => Status::Finishing {
                 target,
                 route: *route,
-                cancellable: true,
             },
             EngineState::CleaningUp => Status::CleaningUp { target },
             EngineState::Writing { text } => Status::Writing {
@@ -612,7 +593,6 @@ mod tests {
                 Status::Finishing {
                     target: Some(kitty()),
                     route: CaptureRoute::Write,
-                    cancellable: true,
                 },
             ),
             (
@@ -622,7 +602,6 @@ mod tests {
                 Status::Transcribing {
                     target: Some(kitty()),
                     route: CaptureRoute::Paste,
-                    cancellable: true,
                 },
             ),
         ];
@@ -691,7 +670,6 @@ mod tests {
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Submit,
-                    cancellable: false,
                 },
             ),
             (
@@ -909,7 +887,6 @@ mod tests {
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Paste,
-                    cancellable: false,
                 },
             ),
             (
@@ -985,9 +962,8 @@ mod tests {
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Task,
-                    cancellable: true,
                 },
-                json!({"state": "working", "target": "kitty", "route": "task", "cancellable": true}),
+                json!({"state": "working", "target": "kitty", "route": "task"}),
             ),
             (
                 Status::Done {

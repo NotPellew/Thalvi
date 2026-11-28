@@ -400,7 +400,7 @@ describe("applying a change", () => {
   });
 
   const CAPTURING: Status = { state: "capturing", target: null, committed: "", partial: null, notice: null };
-  const DELIVERING: Status = { state: "working", target: null, route: "paste", cancellable: false };
+  const DELIVERING: Status = { state: "working", target: null, route: "paste" };
   const flipSwitch = (label: string) => (): void => { flip(control(label, "input")); };
   const pickLook = (): void => { (root.querySelector('[data-choice="holo"] input') as HTMLInputElement).click(); };
 
@@ -1116,8 +1116,8 @@ describe("the word list", () => {
   });
 
   it.each([
-    ["Whisper Turbo on the CPU", "whisper_turbo_cpu", cant("On this computer")],
-    ["Whisper Turbo on the Vulkan GPU", "whisper_turbo_vulkan", cant("On this computer")],
+    ["Whisper Turbo on the CPU", "whisper_turbo_cpu", FAVOURED],
+    ["Whisper Turbo on the Vulkan GPU", "whisper_turbo_vulkan", FAVOURED],
     ["Nemotron", "nemotron_160ms", FAVOURED],
     ["Parakeet", "parakeet_tdt_v3", FAVOURED],
     ["no model", undefined, FAVOURED],
@@ -1133,24 +1133,6 @@ describe("the word list", () => {
     expect((rowOf("Word list").querySelector('input[aria-label="New word"]') as HTMLInputElement).disabled).toBe(false);
   });
 
-  it("updates the hint when Use switches between a recognizer that ignores the list and one that favours it", async () => {
-    const stub = stubBackend({
-      ...SETTINGS,
-      stt: stt([device("whisper_turbo_cpu"), { ...device("nemotron_160ms", false), id: "nemotron", name: "Nemotron Streaming" }]),
-    });
-    stub.backend.listSpeechModels.mockResolvedValue(listedModels());
-    mountSettings(root, stub.backend);
-    await settle();
-    goTo("recognition");
-    expect(wordHint()).toBe(cant("On this computer"));
-    use("Nemotron Streaming");
-    await settle();
-    expect(wordHint()).toBe(FAVOURED);
-    use("On this computer");
-    await settle();
-    expect(wordHint()).toBe(cant("On this computer"));
-    expect(stub.backend.wordListSupport).not.toHaveBeenCalled();
-  });
 });
 
 describe("learning from corrections", () => {
@@ -1495,7 +1477,7 @@ describe("the Recognition page", () => {
     stub.emit(capturing);
     await act();
     expect(where(APPLIED_LATER_TEXT)).toBe(expected);
-    for (const status of [{ state: "working", target: null, route: "paste", cancellable: false }, { state: "listening" }, capturing] as const) stub.emit(status);
+    for (const status of [{ state: "working", target: null, route: "paste" }, { state: "listening" }, capturing] as const) stub.emit(status);
     await settle();
     expect(where(APPLIED_TEXT)).toBe(expected);
     edit("LLM Gateway");
@@ -1926,7 +1908,7 @@ describe("the next dictation summary and state words", () => {
     ["pending", { state: "pending", target: null, route: "paste", text: "hi", waitingForQuiet: false, pauseMs: 0, copies: false }, "Ready"],
     ["writing", { state: "writing", target: null, text: "" }, "Ready"],
     ["thinking", { state: "thinking", target: null }, "Ready"],
-    ["working", { state: "working", target: null, route: "paste", cancellable: true }, "Ready"],
+    ["working", { state: "working", target: null, route: "paste" }, "Ready"],
     ["done", { state: "done", target: null, route: "paste", notice: "Pasted" }, "Ready"],
     ["loading", { state: "loading", notice: "Loading the speech model." }, "Loading the speech model."],
     ["paused", { state: "paused" }, "Paused — resume to dictate"],
@@ -4150,7 +4132,7 @@ describe("last dictation", () => {
     const calls = stub.backend.getDraft.mock.calls.length;
     for (const state of [
       { state: "capturing", target: "foot", committed: "", partial: null, notice: null },
-      { state: "working", target: "foot", route: "paste", cancellable: false },
+      { state: "working", target: "foot", route: "paste" },
     ] as const) stub.emit(state);
     await settle();
     expect(stub.backend.getDraft.mock.calls.length).toBe(calls);
