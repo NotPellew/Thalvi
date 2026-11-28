@@ -14,19 +14,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// The user started speaking.
-    SpeechStart {
-        /// Recognizer turn identifier.
-        turn_id: String,
-        /// Milliseconds of audio the recognizer had processed.
-        audio_processed_ms: Option<u64>,
-    },
+    SpeechStart,
     /// The user stopped speaking.
-    SpeechEnd {
-        /// Recognizer turn identifier.
-        turn_id: String,
-        /// Milliseconds of audio the recognizer had processed.
-        audio_processed_ms: Option<u64>,
-    },
+    SpeechEnd,
     /// A cumulative partial transcript; replaces the previous partial.
     Partial {
         /// The partial transcript text.
@@ -34,8 +24,6 @@ pub enum Event {
     },
     /// A completed user turn.
     SpeechComplete {
-        /// Recognizer turn identifier.
-        turn_id: String,
         /// The completed transcript text.
         text: String,
     },
@@ -76,12 +64,6 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Error {
-    /// Whether reconnecting is allowed after this error.
-    #[must_use]
-    pub fn is_fatal(&self) -> bool {
-        matches!(self, Self::Fatal(_))
-    }
-
     fn retryable(message: impl Into<String>) -> Self {
         Self::Retryable(message.into())
     }
@@ -250,12 +232,6 @@ pub fn parse_event(text: &str) -> Option<Result<Event, Error>> {
             ))));
         }
     };
-    let turn_id = value
-        .get("turnId")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let audio_processed_ms = value.get("audioProcessedMs").and_then(Value::as_u64);
     let transcript = || {
         value
             .get("transcript")
@@ -264,17 +240,10 @@ pub fn parse_event(text: &str) -> Option<Result<Event, Error>> {
             .to_string()
     };
     match value.get("type").and_then(Value::as_str) {
-        Some("speechStart") => Some(Ok(Event::SpeechStart {
-            turn_id,
-            audio_processed_ms,
-        })),
-        Some("speechEnd") => Some(Ok(Event::SpeechEnd {
-            turn_id,
-            audio_processed_ms,
-        })),
+        Some("speechStart") => Some(Ok(Event::SpeechStart)),
+        Some("speechEnd") => Some(Ok(Event::SpeechEnd)),
         Some("transcript") => Some(Ok(Event::Partial { text: transcript() })),
         Some("speechComplete") => Some(Ok(Event::SpeechComplete {
-            turn_id,
             text: transcript(),
         })),
         Some("error") => Some(Ok(Event::Error {
@@ -297,17 +266,11 @@ mod tests {
         let cases: Vec<(&str, Option<Event>)> = vec![
             (
                 r#"{"type":"speechStart","turnId":"1","audioProcessedMs":120}"#,
-                Some(Event::SpeechStart {
-                    turn_id: "1".to_string(),
-                    audio_processed_ms: Some(120),
-                }),
+                Some(Event::SpeechStart),
             ),
             (
                 r#"{"type":"speechEnd","turnId":"1","audioProcessedMs":640}"#,
-                Some(Event::SpeechEnd {
-                    turn_id: "1".to_string(),
-                    audio_processed_ms: Some(640),
-                }),
+                Some(Event::SpeechEnd),
             ),
             (
                 r#"{"type":"transcript","transcript":"hel","final":false}"#,
@@ -318,7 +281,6 @@ mod tests {
             (
                 r#"{"type":"speechComplete","turnId":"1","transcript":"hello"}"#,
                 Some(Event::SpeechComplete {
-                    turn_id: "1".to_string(),
                     text: "hello".to_string(),
                 }),
             ),
