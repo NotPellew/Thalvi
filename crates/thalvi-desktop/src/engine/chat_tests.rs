@@ -85,8 +85,6 @@ async fn writing_uses_the_owned_runtime_and_a_second_crash_stays_failed() {
                     recorded.borrow_mut().push(state.clone());
                 }
             }),
-            spotter: None,
-            spotter_off: None,
         },
         &config,
         Recorder::disabled(),
