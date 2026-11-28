@@ -2,9 +2,9 @@
 
 The running app: looks, settings, history and recordings, controls, errors and login.
 
-- **Three looks for the desktop UI.** `look` is gunmetal (default), holo or neon. Each look's built-in colours and measures can be overridden under `themes` (`version: 1`), resolved as those defaults plus the sparse changes. The overlay hangs from the top of the usable area, one 460 × 200 size, and neon follows the system light or dark theme.
-  Why: gunmetal is the developer's choice and the others stay; a damaged theme must not stop startup, so `themes` is the only key loaded leniently — an unreadable look keeps its JSON and draws the built-in look, and a save refuses a theme it changes into something unusable.
-  Rejected: dropping the neon pill, y = 0 (a bar covers it), a size per look, rejecting the whole file when a theme is damaged, deleting customizations to recover.
+- **Three fixed looks for the desktop UI.** `look` is gunmetal (default), holo or neon. Each look is static Settings CSS plus one overlay palette; nothing about it can be overridden, and a saved `themes` key is refused. The overlay hangs from the top of the usable area, one 460 × 200 size, and neon follows the system light or dark theme.
+  Why: gunmetal is the developer's choice and the others stay; the per-property overrides were mostly colour knobs, not the customization the developer wanted.
+  Rejected: per-property overrides (#470), dropping the neon pill, y = 0 (a bar covers it), a size per look.
 - **Opt-in recordings.** Metrics, dictation text and mic audio (with ~2 s before each wake) are each
   written locally by settings switches, applied between captures. Why: to judge changes and
   misrecognitions on real use. Off by default: they are personal data.

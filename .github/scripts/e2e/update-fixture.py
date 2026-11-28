@@ -20,11 +20,8 @@ from urllib.request import Request, urlopen
 WINDOWS = os.name == "nt"
 VERSION_A = "91.0.0"
 VERSION_B = "91.0.1"
-ACCENT = "#ff87de"
-ACCENT_A = "#6bf8ff"
-ACCENT_B = "#b5ff62"
-HEADING_RULE = "#ffdc73"
-THEMES = {"version": 1, "holo": {"colors": {"dark": {"accent": ACCENT}}}}
+LOOK = "holo"
+ACCENT = "#6bf8ff"
 
 
 def require(condition, message):
@@ -73,7 +70,7 @@ def sign(app, key, package):
     return package.with_suffix(package.suffix + ".sig").read_text(encoding="utf-8").strip()
 
 
-def build(app, work, feed, public_key, version, feature):
+def build(app, work, feed, public_key, version):
     bundle = "nsis" if WINDOWS else "appimage"
     target = Path(os.environ.get("CARGO_TARGET_DIR", app.parent.parent / "target")).resolve()
     env = os.environ | {"CARGO_TARGET_DIR": str(target), "THALVI_UPDATE_FIXTURE_FEED": feed}
@@ -89,7 +86,7 @@ def build(app, work, feed, public_key, version, feature):
     else:
         env["LD_LIBRARY_PATH"] = str(target / "release")
         env["LINUXDEPLOY_EXCLUDED_LIBRARIES"] = "libvulkan.so*"
-    tauri(app, "build", "--ci", "--bundles", bundle, "--features", feature,
+    tauri(app, "build", "--ci", "--bundles", bundle, "--features", "update-fixture",
           "--config", config, *extra, "--", "--locked", env=env, check=True)
     suffix = "x64-setup.exe" if WINDOWS else "amd64.AppImage"
     name = f"Thalvi_{version}_{suffix}"
@@ -176,8 +173,8 @@ def suite(out):
         secret, public = keys(app)
         other, _ = keys(app)
         feed = f"{server.origin}/latest.json"
-        a = build(app, work, feed, public, VERSION_A, "update-fixture")
-        b = build(app, work, feed, public, VERSION_B, "update-fixture-b")
+        a = build(app, work, feed, public, VERSION_A)
+        b = build(app, work, feed, public, VERSION_B)
         invalid = work / "invalid-package"
         invalid.write_bytes(b"This signed update payload is not an installer.\n")
         server.offers = {
@@ -320,25 +317,21 @@ class Desktop:
     def stored(self):
         return json.loads(self.config.read_text(encoding="utf-8"))
 
-    def theme_intact(self):
-        require(self.stored()["themes"] == THEMES, "The saved sparse theme changed")
+    def setting_intact(self):
+        require(self.stored().get("look") == LOOK, f"The saved look changed: {self.stored().get('look')}")
         live = self.cli("settings", "get")
-        require(live and live["settings"]["themes"] == THEMES, "The running app lost the theme")
+        require(live and live["settings"]["look"] == LOOK, "The running app lost the look")
 
 
 def drive(package, out, origin):
     desktop = Desktop(package, out, origin)
     receipt = {}
-    new_property = {"themes": {"version": 1, "holo": {"colors": {"dark": {"heading_rule": HEADING_RULE}}}}}
     try:
         desktop.start("empty")
-        desktop.screenshot("before-default", [ACCENT_A])
-        desktop.save({"look": "holo", "themes": THEMES})
-        desktop.theme_intact()
-        checked = desktop.reply("settings", "check", "-", change=new_property)
-        require(checked and checked.get("valid") is False and "heading_rule" in checked["error"],
-                "Package A did not reject the property introduced in B")
-        desktop.screenshot("before-custom", [ACCENT])
+        desktop.screenshot("before-default", [ACCENT])
+        desktop.save({"look": LOOK})
+        desktop.setting_intact()
+        desktop.screenshot("before-look", [ACCENT])
         receipt["prepare_exit_code"] = desktop.stop()
         baseline = sha256(desktop.config)
         for case, step, outcome in [("signature", "download", "signature"), ("install", "install", "not_applied")]:
@@ -349,7 +342,7 @@ def drive(package, out, origin):
             require(case != "signature" or desktop.app.poll() is None, "A exited after rejecting the signature")
             if case == "install":
                 require(desktop.metric("download", "ok", VERSION_A), "The invalid installer did not pass verification")
-            desktop.theme_intact()
+            desktop.setting_intact()
             after = sha256(desktop.config)
             require(after == baseline, f"{case} changed desktop.json")
             exit_code = desktop.stop() if case == "signature" else desktop.app.wait(timeout=10)
@@ -361,18 +354,17 @@ def drive(package, out, origin):
         desktop.save({"update_channel": "development"})
         event = wait_for("B to report a successful install after restart", lambda: desktop.metric("install", "ok", VERSION_B), 180)
         wait_for("B to answer settings get", lambda: desktop.cli("settings", "get"))
-        desktop.theme_intact()
-        require(desktop.cli("settings", "check", "-", change=new_property),
-                "Package B did not accept the new theme property")
-        desktop.screenshot("after-custom", [ACCENT, HEADING_RULE])
+        desktop.setting_intact()
+        desktop.screenshot("after-update", [ACCENT])
         desktop.save({"look": "gunmetal"})
-        desktop.screenshot("after-default", [ACCENT_B])
-        desktop.save({"look": "holo"})
+        require(desktop.stored().get("look") == "gunmetal", "The default look did not save")
+        desktop.screenshot("after-default", [ACCENT])
+        desktop.save({"look": LOOK})
         desktop.save({"overlay": {"draft": False}})
         require(desktop.stored()["overlay"]["draft"] is False, "The unrelated settings save did not land")
-        desktop.theme_intact()
-        desktop.screenshot("after-unrelated-save", [ACCENT, HEADING_RULE])
-        receipt["success"] = {"update": event, "app_exit_code": desktop.stop(), "theme": THEMES}
+        desktop.setting_intact()
+        desktop.screenshot("after-unrelated-save", [ACCENT])
+        receipt["success"] = {"update": event, "app_exit_code": desktop.stop(), "look": LOOK}
         if not WINDOWS:
             receipt["success"]["installed_sha256"] = sha256(package)
         write_json(out / "update-receipt.json", receipt)
