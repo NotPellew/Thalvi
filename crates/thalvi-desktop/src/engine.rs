@@ -658,7 +658,6 @@ struct Live<S> {
     heard: Heard,
     cues: FuturesUnordered<LocalBoxFuture<'static, CueEnd>>,
     release: Release,
-    capture_end: Option<Instant>,
     /// The release of the hold that opened this capture; frames queued after it are not speech
     /// of the hold.
     cutoff: Option<Cutoff>,
@@ -791,11 +790,7 @@ impl<S: RecognizerSession> Live<S> {
             .quiet_since()
             .map(|since| now.duration_since(since));
         let without_ending = self.text.pending().is_some_and(|p| p.without_ending);
-        let ended = self.text.ready_at();
         let request = self.text.poll_ready(now);
-        if request.is_some() {
-            self.capture_end = self.capture_end.or(ended);
-        }
         QuietEnding {
             request,
             without_ending,
@@ -1759,7 +1754,6 @@ where
             heard: Heard::default(),
             cues: FuturesUnordered::new(),
             release: held.map_or(Release::Over, |_| Release::Down),
-            capture_end: None,
             cutoff: held.map(|held| held.end.clone()),
             hold_route: held.map(Started::route),
             notice: None,
@@ -2353,7 +2347,6 @@ where
                     .finish_audio()
                     .await
                     .map_err(|error| Stop::Failed(error.into()))?;
-                live.capture_end = Some(now);
                 live.release = Release::Tail(now);
                 self.set_state(&EngineState::TranscribingLive {
                     route: CaptureRoute::Paste,
