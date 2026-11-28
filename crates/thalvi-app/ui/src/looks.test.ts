@@ -1,3 +1,4 @@
+import { build } from "vite";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Look } from "./contract.ts";
 import gunmetalCss from "./look-gunmetal.css?raw";
@@ -141,4 +142,15 @@ describe("the settings stylesheets", () => {
     }
     expect(css).toContain(`--neon: ${accent};`);
   });
+
+  it("keeps Neon's light and dark colours in the built window", async () => {
+    const output = await build({ configFile: "vite.config.ts", logLevel: "silent", build: { write: false } });
+    const bundles = Array.isArray(output) ? output : [output];
+    const css = bundles
+      .flatMap((bundle) => ("output" in bundle ? bundle.output : []))
+      .flatMap((file) => (file.type === "asset" && file.fileName.endsWith(".css") ? [String(file.source)] : []))
+      .join("");
+    expect(css).toContain("--bg:light-dark(#e8eff7,#020617)");
+    expect(css).not.toContain("--lightningcss-");
+  }, 60_000);
 });
