@@ -38,6 +38,11 @@ describe("the settings window's look", () => {
     expect(Array.from(root.querySelectorAll(".lk")).map((choice) => choice.textContent)).toEqual(["Gunmetal", "Holo", "Neon"]);
     expect(radio("gunmetal").checked).toBe(true);
     expect(stub.backend.settingsReady).toHaveBeenCalled();
+    // The overlay needs the system scheme while Thalvi runs, not just at start.
+    expect(stub.backend.setDark).toHaveBeenCalledWith(false);
+    stub.schemeChanged(true);
+    await settle();
+    expect(stub.backend.setDark).toHaveBeenCalledWith(true);
   });
 
   it("switches at once when picked, applies it, and goes back when the app refuses it", async () => {

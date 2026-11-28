@@ -132,6 +132,11 @@ export const WHISPER: SpeechModelInfo = {
   word_list: false,
 };
 
+type SchemeReporter = {
+  setDark(dark: boolean): Promise<void>;
+  onThemeChanged(listener: (dark: boolean) => void): void;
+};
+
 /** A backend whose calls are spies and whose events the test emits. */
 export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }) {
   const statusListeners: ((status: Status) => void)[] = [];
@@ -139,6 +144,8 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const rebuildingListeners: ((rebuilding: boolean) => void)[] = [];
   const elsewhereListeners: (() => void)[] = [];
+  const schemeListeners: ((dark: boolean) => void)[] = [];
+  let dark = false;
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const pageListeners: ((page: string) => void)[] = [];
   const updateListeners: ((state: UpdateState) => void)[] = [];
@@ -171,6 +178,11 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     onRebuilding: vi.fn((listener: (rebuilding: boolean) => void) => rebuildingListeners.push(listener)),
     onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
+    setDark: vi.fn<(value: boolean) => Promise<void>>(() => Promise.resolve()),
+    onThemeChanged: vi.fn((listener: (value: boolean) => void) => {
+      schemeListeners.push(listener);
+      listener(dark);
+    }),
     previewOverlay: vi.fn<(state: OverlayPreviewState, scale: number) => Promise<ArrayBuffer>>((state) => Promise.resolve(previewBuffer(state))),
     settingsReady: vi.fn(() => Promise.resolve()),
     saveSettings: vi.fn<(patch: SettingsPatch) => Promise<void>>((patch) => {
@@ -248,7 +260,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     onUpdate: vi.fn((listener: (state: UpdateState) => void) => updateListeners.push(listener)),
     checkForUpdates: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     openReleaseNotes: vi.fn<() => Promise<void>>(() => Promise.resolve()),
-  } satisfies Backend;
+  } satisfies Backend & SchemeReporter;
   return {
     backend,
     /** The settings after each change the desktop accepted, in order. */
@@ -281,6 +293,10 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     },
     changedElsewhere: () => {
       for (const listener of elsewhereListeners) listener();
+    },
+    schemeChanged: (value: boolean) => {
+      dark = value;
+      for (const listener of schemeListeners) listener(value);
     },
     learningChanged: (next: Learning) => {
       learning = structuredClone(next);
