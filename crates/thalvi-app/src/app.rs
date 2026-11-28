@@ -327,8 +327,6 @@ pub struct AppState {
 struct Started {
     state: AppState,
     first_start: bool,
-    /// Whether loading dropped the active legacy Thalvi server entry, which the user is told once.
-    removed_active_entry: bool,
     inbox: Inbox,
     /// What the last update came to, and how long the restart took.
     arrival: Option<(Arrival, Duration)>,
@@ -343,7 +341,7 @@ impl AppState {
         whisper_helpers: std::path::PathBuf,
     ) -> Result<Started, String> {
         let store = Store::new(config)?;
-        let (config, first_start, removed_active_entry) = store.start()?;
+        let (config, first_start) = store.start()?;
         let marker = Marker::take(&store.sibling(Marker::FILE));
         let arrival = marker.as_ref().map(|marker| marker.arrival(running));
         let (updates, inbox) = update::channel(Snapshot::start(
@@ -409,7 +407,6 @@ impl AppState {
         Ok(Started {
             state,
             first_start,
-            removed_active_entry,
             inbox,
             arrival,
         })
@@ -834,7 +831,6 @@ fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), Stri
     let Started {
         state,
         first_start,
-        removed_active_entry,
         inbox,
         arrival,
     } = AppState::start(config, &app.package_info().version, whisper_helpers)?;
@@ -854,12 +850,6 @@ fn setup(app: &AppHandle, config: Option<std::path::PathBuf>) -> Result<(), Stri
     create_windows(app).map_err(|error| error.to_string())?;
     if first_start {
         show_settings(app);
-    }
-    if removed_active_entry {
-        Desktop::show_error(
-            "Speech settings updated",
-            "Your Thalvi server speech entry was removed: Thalvi now connects to speech servers directly. On this computer is in use instead.",
-        );
     }
     follow_engine(app).map_err(|error| error.to_string())?;
     follow_updates(app);
@@ -1808,7 +1798,9 @@ mod tests {
         let start = DesktopConfig::from_json_str("{}").unwrap();
         let saves = SyncedConfig::new(Store::new(Some(path.clone())).unwrap(), start.clone());
         let mut settings = crate::settings::settings_json(&start).unwrap();
-        settings["hold_key"] = serde_json::json!("F7");
+        settings["keys"] = serde_json::json!([
+            {"action": "dictate", "mode": "hold", "key": "F7"}
+        ]);
 
         let error = saves
             .save_form(

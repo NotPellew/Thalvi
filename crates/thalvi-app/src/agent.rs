@@ -1666,32 +1666,6 @@ mod tests {
     }
 
     #[test]
-    fn extra_and_final_pass_flags_in_a_settings_change_leave_the_config_unchanged() {
-        let config = r#"{"writing": {"url": "http://127.0.0.1:9/v1", "model": "m"}, "stt": {"entries": [
-            {"kind": "on_device", "id": "d", "name": "D", "active": true},
-            {"kind": "realtime", "id": "x", "name": "X", "active": false, "address": "ws://127.0.0.1:9", "model": "m"}
-        ]}}"#;
-        let rig = Rig::new("old-extra-flags", config);
-        rig.fake.saves.store.write(&rig.fake.config()).unwrap();
-        let file = rig.fake.folder.join("desktop.json");
-        let saved = std::fs::read(&file).unwrap();
-        let before = rig.ask(&Request::SettingsGet)["settings"]["stt"]["entries"].clone();
-        for flag in ["extra", "final_pass"] {
-            let mut entries = before.clone();
-            entries[1][flag] = json!(true);
-            let set = rig.set(json!({"stt": {"entries": entries}}));
-            assert_eq!(set, json!({"ok": true, "changed": false}), "{flag}");
-            let after = rig.ask(&Request::SettingsGet)["settings"]["stt"]["entries"].clone();
-            assert_eq!(after, before, "{flag}");
-            assert_eq!(
-                std::fs::read(&file).unwrap(),
-                saved,
-                "{flag}: the settings file is unchanged"
-            );
-        }
-    }
-
-    #[test]
     fn writing_apps_are_checked_and_set_like_settings() {
         let rig = Rig::new(
             "writing-apps",
