@@ -176,7 +176,6 @@ pub(crate) mod tests {
         Status::Finishing {
             target: Some("Editor".to_owned()),
             route: CaptureRoute::Paste,
-            cancellable: true,
         }
     }
 
@@ -184,7 +183,6 @@ pub(crate) mod tests {
         Status::Transcribing {
             target: Some("Editor".to_owned()),
             route: CaptureRoute::Paste,
-            cancellable: true,
         }
     }
 
@@ -211,7 +209,6 @@ pub(crate) mod tests {
         Status::Working {
             target: Some("Editor".to_owned()),
             route: CaptureRoute::Paste,
-            cancellable: false,
         }
     }
 
@@ -307,7 +304,6 @@ pub(crate) mod tests {
             Status::Working {
                 target: None,
                 route: CaptureRoute::Task,
-                cancellable: false,
             },
             failed("Could not open the address", SECRET),
             Status::Failed {

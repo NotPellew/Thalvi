@@ -3,7 +3,23 @@
 import { DownloadFailure } from "./contract.ts";
 import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatModelInfo, type Draft, type HistoryEntry, type Learning, type OverlayPreviewState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
-import { applyPatch } from "./patch.ts";
+import type { SettingsPatch } from "./patch.ts";
+
+function isObject(value: unknown): value is { [key: string]: unknown } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** `target` with `patch` merged in, as the desktop merges it; `target` is left alone. */
+export function applyPatch<T extends object>(target: T, patch: SettingsPatch): T {
+  const merged = new Map<string, unknown>(Object.entries(target));
+  for (const [key, value] of Object.entries(patch)) {
+    const was = merged.get(key);
+    if (value === null) merged.delete(key);
+    else if (isObject(value)) merged.set(key, applyPatch(isObject(was) ? was : {}, value));
+    else merged.set(key, value);
+  }
+  return Object.fromEntries(merged) as T;
+}
 
 const UNIFIED_LANGUAGES = [
   "Bulgarian",
@@ -91,7 +107,7 @@ function script(): Status[] {
     { state: "capturing", target: slack, committed: SENTENCE, partial: null, notice: null },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: true, pauseMs: 2500, copies: false },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: false, pauseMs: 2500, copies: false },
-    { state: "working", target: slack, route: "submit", cancellable: false },
+    { state: "working", target: slack, route: "submit" },
     { state: "done", target: slack, route: "submit", notice: "Sent" },
     { state: "paused" },
     { state: "listening" },
@@ -106,7 +122,7 @@ function script(): Status[] {
     { state: "starting", target: "Firefox" },
     { state: "capturing", target: "Firefox", committed: "", partial: null, notice: null },
     { state: "pending", target: "Firefox", route: "task", text: "open the calendar", waitingForQuiet: false, pauseMs: 2500, copies: false },
-    { state: "working", target: "Firefox", route: "task", cancellable: true },
+    { state: "working", target: "Firefox", route: "task" },
     { state: "done", target: "Firefox", route: "task", notice: "Opened the calendar" },
   ];
 }
@@ -148,7 +164,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
       license: "NVIDIA Open Model License",
       languages: ["English"],
       cached: false,
-      word_list: true,
     },
     {
       name: "unified_160ms",
@@ -159,7 +174,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
       license: "OpenMDW-1.1",
       languages: UNIFIED_LANGUAGES,
       cached: false,
-      word_list: true,
     },
   ];
   const speak = (progress: SpeechModelProgress): void => {

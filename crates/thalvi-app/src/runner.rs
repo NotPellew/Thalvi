@@ -236,7 +236,7 @@ impl EngineLink {
             problem: None,
         });
         let (feeding_tx, feeding) = watch::channel(false);
-        let (watch_enabled, watch_enabled_rx) = watch::channel(config.stt.learn_from_corrections());
+        let (watch_enabled, watch_enabled_rx) = watch::channel(config.stt.learn_from_corrections);
         let (quitting, quitting_rx) = watch::channel(false);
         let (key, key_state) = HoldInput::new();
         let (stopped_tx, stopped) = std_mpsc::channel();
@@ -1127,7 +1127,7 @@ impl<S: Rig> Runner<S> {
 
     async fn run(mut self) {
         let config = self.config.clone();
-        self.set_learning(config.stt.learn_from_corrections());
+        self.set_learning(config.stt.learn_from_corrections);
         self.start(config).await;
         while let Flow::Continue = Box::pin(self.step()).await {}
         stop_watch(&mut self.watch_cancel);
@@ -1701,7 +1701,7 @@ impl<S: Rig> Runner<S> {
             self.publisher
                 .update(|view| view.wake_words = config.wake.enabled());
             self.take_history(&config);
-            self.set_learning(config.stt.learn_from_corrections());
+            self.set_learning(config.stt.learn_from_corrections);
             self.config = config;
             return;
         }
@@ -1744,7 +1744,7 @@ impl<S: Rig> Runner<S> {
                     view.wake_words = config.wake.enabled();
                 });
                 self.take_history(&config);
-                self.set_learning(config.stt.learn_from_corrections());
+                self.set_learning(config.stt.learn_from_corrections);
                 self.config = config;
                 self.load_speech_model();
                 self.open_microphone().await;
@@ -4247,8 +4247,7 @@ mod tests {
                 .await
                 .expect("the runner applied the change without a rebuild");
             assert_eq!(
-                self.runner.config.stt.learn_from_corrections(),
-                retune,
+                self.runner.config.stt.learn_from_corrections, retune,
                 "{label}: the switch was applied"
             );
             if !retune {
@@ -4258,7 +4257,7 @@ mod tests {
                 tokio::time::timeout(WAIT, Box::pin(self.runner.handle(control)))
                     .await
                     .expect("the runner applied the change without a rebuild");
-                assert!(self.runner.config.stt.learn_from_corrections(), "{label}");
+                assert!(self.runner.config.stt.learn_from_corrections, "{label}");
             }
         }
     }
@@ -4455,7 +4454,6 @@ mod tests {
     fn only_a_capture_that_was_not_delivered_fails_as_a_delivery() {
         let finished = |delivered| Finished {
             delivered,
-            text_delivery: None,
             maybe_partial: false,
             notice: "Done.".to_owned(),
             headline: "Done".to_owned(),

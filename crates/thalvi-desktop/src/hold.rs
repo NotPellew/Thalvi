@@ -366,15 +366,8 @@ pub struct KeyState {
     hold: Option<u64>,
     /// Which row's Hold key is down.
     hold_row: Option<usize>,
-    /// The action of the latest press, or of the Hold that is down.
-    pub kind: Action,
-    /// The mode of the latest press.
-    pub mode: KeyMode,
     /// The down Hold press's release.
     release: Cutoff,
-    /// Where the latest press that waited to be told from a chord went down among the queued
-    /// frames: the frames since then are the capture's.
-    since: Option<Order>,
     /// The presses after the latest forgotten one, oldest first.
     log: std::collections::VecDeque<Impulse>,
     /// The number of the latest press the log no longer holds.
@@ -833,9 +826,6 @@ impl HoldInput {
                 return false;
             }
             state.presses += 1;
-            state.kind = action;
-            state.mode = mode;
-            state.since = since;
             state.push(Impulse {
                 number: state.presses,
                 row,
@@ -856,9 +846,6 @@ impl HoldInput {
         }
         if down {
             state.presses += 1;
-            state.kind = action;
-            state.mode = mode;
-            state.since = since;
             state.release = Cutoff::default();
             let impulse = Impulse {
                 number: state.presses,

@@ -103,7 +103,7 @@ impl RecognizerSession for RealtimeSession {
                 Some(Ok(Event::SpeechComplete { text, .. })) => {
                     return Ok(RecognizerEvent::Final(text));
                 }
-                Some(Ok(Event::SpeechStart { .. } | Event::SpeechEnd { .. })) => {}
+                Some(Ok(Event::SpeechStart | Event::SpeechEnd)) => {}
                 Some(Ok(Event::Error { message })) => {
                     return Err(RecognizerError::Reported {
                         speech: self.speech.clone(),

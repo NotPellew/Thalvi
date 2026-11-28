@@ -32,9 +32,9 @@ export type Status =
     }
   | { state: "writing"; target: string | null; text: string } // the writing model is at work; text is what has come in so far; cancellable until the paste
   | { state: "thinking"; target: string | null } // the writing model is reasoning and has written no text yet; cancellable
-  | { state: "working"; target: string | null; route: Route; cancellable: boolean } // cancellable until delivery starts
-  | { state: "transcribing"; target: string | null; route: Route; cancellable: boolean }
-  | { state: "finishing"; target: string | null; route: Route; cancellable: boolean } // a released hold whose recognizer is catching up; cancellable
+  | { state: "working"; target: string | null; route: Route } // delivery has started; the capture can no longer be cancelled
+  | { state: "transcribing"; target: string | null; route: Route }
+  | { state: "finishing"; target: string | null; route: Route } // a released hold whose recognizer is catching up; cancellable
   | { state: "cleaningUp"; target: string | null } // a dictation is being cleaned before it is pasted; cancellable
   | { state: "done"; target: string | null; route: Route; notice: string }
   | { state: "failed"; notice: string; headline: string; causes: string[]; kind: FailureKind; offer: LighterModel | null } // headline: notice in one short line for the overlay; causes: the technical chain behind it, for the error report; offer: a lighter on-device model to switch to after a cant-keep-up failure
@@ -272,8 +272,6 @@ export interface SpeechModelInfo {
   languages: string[];
   /** Every file is on disk and matches its checksum. */
   cached: boolean;
-  /** Whether recognition favours the word list. */
-  word_list: boolean;
 }
 
 /** A wake head Thalvi can download, as the Rust catalog describes it. */

@@ -252,7 +252,6 @@ impl View {
             Sample::Working => Status::Working {
                 target: None,
                 route: CaptureRoute::Paste,
-                cancellable: false,
             },
             Sample::Pending => Status::Pending {
                 target: None,
@@ -439,10 +438,6 @@ impl View {
                     | Status::CleaningUp { .. }
                     | Status::Thinking { .. }
                     | Status::StartingChat { .. }
-                    | Status::Working {
-                        cancellable: true,
-                        ..
-                    }
             )
     }
 
@@ -871,7 +866,6 @@ mod tests {
             Status::Working {
                 target: None,
                 route: CaptureRoute::Paste,
-                cancellable: false,
             },
             0.0,
         );
@@ -894,7 +888,6 @@ mod tests {
         let working = Status::Working {
             target: None,
             route: CaptureRoute::Paste,
-            cancellable: false,
         };
         let done = Status::Done {
             target: None,
