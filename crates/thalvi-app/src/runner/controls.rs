@@ -320,7 +320,6 @@ impl Case {
             while matches!(
                 *updates.borrow_and_update(),
                 Status::Working {
-                    cancellable: false,
                     ..
                 }
             ) {
@@ -395,7 +394,6 @@ impl Case {
             && !matches!(
                 status,
                 Status::Working {
-                    cancellable: false,
                     ..
                 }
             )

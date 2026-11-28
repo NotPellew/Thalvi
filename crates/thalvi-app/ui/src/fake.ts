@@ -92,7 +92,7 @@ function script(): Status[] {
     { state: "capturing", target: slack, committed: SENTENCE, partial: null, notice: null },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: true, pauseMs: 2500, copies: false },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: false, pauseMs: 2500, copies: false },
-    { state: "working", target: slack, route: "submit", cancellable: false },
+    { state: "working", target: slack, route: "submit" },
     { state: "done", target: slack, route: "submit", notice: "Sent" },
     { state: "paused" },
     { state: "listening" },
@@ -107,7 +107,7 @@ function script(): Status[] {
     { state: "starting", target: "Firefox" },
     { state: "capturing", target: "Firefox", committed: "", partial: null, notice: null },
     { state: "pending", target: "Firefox", route: "task", text: "open the calendar", waitingForQuiet: false, pauseMs: 2500, copies: false },
-    { state: "working", target: "Firefox", route: "task", cancellable: true },
+    { state: "working", target: "Firefox", route: "task" },
     { state: "done", target: "Firefox", route: "task", notice: "Opened the calendar" },
   ];
 }

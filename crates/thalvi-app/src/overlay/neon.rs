@@ -989,7 +989,6 @@ mod tests {
             Status::Transcribing {
                 target: Some("Editor".to_owned()),
                 route: CaptureRoute::Paste,
-                cancellable: true,
             },
             0.0,
         );
@@ -1110,7 +1109,6 @@ mod tests {
         let working = Status::Working {
             target: None,
             route: CaptureRoute::Paste,
-            cancellable: false,
         };
         let done = Status::Done {
             target: None,

@@ -218,18 +218,8 @@ pub fn can_cancel(status: &Status) -> bool {
             | Status::Writing { .. }
             | Status::Thinking { .. }
             | Status::StartingChat { .. }
-            | Status::Working {
-                cancellable: true,
-                ..
-            }
-            | Status::Transcribing {
-                cancellable: true,
-                ..
-            }
-            | Status::Finishing {
-                cancellable: true,
-                ..
-            }
+            | Status::Transcribing { .. }
+            | Status::Finishing { .. }
             | Status::CleaningUp { .. }
     )
 }
@@ -511,7 +501,6 @@ mod tests {
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Task,
-                    cancellable: false,
                 },
                 Icon::Working,
                 "Thalvi: working",
@@ -520,7 +509,6 @@ mod tests {
                 Status::Working {
                     target: Some(kitty()),
                     route: CaptureRoute::Task,
-                    cancellable: true,
                 },
                 Icon::Working,
                 "Thalvi: working",
@@ -675,10 +663,9 @@ mod tests {
 
     #[test]
     fn a_capture_can_be_cancelled_until_the_delivery_starts() {
-        let working = |cancellable| Status::Working {
+        let working = Status::Working {
             target: Some(kitty()),
             route: CaptureRoute::Task,
-            cancellable,
         };
         for (status, cancellable) in [
             (Status::Paused, false),
@@ -704,8 +691,21 @@ mod tests {
                 },
                 true,
             ),
-            (working(true), true),
-            (working(false), false),
+            (working, false),
+            (
+                Status::Transcribing {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Paste,
+                },
+                true,
+            ),
+            (
+                Status::Finishing {
+                    target: Some(kitty()),
+                    route: CaptureRoute::Paste,
+                },
+                true,
+            ),
             (
                 Status::Failed {
                     kind: FailureKind::Other,

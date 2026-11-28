@@ -401,7 +401,7 @@ describe("applying a change", () => {
   });
 
   const CAPTURING: Status = { state: "capturing", target: null, committed: "", partial: null, notice: null };
-  const DELIVERING: Status = { state: "working", target: null, route: "paste", cancellable: false };
+  const DELIVERING: Status = { state: "working", target: null, route: "paste" };
   const flipSwitch = (label: string) => (): void => { flip(control(label, "input")); };
   const pickLook = (): void => { (root.querySelector('[data-choice="holo"] input') as HTMLInputElement).click(); };
 
@@ -1478,7 +1478,7 @@ describe("the Recognition page", () => {
     stub.emit(capturing);
     await act();
     expect(where(APPLIED_LATER_TEXT)).toBe(expected);
-    for (const status of [{ state: "working", target: null, route: "paste", cancellable: false }, { state: "listening" }, capturing] as const) stub.emit(status);
+    for (const status of [{ state: "working", target: null, route: "paste" }, { state: "listening" }, capturing] as const) stub.emit(status);
     await settle();
     expect(where(APPLIED_TEXT)).toBe(expected);
     edit("LLM Gateway");
@@ -1909,7 +1909,7 @@ describe("the next dictation summary and state words", () => {
     ["pending", { state: "pending", target: null, route: "paste", text: "hi", waitingForQuiet: false, pauseMs: 0, copies: false }, "Ready"],
     ["writing", { state: "writing", target: null, text: "" }, "Ready"],
     ["thinking", { state: "thinking", target: null }, "Ready"],
-    ["working", { state: "working", target: null, route: "paste", cancellable: true }, "Ready"],
+    ["working", { state: "working", target: null, route: "paste" }, "Ready"],
     ["done", { state: "done", target: null, route: "paste", notice: "Pasted" }, "Ready"],
     ["loading", { state: "loading", notice: "Loading the speech model." }, "Loading the speech model."],
     ["paused", { state: "paused" }, "Paused — resume to dictate"],
@@ -4133,7 +4133,7 @@ describe("last dictation", () => {
     const calls = stub.backend.getDraft.mock.calls.length;
     for (const state of [
       { state: "capturing", target: "foot", committed: "", partial: null, notice: null },
-      { state: "working", target: "foot", route: "paste", cancellable: false },
+      { state: "working", target: "foot", route: "paste" },
     ] as const) stub.emit(state);
     await settle();
     expect(stub.backend.getDraft.mock.calls.length).toBe(calls);

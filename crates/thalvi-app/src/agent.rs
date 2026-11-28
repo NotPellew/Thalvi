@@ -413,11 +413,7 @@ fn phase(status: &watch::Receiver<Status>) -> &'static str {
         Status::Starting { loading: true, .. } | Status::Loading { .. } => "loading",
         Status::Starting { .. } | Status::Capturing { .. } => "capturing",
         Status::Pending { .. } => "pending",
-        Status::Working {
-            cancellable: true, ..
-        }
-        | Status::Transcribing { .. }
-        | Status::Finishing { .. } => "transcribing",
+        Status::Transcribing { .. } | Status::Finishing { .. } => "transcribing",
         Status::CleaningUp { .. } => "cleaning",
         Status::Working { .. } => "delivering",
         Status::Writing { .. } | Status::Thinking { .. } | Status::StartingChat { .. } => "writing",
@@ -556,18 +552,8 @@ fn capturing(status: &Status) -> bool {
             | Status::Writing { .. }
             | Status::Thinking { .. }
             | Status::StartingChat { .. }
-            | Status::Working {
-                cancellable: true,
-                ..
-            }
-            | Status::Transcribing {
-                cancellable: true,
-                ..
-            }
-            | Status::Finishing {
-                cancellable: true,
-                ..
-            }
+            | Status::Transcribing { .. }
+            | Status::Finishing { .. }
             | Status::CleaningUp { .. }
     )
 }
@@ -659,7 +645,6 @@ async fn cancel(running: &impl Running, wait: Duration) -> String {
             matches!(
                 &*current,
                 Status::Working {
-                    cancellable: false,
                     ..
                 }
             ),
@@ -1271,7 +1256,6 @@ mod tests {
                 (false, Status::Capturing { .. }) => self.set_status(Status::Working {
                     target: None,
                     route: CaptureRoute::Paste,
-                    cancellable: false,
                 }),
                 _ => {}
             }
@@ -2297,20 +2281,18 @@ mod tests {
                 "ready",
             ),
             (
-                Status::Working {
+                Status::Transcribing {
                     target: None,
                     route: CaptureRoute::Paste,
-                    cancellable: true,
                 },
                 "transcribing",
-                "working",
+                "transcribing",
                 "ready",
             ),
             (
                 Status::Working {
                     target: None,
                     route: CaptureRoute::Paste,
-                    cancellable: false,
                 },
                 "delivering",
                 "working",
@@ -2780,7 +2762,6 @@ mod tests {
         let working = Status::Working {
             target: None,
             route: CaptureRoute::Paste,
-            cancellable: false,
         };
         for (case, status, request, expected) in [
             (
