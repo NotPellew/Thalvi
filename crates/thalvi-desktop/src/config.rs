@@ -1663,6 +1663,10 @@ mod tests {
                 r#"{"history": {"audio": true}}"#.to_owned(),
                 "unknown field `audio`",
             ),
+            (
+                r#"{"themes": {"version": 1}}"#.to_owned(),
+                "unknown field `themes`",
+            ),
         ]
     }
 

@@ -622,6 +622,10 @@ mod tests {
         );
         assert_eq!(saved.wake.conversation().threshold.get(), 0.65);
         assert_eq!(reloaded, saved);
+        assert!(
+            !serde_json::to_string(&saved).unwrap().contains("themes"),
+            "a save never writes themes"
+        );
         assert_eq!(
             (
                 saved.recordings.metrics,

@@ -1944,23 +1944,24 @@ mod tests {
     }
 
     #[test]
-    fn built_in_defaults_match_the_overlay_and_settings_literals() {
-        let neon = defaults_of(Look::Neon);
-        assert_eq!(neon.dark.background.to_hex(), "#020617");
-        assert_eq!(neon.light.as_ref().unwrap().background.to_hex(), "#e8eff7");
-        assert_eq!(neon.dark.accent.to_hex(), "#2bff88");
-        assert_eq!(neon.light.as_ref().unwrap().on_accent.to_hex(), "#ffffff");
-        let holo = defaults_of(Look::Holo);
-        assert_eq!(holo.dark.accent.to_hex(), "#6bf8ff");
-        assert_eq!(holo.dark.border.to_hex(), "#5d92b4");
-        assert_eq!(holo.dark.quiet.to_hex(), "#8fb3c4");
-        assert!(holo.dark.scanlines && holo.dark.corners && holo.dark.shine);
-        assert_eq!(holo.dark.chamfer, 7);
-        let gunmetal = defaults_of(Look::Gunmetal);
-        assert_eq!(gunmetal.dark.raised.to_hex(), "#5c5c60");
-        assert_eq!(gunmetal.dark.border_width, 5);
-        assert_eq!(gunmetal.dark.chamfer, 9);
-        assert_eq!(gunmetal.dark.mesh, 0.06);
+    fn each_look_and_scheme_draws_the_captured_built_in_palette() {
+        // Captured from `Style::resolve(look, None)` on the base with no `themes` key.
+        let cases: &[(&str, bool, &str, &str)] = &[
+            ("neon", true, "dark", r#"Scheme { background: Color([2, 6, 23, 255]), surface: Color([4, 18, 46, 255]), raised: Color([6, 26, 61, 255]), text: Color([234, 255, 243, 255]), muted: Color([156, 199, 180, 255]), border: Color([18, 49, 94, 255]), accent: Color([43, 255, 136, 255]), on_accent: Color([2, 18, 10, 255]), secondary: Color([59, 130, 246, 255]), pending: Color([255, 194, 75, 255]), done: Color([43, 255, 136, 255]), failed: Color([255, 107, 94, 255]), live: Color([18, 49, 94, 255]), working: Color([156, 199, 180, 153]), quiet: Color([156, 199, 180, 255]), font_family: "system-ui, -apple-system, \"Segoe UI\", sans-serif", mono_family: "ui-monospace, \"SF Mono\", SFMono-Regular, Menlo, Consolas, monospace", font_scale: 1.0, font_weight: 700, tracking: 0.12, spacing: 1.0, radius: 6, chamfer: 0, border_width: 1, opacity: 0.92, glow: 0.25, mesh: 0.0, scanlines: false, corners: false, shine: false, pulse: true }"#),
+            ("neon", false, "light", r#"Scheme { background: Color([232, 239, 247, 255]), surface: Color([247, 251, 255, 255]), raised: Color([211, 226, 243, 255]), text: Color([7, 24, 46, 255]), muted: Color([61, 90, 115, 255]), border: Color([185, 203, 221, 255]), accent: Color([0, 122, 67, 255]), on_accent: Color([255, 255, 255, 255]), secondary: Color([11, 61, 145, 255]), pending: Color([138, 90, 0, 255]), done: Color([0, 122, 67, 255]), failed: Color([180, 35, 24, 255]), live: Color([185, 203, 221, 255]), working: Color([61, 90, 115, 153]), quiet: Color([61, 90, 115, 255]), font_family: "system-ui, -apple-system, \"Segoe UI\", sans-serif", mono_family: "ui-monospace, \"SF Mono\", SFMono-Regular, Menlo, Consolas, monospace", font_scale: 1.0, font_weight: 700, tracking: 0.12, spacing: 1.0, radius: 6, chamfer: 0, border_width: 1, opacity: 0.94, glow: 0.25, mesh: 0.0, scanlines: false, corners: false, shine: false, pulse: true }"#),
+            ("holo", true, "dark", r#"Scheme { background: Color([12, 24, 32, 255]), surface: Color([10, 28, 36, 115]), raised: Color([15, 26, 34, 255]), text: Color([223, 233, 239, 255]), muted: Color([142, 167, 181, 255]), border: Color([93, 146, 180, 255]), accent: Color([107, 248, 255, 255]), on_accent: Color([4, 20, 26, 255]), secondary: Color([107, 248, 255, 255]), pending: Color([255, 194, 75, 255]), done: Color([43, 255, 136, 255]), failed: Color([255, 107, 94, 255]), live: Color([107, 248, 255, 255]), working: Color([107, 248, 255, 255]), quiet: Color([143, 179, 196, 255]), font_family: "system-ui, -apple-system, \"Segoe UI\", sans-serif", mono_family: "ui-monospace, \"SF Mono\", SFMono-Regular, Menlo, Consolas, monospace", font_scale: 1.0, font_weight: 700, tracking: 0.18, spacing: 1.0, radius: 0, chamfer: 7, border_width: 1, opacity: 0.45, glow: 0.6, mesh: 0.05, scanlines: true, corners: true, shine: true, pulse: true }"#),
+            ("gunmetal", true, "dark", r#"Scheme { background: Color([15, 16, 18, 255]), surface: Color([20, 21, 23, 255]), raised: Color([92, 92, 96, 255]), text: Color([223, 233, 239, 255]), muted: Color([142, 167, 181, 255]), border: Color([58, 58, 61, 255]), accent: Color([107, 248, 255, 255]), on_accent: Color([107, 248, 255, 255]), secondary: Color([107, 248, 255, 255]), pending: Color([255, 194, 75, 255]), done: Color([43, 255, 136, 255]), failed: Color([255, 107, 94, 255]), live: Color([107, 248, 255, 255]), working: Color([107, 248, 255, 255]), quiet: Color([143, 179, 196, 255]), font_family: "system-ui, -apple-system, \"Segoe UI\", sans-serif", mono_family: "ui-monospace, \"SF Mono\", SFMono-Regular, Menlo, Consolas, monospace", font_scale: 1.0, font_weight: 700, tracking: 0.18, spacing: 1.0, radius: 2, chamfer: 9, border_width: 5, opacity: 1.0, glow: 0.6, mesh: 0.06, scanlines: false, corners: false, shine: false, pulse: true }"#),
+        ];
+        for (name, dark, scheme_name, expected) in cases {
+            let look = match *name {
+                "neon" => Look::Neon,
+                "holo" => Look::Holo,
+                _ => Look::Gunmetal,
+            };
+            let style = Style::resolve(look, None);
+            assert_eq!(format!("{:?}", style.scheme(*dark)), *expected, "{name} {scheme_name}");
+            assert_eq!(style.light.is_some(), *name == "neon", "{name}");
+        }
     }
 
     fn usable(look: Look, json: &str) -> Overrides {
