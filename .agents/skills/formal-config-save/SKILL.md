@@ -84,10 +84,12 @@ sends two settings requests at once reaches it without the user, because
 
 ## Covers
 
-Sync commit: `803bc91bd357c0f6995b92d9715323d2bf5e793b`. [source.json](source.json)
+Sync commit: `e85cdda9c3f18ade3d5f0f03bd02e802837ec2c3`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 The notes below say why each covered change since the model was written added no writer.
+
+Dropping unused code (#805) changes only reads: `settings.rs`, `runner.rs` and `delivery.rs` use the public `learn_from_corrections` field instead of the removed getter, and `agent.rs` drops a dead `Working { cancellable: true }` arm from the state labels. `Store::save`, `AppState::remember`, `apply`, `serve_requests`, `commands::save` and `agent::settings_set` keep their locks, writes and apply steps, so the model actions are unchanged.
 
 Covers: crates/thalvi-app/src/settings.rs crates/thalvi-desktop/src/private.rs crates/thalvi-app/src/commands.rs crates/thalvi-app/src/app.rs crates/thalvi-app/src/agent.rs crates/thalvi-desktop/src/host/channel.rs crates/thalvi-desktop/src/host/windows/pipe.rs '.agents/skills/formal-config-save/**'
 
