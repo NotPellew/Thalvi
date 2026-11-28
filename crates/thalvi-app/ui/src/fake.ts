@@ -149,7 +149,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
       license: "NVIDIA Open Model License",
       languages: ["English"],
       cached: false,
-      word_list: true,
     },
     {
       name: "unified_160ms",
@@ -160,7 +159,6 @@ export function fakeBackend(params: URLSearchParams): Backend {
       license: "OpenMDW-1.1",
       languages: UNIFIED_LANGUAGES,
       cached: false,
-      word_list: true,
     },
   ];
   const speak = (progress: SpeechModelProgress): void => {

@@ -336,7 +336,7 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
     if let Some(stt) = settings.get_mut("stt").and_then(Value::as_object_mut) {
         stt.insert(
             "learn_from_corrections".to_owned(),
-            config.stt.learn_from_corrections().into(),
+            config.stt.learn_from_corrections.into(),
         );
     }
     for entry in entries_of(&mut settings) {
@@ -919,9 +919,9 @@ mod tests {
         settings["stt"]["learn_from_corrections"] = json!(true);
         let on = store.save(settings.clone(), &defaults).unwrap();
         assert_eq!(file()["stt"]["learn_from_corrections"], json!(true));
-        assert!(on.stt.learn_from_corrections());
+        assert!(on.stt.learn_from_corrections);
         assert!(
-            store.load().unwrap().stt.learn_from_corrections(),
+            store.load().unwrap().stt.learn_from_corrections,
             "it survives a restart"
         );
 

@@ -1117,8 +1117,8 @@ describe("the word list", () => {
   });
 
   it.each([
-    ["Whisper Turbo on the CPU", "whisper_turbo_cpu", cant("On this computer")],
-    ["Whisper Turbo on the Vulkan GPU", "whisper_turbo_vulkan", cant("On this computer")],
+    ["Whisper Turbo on the CPU", "whisper_turbo_cpu", FAVOURED],
+    ["Whisper Turbo on the Vulkan GPU", "whisper_turbo_vulkan", FAVOURED],
     ["Nemotron", "nemotron_160ms", FAVOURED],
     ["Parakeet", "parakeet_tdt_v3", FAVOURED],
     ["no model", undefined, FAVOURED],
@@ -1134,24 +1134,6 @@ describe("the word list", () => {
     expect((rowOf("Word list").querySelector('input[aria-label="New word"]') as HTMLInputElement).disabled).toBe(false);
   });
 
-  it("updates the hint when Use switches between a recognizer that ignores the list and one that favours it", async () => {
-    const stub = stubBackend({
-      ...SETTINGS,
-      stt: stt([device("whisper_turbo_cpu"), { ...device("nemotron_160ms", false), id: "nemotron", name: "Nemotron Streaming" }]),
-    });
-    stub.backend.listSpeechModels.mockResolvedValue(listedModels());
-    mountSettings(root, stub.backend);
-    await settle();
-    goTo("recognition");
-    expect(wordHint()).toBe(cant("On this computer"));
-    use("Nemotron Streaming");
-    await settle();
-    expect(wordHint()).toBe(FAVOURED);
-    use("On this computer");
-    await settle();
-    expect(wordHint()).toBe(cant("On this computer"));
-    expect(stub.backend.wordListSupport).not.toHaveBeenCalled();
-  });
 });
 
 describe("learning from corrections", () => {

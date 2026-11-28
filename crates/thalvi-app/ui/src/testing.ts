@@ -117,7 +117,6 @@ export const NEMOTRON: SpeechModelInfo = {
   license: "NVIDIA Open Model License",
   languages: ["English"],
   cached: false,
-  word_list: true,
 };
 
 export const UNIFIED: SpeechModelInfo = {
@@ -129,7 +128,6 @@ export const UNIFIED: SpeechModelInfo = {
   license: "OpenMDW-1.1",
   languages: UNIFIED_LANGUAGES,
   cached: false,
-  word_list: true,
 };
 
 export const WHISPER: SpeechModelInfo = {
@@ -141,7 +139,6 @@ export const WHISPER: SpeechModelInfo = {
   license: "MIT",
   languages: ["English", "German"],
   cached: false,
-  word_list: false,
 };
 
 /** A backend whose calls are spies and whose events the test emits. */

@@ -342,8 +342,6 @@ pub struct SpeechModelInfo {
     pub languages: &'static [&'static str],
     /// Every file is on disk at its pinned size.
     pub cached: bool,
-    /// Whether recognition favours the word list.
-    pub word_list: bool,
 }
 
 /// One file of a catalog speech model, stored under `<model>.<file>`.
@@ -1065,7 +1063,6 @@ impl ModelStore {
                 license: model.license(),
                 languages: model.languages(),
                 cached: self.is_cached(&assets).await,
-                word_list: true,
             });
         }
         models
@@ -1084,7 +1081,6 @@ impl ModelStore {
                 license: "MIT",
                 languages: &["English", "German"],
                 cached,
-                word_list: true,
             })
             .to_vec()
     }

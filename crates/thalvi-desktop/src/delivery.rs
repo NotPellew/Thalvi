@@ -185,7 +185,7 @@ where
                         bound,
                         &request.text,
                         false,
-                        config.stt.learn_from_corrections(),
+                        config.stt.learn_from_corrections,
                     )
                     .await
                 }
