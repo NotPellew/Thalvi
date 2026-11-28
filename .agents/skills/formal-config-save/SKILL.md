@@ -84,7 +84,7 @@ sends two settings requests at once reaches it without the user, because
 
 ## Covers
 
-Sync commit: `c5f94347508ef7a59e8379eb31e80b93fabe2bae`. [source.json](source.json)
+Sync commit: `eb833fad859caffc8faca25c25ca3a123f99c46e`. [source.json](source.json)
 records whole-file hashes, so a changed file cannot silently reuse this model.
 Matching hashes establish synchronization only, not correctness of the model.
 The notes below say why each covered change since the model was written added no writer.
