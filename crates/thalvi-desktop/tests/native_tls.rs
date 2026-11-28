@@ -17,7 +17,7 @@ use thalvi_desktop::realtime::RealtimeRecognizer;
 use thalvi_desktop::recognizer::{Recognizer, RecognizerEvent, RecognizerSession};
 use thalvi_desktop::report::{CertificateProblem, UserError};
 use thalvi_desktop::secondary::{LiveRequest, OpenAiLive, SecondaryStt};
-use thalvi_desktop::writing::{Writing, WritingError};
+use thalvi_desktop::writing::{Destination, Writing, WritingError};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -107,16 +107,19 @@ async fn check(fixture: &Fixture) {
             assert_eq!(error.headline(), "Server certificate problem");
             assert!(error.to_string().contains(&problem.to_string()));
             assert!(error.to_string().contains("Nothing was delivered"));
-            let writer = Writing::new(
-                &format!("https://{host}:{port}/v1"),
-                "fixture",
-                String::new(),
-                None,
-                vec![],
-                vec![],
-            )
+            let writer: Writing = serde_json::from_value(serde_json::json!({
+                "url": format!("https://{host}:{port}/v1"),
+                "model": "fixture",
+            }))
             .unwrap();
-            let error = writer.start(&client, "Test").await.err().unwrap();
+            let Destination::Manual(endpoint) = writer.destination() else {
+                panic!("the fixture has a manual writing endpoint");
+            };
+            let error = endpoint
+                .ask(&client, writer.prompt_for("Test", None), "Test")
+                .await
+                .err()
+                .unwrap();
             assert_eq!(error, WritingError::Certificate(problem));
             assert_eq!(error.headline(), "Server certificate problem");
             assert!(error.to_string().contains(&problem.to_string()));

@@ -2708,7 +2708,7 @@ where
         let mut reply = match bounded(
             &mut self.cancel,
             deadline,
-            endpoint.ask_with(&self.http, writing::CLEANUP_PROMPT, &raw),
+            endpoint.ask(&self.http, writing::CLEANUP_PROMPT, &raw),
         )
         .await
         {
@@ -2846,7 +2846,7 @@ where
         let mut reply = match bounded(
             &mut self.cancel,
             deadline,
-            endpoint.ask_with(&self.http, prompt, &words),
+            endpoint.ask(&self.http, prompt, &words),
         )
         .await
         .finish()
