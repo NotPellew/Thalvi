@@ -91,6 +91,13 @@ The notes below say why each covered change since the model was written added no
 
 Covers: crates/thalvi-app/src/settings.rs crates/thalvi-desktop/src/private.rs crates/thalvi-app/src/commands.rs crates/thalvi-app/src/app.rs crates/thalvi-app/src/agent.rs crates/thalvi-desktop/src/host/channel.rs crates/thalvi-desktop/src/host/windows/pipe.rs '.agents/skills/formal-config-save/**'
 
+Dropping the old config formats (#804) leaves `Store::start` writing only on a first start: the
+rewrites of a file with old keys or a removed speech entry are gone. That write still happens in
+`AppState::start` before `setup` registers the state, serves requests or opens Settings, so no
+other writer exists yet. `setup` no longer shows the removed-entry dialog and `agent.rs` only loses
+a test of old entry flags; no writer, lock, temporary file or apply path changed, so the model and
+its three invariants are unchanged.
+
 The app styles change (#464) registers
 two read-only Settings commands in `start` (the current app and why app styles
 may not apply) and adds agent tests for `writing.apps`; `writing.apps` is
