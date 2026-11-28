@@ -246,6 +246,26 @@ fn kept_in_context(tongue: Tongue, text: &str, tokens: &[Word], at: usize, last:
                         || word == "hundred"
                         || english_scale(word).is_some())
             };
+            // Digits are a number only with no letter glued to them but "am" or "pm", so "2FA" is a
+            // word and "2pm" a number.
+            let digits_start = |rest: &str| {
+                let after = rest.trim_start_matches(|character: char| character.is_ascii_digit());
+                let digits = after.len() < rest.len();
+                let after = match after.get(..2) {
+                    Some(suffix)
+                        if suffix.eq_ignore_ascii_case("am")
+                            || suffix.eq_ignore_ascii_case("pm") =>
+                    {
+                        &after[2..]
+                    }
+                    _ => after,
+                };
+                digits && !after.starts_with(char::is_alphabetic)
+            };
+            let digits_end = |rest: &str| {
+                let before = rest.trim_end_matches(|character: char| character.is_ascii_digit());
+                before.len() < rest.len() && !before.ends_with(char::is_alphabetic)
+            };
             let range_after = next == Some("to") && {
                 let to = &tokens[at + 1];
                 let following: Vec<&str> = tokens[at + 2..]
@@ -254,9 +274,7 @@ fn kept_in_context(tongue: Tongue, text: &str, tokens: &[Word], at: usize, last:
                     .map(|word| word.lower.as_str())
                     .collect();
                 whitespace_between(text, &tokens[at], to)
-                    && (text[to.end..]
-                        .trim_start()
-                        .starts_with(|character: char| character.is_ascii_digit())
+                    && (digits_start(text[to.end..].trim_start())
                         || (tokens
                             .get(at + 2)
                             .is_some_and(|word| whitespace_between(text, to, word))
@@ -265,9 +283,7 @@ fn kept_in_context(tongue: Tongue, text: &str, tokens: &[Word], at: usize, last:
             let range_before = previous == Some("to") && {
                 let to = &tokens[at - 1];
                 whitespace_between(text, to, &tokens[at])
-                    && (text[..to.start]
-                        .trim_end()
-                        .ends_with(|character: char| character.is_ascii_digit())
+                    && (digits_end(text[..to.start].trim_end())
                         || at
                             .checked_sub(2)
                             .and_then(|index| tokens.get(index))
@@ -817,6 +833,9 @@ mod tests {
             ("One thing first.", "One thing first."),
             ("I talked to one person", "I talked to one person"),
             ("give one to a friend", "give one to a friend"),
+            ("Give one to 2FA support.", "Give one to 2FA support."),
+            ("Office hours are one to 2pm.", "Office hours are 1 to 2pm."),
+            ("Send Cybrex2 to one person.", "Send Cybrex2 to one person."),
             (
                 "Use the larger one. To 2 places.",
                 "Use the larger one. To 2 places.",
