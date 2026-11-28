@@ -198,14 +198,13 @@ impl Neon {
         let dot = match tone {
             Tone::Quiet => theme.state.quiet,
             Tone::Pending => theme.state.pending,
-            Tone::Working if theme.measures.pulse => {
+            Tone::Working => {
                 #[expect(clippy::cast_possible_truncation, reason = "a phase in seconds")]
                 let phase = (view.clock % art::DOT_PULSE.0) as f32;
                 theme
                     .blue
                     .faded(1.0 - art::DOT_PULSE.1 * (0.5 - 0.5 * (2.0 * PI * phase).cos()))
             }
-            Tone::Working => theme.blue,
             _ => theme.accent,
         };
         if !matches!(tone, Tone::Quiet | Tone::Working) {
@@ -213,12 +212,7 @@ impl Neon {
             canvas.rect(
                 (x - left, middle - radius, 2.0 * radius, 2.0 * radius),
                 radius,
-                &Fill::Solid(
-                    theme
-                        .dot_halo
-                        .unwrap_or(dot)
-                        .faded(opacity * theme.measures.glow_ratio),
-                ),
+                &Fill::Solid(dot.faded(opacity)),
             );
         }
         canvas.rect(
@@ -241,12 +235,8 @@ impl Neon {
         let now_ms = (view.clock * art::MILLIS_PER_SECOND) as f32;
         for (index, envelope) in (0u8..).zip(art::ENVELOPE) {
             let share = if moving {
-                let wobble = if theme.measures.pulse {
-                    let (base, amplitude, period, phase) = art::BAR_WOBBLE;
-                    base + amplitude * (now_ms / period + f32::from(index) * phase).sin()
-                } else {
-                    1.0
-                };
+                let (base, amplitude, period, phase) = art::BAR_WOBBLE;
+                let wobble = base + amplitude * (now_ms / period + f32::from(index) * phase).sin();
                 art::FLAT
                     + (1.0 - art::FLAT) * (self.shown * envelope * wobble * art::BAR_GAIN).min(1.0)
             } else {
@@ -286,7 +276,7 @@ fn pill_surface(canvas: &mut Canvas, theme: &Theme, tone: Tone, rect: (f32, f32,
         Tone::Failed => theme.state.failed,
         _ => theme.line,
     };
-    let radius = (rect.3 / 2.0 + theme.measures.radius_delta).max(0.0);
+    let radius = rect.3 / 2.0;
     shadow(canvas, rect, radius, theme);
     canvas.rect(rect, radius, &Fill::Solid(theme.glass));
     canvas.outline(rect, radius, border, theme.measures.border);
@@ -568,7 +558,7 @@ fn card(
         art::DRAFT_INSETS.0 * measures.spacing,
         art::DRAFT_INSETS.1 * measures.spacing,
     );
-    let radius = (art::CARD_RADIUS + measures.radius_delta).max(0.0);
+    let radius = art::CARD_RADIUS;
     let scale = canvas.scale_of();
     let width = (WIDTH - 2.0 * art::SIDE) * art::CARD_SHARE;
     let left = (WIDTH - width) / 2.0;
@@ -722,7 +712,7 @@ fn shadow(
                 height + spread,
             ),
             radius + spread,
-            &Fill::Solid(theme.shadow.faded(alpha * theme.measures.glow_ratio)),
+            &Fill::Solid(theme.shadow.faded(alpha)),
         );
     }
 }
@@ -730,10 +720,10 @@ fn shadow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use thalvi_desktop::{config::Look, theme::defaults_of};
+    use thalvi_desktop::{config::Look, theme::Style};
 
     fn dark() -> Theme {
-        Theme::resolve(&defaults_of(Look::Neon), true)
+        Theme::resolve(&Style::of(Look::Neon), true)
     }
 
     #[expect(

@@ -61,44 +61,12 @@ export interface AudioStatus {
   problem: string | null;
 }
 
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
-/** A JSON object, as the desktop keeps one look's changes. */
-export interface JsonObject { [key: string]: JsonValue }
-/** The saved custom styling: per-look changes, or why a look is suspended or unreadable. */
-export type Themes = { version?: number } & Partial<Record<Look, JsonObject>>;
-
 export type Ending = "paste" | "write" | "submit" | "task" | "scratch" | "cancel";
 export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
 export type SecondaryApi = "openai" | "meta";
 /** How a live OpenAI-compatible entry sends each capture. */
 export type OpenAiRequest = "transcriptions" | "chat";
 export type Look = "gunmetal" | "holo" | "neon";
-/** How a look's colours, sizes and effects reach a window, as CSS custom properties. */
-export type LookSurface = "settings" | "overlay";
-export interface LookProperty {
-  /** Dotted id, such as `colors.accent`. */
-  id: string;
-  label: string;
-  /** `colors`, `font`, `spacing`, `shape`, `border`, `surface`, `glow`, `decoration` or `motion`. */
-  category: string;
-  unit: "color" | "text" | "number" | "toggle";
-  min: number | null;
-  max: number | null;
-  step: number | null;
-  /** The looks the property applies to. */
-  looks: Look[];
-  surfaces: LookSurface[];
-}
-/** A resolved property value: a colour or font string, a number, or a switch. */
-export type LookValue = string | number | boolean;
-export type LookScheme = "light" | "dark";
-/** What Settings draws from: every property a look offers, each look's CSS properties and its resolved values. */
-export interface LookStyles {
-  properties: LookProperty[];
-  looks: Record<Look, Record<string, string>>;
-  schemes: Record<Look, LookScheme>;
-  values: Record<Look, Record<string, LookValue>>;
-}
 /** An overlay state the renderer can draw a preview for. */
 export type OverlayPreviewState = "live" | "quiet" | "working" | "pending" | "done" | "failed";
 export const OVERLAY_PREVIEW_STATES: readonly OverlayPreviewState[] = ["live", "quiet", "working", "pending", "done", "failed"];
@@ -234,8 +202,6 @@ export interface Settings {
   overlay: { show: boolean; draft: boolean };
   microphone: string | null;
   look: Look;
-  /** Custom styling, present only when the desktop holds something. */
-  themes?: Themes;
   update_channel: UpdateChannel;
   recordings: { metrics: boolean; text: boolean; audio: boolean };
   /** The keys Settings → Keys lists, in order. */
@@ -373,9 +339,10 @@ export interface Backend {
   /** An agent changed the saved settings or a switch the window reads from the OS; the window's own saves never fire this. */
   onSettingsChangedElsewhere(listener: () => void): void;
   getSettings(): Promise<Settings>;
-  /** The look model resolved into the CSS custom properties this window wears, and every property a look offers. */
-  getLookStyles(): Promise<LookStyles>;
-  onThemeChanged(listener: () => void): void;
+  /** Picks the Neon palette the overlay draws with, and the palette a preview draws with. */
+  setDark(dark: boolean): Promise<void>;
+  /** Reports the system colour scheme now and whenever it changes. */
+  onThemeChanged(listener: (dark: boolean) => void): void;
   /** Straight-alpha RGBA of one overlay state: width and height as u32 LE, then width * height * 4 bytes. */
   previewOverlay(state: OverlayPreviewState, scale: number): Promise<ArrayBuffer>;
   /** Says this window has its styles, so a show asked for meanwhile can happen. */

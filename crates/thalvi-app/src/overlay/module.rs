@@ -94,13 +94,7 @@ impl Module {
         )]
         let seconds = view.clock as f32;
         if let Some(wave) = &view.wave {
-            if let Some(glow) = glow(
-                &mut self.glows,
-                view.tone,
-                tone_color,
-                theme.measures.glow_ratio,
-                canvas.scale_of(),
-            ) {
+            if let Some(glow) = glow(&mut self.glows, view.tone, tone_color, canvas.scale_of()) {
                 halo(canvas, glow, wave_top, wave.smoothed);
             }
             let strands = if view.tone == Tone::Quiet {
@@ -114,7 +108,6 @@ impl Module {
                 strands,
                 seconds,
                 (SLOT.0 + art::WAVE_LEFT, wave_top),
-                theme.measures.pulse,
             );
         }
         if let Some(label) = &view.label {
@@ -160,7 +153,7 @@ impl Module {
             cancel_button(canvas, text, self.finish, theme);
         }
         canvas.clip(None);
-        line_strip(canvas, view, tone_color, self.finish, theme);
+        line_strip(canvas, view, tone_color, self.finish);
         complete
     }
 }
@@ -206,13 +199,9 @@ fn rule(canvas: &mut Canvas, theme: &Theme) {
 fn background(finish: Finish, theme: &Theme, scale: f32) -> Option<Canvas> {
     let mut canvas = Canvas::new(WIDTH, HEIGHT, scale)?;
     let mut shadow = Canvas::new(WIDTH, HEIGHT, scale)?;
-    let shoulder = art::SHOULDER + theme.measures.chamfer_delta;
-    let slant = art::SLANT + theme.measures.chamfer_delta;
-    let radius = if theme.measures.radius_delta == 0.0 {
-        0.0
-    } else {
-        theme.measures.radius
-    };
+    let shoulder = art::SHOULDER;
+    let slant = art::SLANT;
+    let radius = 0.0;
     shadow.rounded_polygon(
         &trapezoid([MODULE_X, art::SHADOW_OFFSET, MODULE_W, MODULE_H], shoulder),
         radius,
@@ -231,7 +220,7 @@ fn background(finish: Finish, theme: &Theme, scale: f32) -> Option<Canvas> {
             shade(&mut canvas, outer, shoulder, radius, &theme.metal);
             shade(&mut canvas, panel, shoulder, radius, &theme.face);
             hexes(&mut canvas, panel, shoulder, theme.mesh);
-            let bezel = art::FRAME_EDGE + theme.measures.border_delta * art::BEZEL_SHARE;
+            let bezel = art::FRAME_EDGE;
             shade(
                 &mut canvas,
                 [SLOT.0 - bezel, SLOT.1, SLOT_W + 2.0 * bezel, SLOT_H + bezel],
@@ -338,15 +327,11 @@ fn accents(canvas: &mut Canvas, scale: f32, shoulder: f32, theme: &Theme) -> Opt
         glow.stroke(
             piece,
             art::BRACKET_WIDTH,
-            &Fill::Solid(
-                theme
-                    .accent
-                    .faded(art::BRACKET_ALPHA * theme.measures.glow_ratio.max(1.0)),
-            ),
+            &Fill::Solid(theme.accent.faded(art::BRACKET_ALPHA)),
         );
     }
     glow.blur(art::BRACKET_BLUR);
-    canvas.draw(&glow, (0.0, 0.0), theme.measures.glow_ratio.min(1.0));
+    canvas.draw(&glow, (0.0, 0.0), 1.0);
     for piece in &pieces {
         canvas.stroke(piece, art::BRACKET_WIDTH, &Fill::Solid(theme.accent));
     }
@@ -371,10 +356,7 @@ fn shine(canvas: &mut Canvas, theme: &Theme, clock: f64) {
         (0.5, art::SHINE_COLOR),
         (1.0, TRANSPARENT),
     ];
-    canvas.clip_to(&trapezoid(
-        panel,
-        art::SHOULDER + theme.measures.chamfer_delta,
-    ));
+    canvas.clip_to(&trapezoid(panel, art::SHOULDER));
     canvas.rect(
         (x, panel[1], width, panel[3]),
         0.0,
@@ -455,20 +437,14 @@ fn hexes(canvas: &mut Canvas, [x, y, width, height]: [f32; 4], inset: f32, alpha
 }
 
 /// The soft glow behind the wave in `tone`'s colour, drawn once per tone.
-fn glow(
-    glows: &mut Vec<(Tone, Canvas)>,
-    tone: Tone,
-    color: Rgba,
-    strength: f32,
-    scale: f32,
-) -> Option<&Canvas> {
+fn glow(glows: &mut Vec<(Tone, Canvas)>, tone: Tone, color: Rgba, scale: f32) -> Option<&Canvas> {
     if !glows.iter().any(|(drawn, _)| *drawn == tone) {
         let (w, h) = art::WAVE_HALO;
         let mut canvas = Canvas::new(w + 2.0 * art::GLOW_PAD, h + 2.0 * art::GLOW_PAD, scale)?;
         canvas.rect(
             (art::GLOW_PAD, art::GLOW_PAD, w, h),
             h / 2.0,
-            &Fill::Solid(color.faded(art::HALO_ALPHA * strength)),
+            &Fill::Solid(color.faded(art::HALO_ALPHA)),
         );
         canvas.blur(art::HALO_BLUR);
         glows.push((tone, canvas));
@@ -480,22 +456,11 @@ fn glow(
 }
 
 /// Nine twisting strands, faded at both ends, with their top-left at `origin`.
-fn draw_wave(
-    canvas: &mut Canvas,
-    view: &View,
-    color: Rgba,
-    seconds: f32,
-    origin: (f32, f32),
-    pulse: bool,
-) {
+fn draw_wave(canvas: &mut Canvas, view: &View, color: Rgba, seconds: f32, origin: (f32, f32)) {
     let Some(wave) = &view.wave else {
         return;
     };
-    let (seconds, phase) = if pulse {
-        (seconds, wave.phase)
-    } else {
-        (0.0, 0.0)
-    };
+    let (seconds, phase) = (seconds, wave.phase);
     let [first, second, third, fourth] = art::STRAND_FREQUENCIES;
     let strand_a = |x: f32, p: f32| {
         (TAU * first.0 * x + p).sin() * first.2
@@ -664,7 +629,7 @@ fn ticker(
 /// The button's face in `finish`; the colour its × is drawn in.
 fn button_face(canvas: &mut Canvas, finish: Finish, theme: &Theme) {
     let (_, y, _, height) = CANCEL;
-    let radius = (art::BUTTON_RADIUS + theme.measures.radius_delta).max(0.0);
+    let radius = art::BUTTON_RADIUS;
     let fill = match finish {
         Finish::Gunmetal => Fill::Linear {
             from: (0.0, y),
@@ -674,12 +639,7 @@ fn button_face(canvas: &mut Canvas, finish: Finish, theme: &Theme) {
         Finish::Holo => Fill::Solid(art::BUTTON_GLASS),
     };
     canvas.rect(CANCEL, radius, &fill);
-    canvas.outline(
-        CANCEL,
-        radius,
-        theme.button_outline,
-        (art::BUTTON_RIM.0 + theme.measures.border_delta).clamp(0.0, art::BUTTON_RIM.1),
-    );
+    canvas.outline(CANCEL, radius, theme.button_outline, art::BUTTON_RIM.0);
 }
 
 fn cancel_button(canvas: &mut Canvas, text: &mut Text, finish: Finish, theme: &Theme) {
@@ -703,22 +663,17 @@ fn cancel_button(canvas: &mut Canvas, text: &mut Text, finish: Finish, theme: &T
 
 /// The glowing line along the module's bottom edge: full while listening, shrinking towards its
 /// middle through a countdown, a sweep while working.
-fn line_strip(canvas: &mut Canvas, view: &View, color: Rgba, finish: Finish, theme: &Theme) {
+fn line_strip(canvas: &mut Canvas, view: &View, color: Rgba, finish: Finish) {
     let inset = match finish {
         Finish::Gunmetal => art::SHOULDER + art::STRIP_INSETS.0,
         Finish::Holo => art::SHOULDER + art::STRIP_INSETS.1,
     };
-    let inset = inset + theme.measures.chamfer_delta;
     let full = MODULE_W - 2.0 * inset;
     let left = MODULE_X + inset;
     let y = MODULE_H - art::STRIP_WIDTH;
     if view.sweep {
         #[expect(clippy::cast_possible_truncation, reason = "a phase in 0..2")]
-        let phase = if theme.measures.pulse {
-            ((view.clock / art::SWEEP.0) % 2.0) as f32
-        } else {
-            0.5
-        };
+        let phase = ((view.clock / art::SWEEP.0) % 2.0) as f32;
         let travel = if phase <= 1.0 { phase } else { 2.0 - phase };
         let eased = 0.5 - 0.5 * (PI * travel).cos();
         let width = full * art::SWEEP.1;
@@ -757,7 +712,7 @@ fn line_strip(canvas: &mut Canvas, view: &View, color: Rgba, finish: Finish, the
     let width = full * share;
     let x = left + (full - width) / 2.0;
     // A soft glow under the line, then the line itself.
-    let glows = art::STRIP_GLOWS.map(|(spread, alpha)| (spread, alpha * theme.measures.glow_ratio));
+    let glows = art::STRIP_GLOWS;
     for (spread, alpha) in glows.into_iter().chain([(0.0, 1.0)]) {
         let stops = [
             (0.0, TRANSPARENT),
@@ -767,7 +722,7 @@ fn line_strip(canvas: &mut Canvas, view: &View, color: Rgba, finish: Finish, the
         ];
         canvas.rect(
             (x, y - spread, width, art::STRIP_WIDTH + 2.0 * spread),
-            (art::STRIP_RADIUS + spread + theme.measures.radius_delta).max(0.0),
+            art::STRIP_RADIUS + spread,
             &Fill::Linear {
                 from: (x, 0.0),
                 to: (x + width, 0.0),
@@ -783,19 +738,19 @@ mod tests {
     use thalvi_desktop::host::OverlayFrame;
 
     use super::*;
-    use thalvi_desktop::{config::Look, theme::defaults_of};
+    use thalvi_desktop::{config::Look, theme::Style};
 
     fn built_in(finish: Finish) -> Theme {
         let look = match finish {
             Finish::Gunmetal => Look::Gunmetal,
             Finish::Holo => Look::Holo,
         };
-        Theme::resolve(&defaults_of(look))
+        Theme::resolve(&Style::of(look))
     }
 
     /// The holo look with `width`'s border, as Settings' border control sets it.
     fn holo_with_border(width: u8) -> Theme {
-        let mut style = defaults_of(Look::Holo);
+        let mut style = Style::of(Look::Holo);
         style.dark.border_width = width;
         Theme::resolve(&style)
     }

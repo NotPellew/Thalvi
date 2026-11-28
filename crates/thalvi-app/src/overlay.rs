@@ -18,7 +18,7 @@ use thalvi_desktop::host::{
     overlay_failure,
 };
 use thalvi_desktop::metrics::{Event, Metrics, RecordKinds, Recorder};
-use thalvi_desktop::theme::{Style, defaults_of};
+use thalvi_desktop::theme::Style;
 
 use crate::status::{Failure, FailureKind, LastError, Status};
 use painter::Painter;
@@ -335,11 +335,9 @@ fn run(thread: Thread, cancel: &dyn Fn()) {
     };
     *waker.lock().unwrap_or_else(PoisonError::into_inner) = Some(surface.waker());
     // Fonts load here, before the first show, so no show waits for them.
-    let Some(mut painter) = Painter::new(
-        surface.scale(),
-        Arc::new(defaults_of(Look::default())),
-        true,
-    ) else {
+    let Some(mut painter) =
+        Painter::new(surface.scale(), Arc::new(Style::of(Look::default())), true)
+    else {
         publish(
             &failures,
             sink.as_ref(),
@@ -493,7 +491,7 @@ impl Overlaying {
             frame_at: None,
             failure: None,
             retry_at: None,
-            style: Arc::new(defaults_of(Look::default())),
+            style: Arc::new(Style::of(Look::default())),
             dark: true,
             style_dirty: false,
             asked_at: None,
@@ -769,7 +767,7 @@ mod tests {
     fn the_surface_shows_once_redraws_what_changed_and_hides_when_told_or_when_its_time_is_up() {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
-        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let mut painter = Painter::new(1.0, Arc::new(Style::of(Look::Gunmetal)), true).unwrap();
         let (mut surface, mut overlay) = (Fake::default(), Overlaying::new(false, start));
         let mut step = |message: Option<Message>, due: bool, now: Instant| {
             if let Some(message) = message {
@@ -923,7 +921,7 @@ mod tests {
     fn what_the_overlay_is_told_before_its_thread_starts_waits_for_it_in_order() {
         let overlay = Overlay::default();
         overlay.show_draft(false);
-        overlay.set_style(Arc::new(defaults_of(Look::Neon)));
+        overlay.set_style(Arc::new(Style::of(Look::Neon)));
         overlay.set_dark(false);
         overlay.show(&capturing());
         overlay.apply(Visibility::Hide);
@@ -938,7 +936,7 @@ mod tests {
         }
         assert_eq!(taken, 5);
         assert!(!thread.view.show_draft);
-        assert_eq!(*thread.style, defaults_of(Look::Neon));
+        assert_eq!(*thread.style, Style::of(Look::Neon));
         assert!(!thread.dark);
         assert!(matches!(thread.view.status, Status::Capturing { .. }));
         assert_eq!(thread.wanted, Wanted::Hidden, "the later hide wins");
@@ -951,7 +949,7 @@ mod tests {
     fn the_countdown_counts_down_on_the_overlay_threads_own_clock() {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
-        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let mut painter = Painter::new(1.0, Arc::new(Style::of(Look::Gunmetal)), true).unwrap();
         let (mut surface, mut overlay) = (Fake::default(), Overlaying::new(false, start));
         let pending = paste_countdown(None, "hello", 2500);
         overlay.take(Message::Status(Box::new(pending)), at(10_000));
@@ -965,7 +963,7 @@ mod tests {
     #[test]
     fn a_vanished_surface_is_shown_again_on_the_next_status() {
         let start = Instant::now();
-        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let mut painter = Painter::new(1.0, Arc::new(Style::of(Look::Gunmetal)), true).unwrap();
         let mut surface = Fake::default();
         let mut overlay = Overlaying::new(false, start);
         overlay.take(Message::Status(Box::new(capturing())), start);
@@ -982,7 +980,7 @@ mod tests {
     fn a_failed_show_leaves_the_overlay_hidden_and_a_failed_show_or_present_retries_at_most_once_a_second()
      {
         let start = Instant::now();
-        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let mut painter = Painter::new(1.0, Arc::new(Style::of(Look::Gunmetal)), true).unwrap();
         let mut surface = Fake {
             refuse: true,
             ..Fake::default()
@@ -1053,7 +1051,7 @@ mod tests {
     #[test]
     fn a_pending_configure_does_not_hold_hide_or_press() {
         let start = Instant::now();
-        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let mut painter = Painter::new(1.0, Arc::new(Style::of(Look::Gunmetal)), true).unwrap();
         let mut surface = Fake {
             pending: true,
             ..Fake::default()
@@ -1081,7 +1079,7 @@ mod tests {
         use thalvi_desktop::engine::SubmitPreview;
 
         let start = Instant::now();
-        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let mut painter = Painter::new(1.0, Arc::new(Style::of(Look::Gunmetal)), true).unwrap();
         let live_submit = |text: &str| Status::Pending {
             target: Some("foot".to_owned()),
             route: CaptureRoute::Submit,
@@ -1130,7 +1128,7 @@ mod tests {
     #[test]
     fn switching_the_overlay_off_or_on_takes_effect_at_once_without_a_new_status() {
         let start = Instant::now();
-        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let mut painter = Painter::new(1.0, Arc::new(Style::of(Look::Gunmetal)), true).unwrap();
         let (mut surface, mut overlay) = (Fake::default(), Overlaying::new(false, start));
         overlay.take(Message::Status(Box::new(capturing())), start);
         overlay.settle(&mut surface, &mut painter, 0.0, start);
@@ -1232,7 +1230,7 @@ mod tests {
         root: &std::path::Path,
     ) -> Vec<serde_json::Value> {
         let start = Instant::now();
-        let mut painter = Painter::new(1.0, Arc::new(defaults_of(Look::Gunmetal)), true).unwrap();
+        let mut painter = Painter::new(1.0, Arc::new(Style::of(Look::Gunmetal)), true).unwrap();
         let mut surface = Fake {
             pending: true,
             ..Fake::default()
@@ -1322,7 +1320,7 @@ mod tests {
 
     #[test]
     fn each_preview_state_draws_its_own_frame_at_both_scales() {
-        let style = Arc::new(defaults_of(Look::Holo));
+        let style = Arc::new(Style::of(Look::Holo));
         let states = [
             Sample::Live,
             Sample::Quiet,
@@ -1358,20 +1356,11 @@ mod tests {
 
     #[test]
     fn one_renderer_reuses_its_painter_without_ever_showing_a_stale_look() {
-        use thalvi_desktop::theme::{LookOverrides, Themes};
-
         let view = View::sample(Sample::Live);
-        let themes = Themes::load(&serde_json::json!({
-            "version": 1,
-            "holo": {"colors": {"dark": {"accent": "#ff0000"}}},
-        }));
-        let changed = themes.of(Look::Holo);
-        assert!(matches!(changed, Some(LookOverrides::Usable(_))));
-        let accent = Arc::new(Style::resolve(Look::Holo, changed));
-        let neon = Arc::new(defaults_of(Look::Neon));
+        let neon = Arc::new(Style::of(Look::Neon));
         let cases = [
-            (Arc::new(defaults_of(Look::Holo)), 1.0),
-            (accent, 1.0),
+            (Arc::new(Style::of(Look::Holo)), 1.0),
+            (Arc::new(Style::of(Look::Gunmetal)), 1.0),
             (Arc::clone(&neon), 1.0),
             (neon, 2.0),
         ];

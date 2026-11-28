@@ -136,10 +136,9 @@ mod tests {
     use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 
     use super::*;
-    use thalvi_desktop::theme::defaults_of;
 
     fn painter(scale: f32, look: Look, dark: bool) -> Painter {
-        Painter::new(scale, Arc::new(defaults_of(look)), dark).unwrap()
+        Painter::new(scale, Arc::new(Style::of(look)), dark).unwrap()
     }
     use crate::status::{FailureKind, Status};
 
@@ -219,59 +218,6 @@ mod tests {
             );
             let long = format!("Transfer 9000 dollars {}", "More words. ".repeat(80));
             assert!(!painter.render(&view(&submit_preview(&long), false), 0.0).1);
-        }
-    }
-
-    #[test]
-    fn final_submit_rejects_text_that_the_larger_theme_would_clip() {
-        for (look, dark) in LOOKS {
-            // The fixture's H advances 0.6 em. Neon has a wider draft area than the module looks.
-            let draft = "H".repeat(if look == Look::Neon { 43 } else { 32 });
-            let shown = view(&submit_preview(&draft), true);
-            let scales = [
-                Arc::new(defaults_of(look)),
-                customized(look, dark, "font.scale", serde_json::json!(1.25)),
-            ];
-            let complete = scales.map(|style| {
-                let mut painter = Painter::new(1.0, style, dark).unwrap();
-                let family = painter.text.load_weight_fixture();
-                painter.text.set_families(family, family);
-                painter.render(&shown, 0.0).1
-            });
-            assert_eq!(complete, [true, false], "{look:?} dark {dark}");
-        }
-    }
-
-    #[test]
-    fn final_submit_remains_visible_with_transparent_theme_text() {
-        use thalvi_desktop::theme::{LookOverrides, Themes};
-
-        let colors = serde_json::json!({
-            "text": "#00000000", "background": "#ffffff", "surface": "#ffffff",
-            "raised": "#ffffff", "accent": "#005500"
-        });
-        for (look, dark) in LOOKS {
-            let scheme = if dark { "dark" } else { "light" };
-            let name = look.name();
-            let themes = Themes::load(&serde_json::json!({
-                "version": 1,
-                name: {"colors": {scheme: colors}},
-            }));
-            let overrides = themes.of(look);
-            assert!(matches!(overrides, Some(LookOverrides::Usable(_))));
-            let style = Arc::new(Style::resolve(look, overrides));
-            let mut painter = Painter::new(1.0, style, dark).unwrap();
-            let mut pixels = |text| {
-                let shown = view(&submit_preview(text), true);
-                let (frame, complete) = painter.render(&shown, 0.0);
-                assert!(complete, "{look:?} dark {dark}");
-                frame.bgra.clone()
-            };
-            assert_ne!(
-                pixels("Pay 1111 dollars"),
-                pixels("Pay 9999 dollars"),
-                "{look:?} dark {dark}"
-            );
         }
     }
 
@@ -404,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_look_or_theme_shows_on_the_next_frame() {
+    fn a_new_look_or_system_scheme_shows_on_the_next_frame() {
         let line = (WIDTH / 2.0, 83.0);
         let pill = (WIDTH / 2.0, 26.5);
         let shown = view(&capturing(), false);
@@ -414,7 +360,7 @@ mod tests {
             (Look::Neon, true, pill, [0x12, 0x31, 0x5e]),
             (Look::Gunmetal, true, line, [107, 248, 255]),
         ] {
-            assert!(painter.restyle(&Arc::new(defaults_of(look)), dark));
+            assert!(painter.restyle(&Arc::new(Style::of(look)), dark));
             let got = rgb(painter.draw(&shown, 0.0), at);
             assert!(near(got, want), "{look:?} dark {dark} drew {got:?}");
         }
@@ -595,70 +541,6 @@ mod tests {
             );
         }
     }
-    fn states() -> [(&'static str, Status); 6] {
-        let pending = |waiting_for_quiet| Status::Pending {
-            target: Some("Editor".to_owned()),
-            route: CaptureRoute::Paste,
-            text: "The newest words of the draft.".to_owned(),
-            waiting_for_quiet,
-            pause_ms: 2500,
-            copies: false,
-            final_confirmation: None,
-        };
-        [
-            ("live", capturing()),
-            ("quiet", pending(true)),
-            (
-                "working",
-                Status::Writing {
-                    target: Some("Editor".to_owned()),
-                    text: "The revised draft.".to_owned(),
-                },
-            ),
-            ("pending", pending(false)),
-            (
-                "done",
-                Status::Done {
-                    target: None,
-                    route: CaptureRoute::Paste,
-                    notice: "Delivered.".to_owned(),
-                    wake_words: true,
-                },
-            ),
-            (
-                "failed",
-                Status::Failed {
-                    kind: FailureKind::Other,
-                    offer: None,
-                    notice: String::new(),
-                    headline: "No words heard".to_owned(),
-                    causes: Vec::new(),
-                },
-            ),
-        ]
-    }
-
-    fn customized(look: Look, dark: bool, id: &str, value: serde_json::Value) -> Arc<Style> {
-        use thalvi_desktop::theme::{LookOverrides, Themes};
-
-        let name = look.name();
-        let mut pieces: Vec<_> = id.split('.').collect();
-        if pieces[0] == "colors" {
-            pieces.insert(1, if dark { "dark" } else { "light" });
-        }
-        let overrides = pieces
-            .into_iter()
-            .rev()
-            .fold(value, |item, key| serde_json::json!({ key: item }));
-        let themes = Themes::load(&serde_json::json!({ "version": 1, name: overrides }));
-        let parsed = themes.of(look);
-        assert!(
-            matches!(parsed, Some(LookOverrides::Usable(_))),
-            "{look:?} {id}: {parsed:?}"
-        );
-        Arc::new(Style::resolve(look, parsed))
-    }
-
     fn calm_view(status: Status) -> View {
         let mut shown = View::new(true);
         shown.set_status(status, 5.4);
@@ -668,130 +550,11 @@ mod tests {
         shown
     }
 
-    fn cancel_rect(painter: &Painter) -> (f32, f32, f32, f32) {
-        match &painter.skin {
-            Skin::Module(_) => CANCEL,
-            Skin::Neon(neon) => neon.cancel.unwrap(),
-        }
-    }
-
-    fn probe_colors(id: &str, dark: bool) -> [&'static str; 2] {
-        let surface = matches!(id, "colors.background" | "colors.surface" | "colors.raised");
-        match (dark, surface) {
-            (true, true) => ["#020407", "#13131b"],
-            (false, true) => ["#ecf0f2", "#fdfbed"],
-            (true, false) => ["#ffff40", "#f0bfff"],
-            (false, false) => ["#10223a", "#3a1928"],
-        }
-    }
-
-    #[test]
-    fn every_overlay_property_changes_pixels_at_its_bounds_and_keeps_cancel_in_place() {
-        use serde_json::json;
-        use thalvi_desktop::theme::descriptors;
-
-        for (look, dark) in LOOKS {
-            let mut painter = painter(1.0, look, dark);
-            let states = states().map(|(_, status)| calm_view(status));
-            let live = &states[0];
-            let hits: [_; 6] = std::array::from_fn(|index| {
-                let view = &states[index];
-                view.cancellable().then(|| {
-                    painter.draw(view, view.clock);
-                    cancel_rect(&painter)
-                })
-            });
-            for property in descriptors()
-                .iter()
-                .filter(|p| p.looks.contains(&look) && p.surfaces.contains(&"overlay"))
-            {
-                let id = property.id;
-                let (state, module_rows, neon_rows) = match id {
-                    "colors.state.quiet" => (1, 21..84, 36..60),
-                    "colors.state.working" | "colors.secondary" | "motion.pulse" => {
-                        (2, 18..84, 36..60)
-                    }
-                    "colors.state.pending" => (3, 80..84, 25..60),
-                    "colors.state.done" => (4, 80..84, 25..60),
-                    "colors.state.failed" => (5, 80..84, 25..60),
-                    "colors.text" | "font.family" => (0, 53..78, 72..104),
-                    "colors.muted" => (0, 47..55, 36..60),
-                    "colors.state.live" => (0, 81..84, 25..28),
-                    "colors.raised" => (0, 2..8, 36..60),
-                    "colors.surface" => (0, 37..70, 69..105),
-                    "font.weight" | "font.tracking" | "font.mono_family" => (2, 16..36, 36..60),
-                    "motion.shine" | "decoration.scanlines" => (0, 5..80, 25..105),
-                    "decoration.corners" => (0, 16..82, 25..105),
-                    _ => (0, 0..90, 20..105),
-                };
-                let values = match property.unit {
-                    "number" => [json!(property.min.unwrap()), json!(property.max.unwrap())],
-                    "toggle" => [json!(false), json!(true)],
-                    "color" => probe_colors(id, dark).map(|color| json!(color)),
-                    "text" => {
-                        let mono = id == "font.mono_family";
-                        let choices = if mono {
-                            [
-                                "Courier New",
-                                "Liberation Mono",
-                                "Nimbus Mono PS",
-                                "DejaVu Sans Mono",
-                            ]
-                        } else {
-                            [
-                                "Georgia",
-                                "Liberation Serif",
-                                "DejaVu Serif",
-                                "Times New Roman",
-                            ]
-                        };
-                        let face = painter
-                            .text
-                            .alternative_family(&choices, mono)
-                            .expect("a second system font");
-                        [json!("Thalvi Missing Font"), json!(face)]
-                    }
-                    unit => panic!("unsupported property unit {unit}"),
-                };
-                let frames = values.map(|value| {
-                    assert!(painter.restyle(&customized(look, dark, id, value), dark));
-                    let shown = &states[state];
-                    let pixels = painter.draw(shown, shown.clock).bgra.clone();
-                    if let Some(hit) = hits[state] {
-                        assert_eq!(
-                            cancel_rect(&painter),
-                            hit,
-                            "{look:?} dark={dark} {id} {state}"
-                        );
-                    }
-                    painter.draw(live, live.clock);
-                    assert_eq!(
-                        Some(cancel_rect(&painter)),
-                        hits[0],
-                        "{look:?} dark={dark} {id} live"
-                    );
-                    pixels
-                });
-                let rows = if look == Look::Neon {
-                    neon_rows
-                } else {
-                    module_rows
-                };
-                let stride = 460 * 4;
-                let probe = rows.start * stride..rows.end * stride;
-                assert!(
-                    frames[0][probe.clone()] != frames[1][probe],
-                    "{look:?} dark={dark} {id} did not change its probe"
-                );
-            }
-        }
-    }
-
     #[test]
     fn the_largest_font_and_spacing_show_the_full_draft() {
         let words = "Gypsy jumps";
         for (look, dark) in LOOKS {
-            let mut style = defaults_of(look);
+            let mut style = Style::of(look);
             for scheme in std::iter::once(&mut style.dark).chain(style.light.iter_mut()) {
                 scheme.font_scale = 1.25;
                 scheme.spacing = 1.5;
@@ -864,24 +627,16 @@ mod tests {
     }
 
     #[test]
-    fn skin_rebuilds_once_when_the_visible_style_changes() {
+    fn skin_rebuilds_once_when_the_visible_look_changes() {
         let mut painter = painter(1.0, Look::Neon, true);
-        let changed = customized(
-            Look::Neon,
-            false,
-            "colors.accent",
-            serde_json::json!("#10223a"),
-        );
+        let changed = Arc::new(Style::of(Look::Gunmetal));
         let view = calm_view(capturing());
         let original = painter.draw(&view, view.clock).bgra.clone();
         assert!(painter.restyle(&changed, true));
-        assert_eq!(painter.restyles, 0, "changing the inactive scheme");
-        assert_eq!(painter.draw(&view, view.clock).bgra, original);
-        assert!(painter.restyle(&changed, false));
         assert_eq!(painter.restyles, 1);
         for step in 0..8 {
             if step == 4 {
-                assert!(painter.restyle(&Arc::new((*changed).clone()), false));
+                assert!(painter.restyle(&Arc::new(Style::of(Look::Gunmetal)), true));
             }
             painter.draw(&view, view.clock);
         }
@@ -893,13 +648,12 @@ mod tests {
     fn a_missing_family_falls_back_and_the_preview_uses_the_live_renderer() {
         let shown = calm_view(capturing());
         let look = Look::Holo;
-        let baseline = Arc::new(defaults_of(look));
-        let missing = customized(
-            look,
-            true,
-            "font.family",
-            serde_json::json!("Thalvi Missing Font"),
-        );
+        let baseline = Arc::new(Style::of(look));
+        let mut missing = Style::of(look);
+        for scheme in std::iter::once(&mut missing.dark).chain(missing.light.iter_mut()) {
+            scheme.font_family = "Thalvi Missing Font".to_owned();
+        }
+        let missing = Arc::new(missing);
         let before = super::super::render_rgba(&shown, baseline, true, 1.0).unwrap();
         let after = super::super::render_rgba(&shown, Arc::clone(&missing), true, 1.0).unwrap();
         assert_eq!(before, after);

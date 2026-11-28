@@ -1,6 +1,6 @@
-//! The overlay's built-in artwork and the resolved values used to draw it.
+//! The overlay's built-in artwork and the fixed values used to draw it.
 
-use super::{Color, Scheme, Style, defaults_of};
+use super::{Color, Scheme, Style};
 use crate::config::Look;
 
 /// A colour with straight alpha.
@@ -40,7 +40,7 @@ pub const WHITE: Rgba = Rgba::rgb(255, 255, 255);
 pub const BLACK: Rgba = Rgba::rgb(0, 0, 0);
 pub const TRANSPARENT: Rgba = BLACK.alpha(0.0);
 
-/// Built-in typography for one role, before user font scaling.
+/// Built-in typography for one role.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextStyle {
     pub size: f32,
@@ -71,37 +71,20 @@ pub const LABEL: TextStyle = text(11.0, 14.0, 700, true, 1.32);
 pub const TARGET: TextStyle = text(12.0, 15.0, 400, true, 0.0);
 pub const NEON_CANCEL: TextStyle = text(16.0, 20.0, 400, false, 0.0);
 
-/// User typography and spacing relative to the built-in artwork.
+/// One look's typography and border width, used to place the artwork.
 #[derive(Clone, Copy, Debug)]
 pub struct Measures {
     pub font_scale: f32,
     pub spacing: f32,
-    label_weight: u16,
-    tracking: Option<f32>,
-    pub radius: f32,
-    pub radius_delta: f32,
     pub border: f32,
-    pub border_delta: f32,
-    pub chamfer_delta: f32,
-    pub glow_ratio: f32,
-    pub pulse: bool,
 }
 
 impl Measures {
-    fn resolve(scheme: &Scheme, base: &Scheme) -> Self {
+    fn of(scheme: &Scheme) -> Self {
         Self {
             font_scale: scheme.font_scale,
             spacing: scheme.spacing,
-            label_weight: scheme.font_weight,
-            tracking: (scheme.tracking.to_bits() != base.tracking.to_bits())
-                .then_some(scheme.tracking),
-            radius: f32::from(scheme.radius),
-            radius_delta: f32::from(scheme.radius) - f32::from(base.radius),
             border: f32::from(scheme.border_width),
-            border_delta: f32::from(scheme.border_width) - f32::from(base.border_width),
-            chamfer_delta: f32::from(scheme.chamfer) - f32::from(base.chamfer),
-            glow_ratio: scheme.glow / base.glow,
-            pulse: scheme.pulse,
         }
     }
 
@@ -117,24 +100,7 @@ impl Measures {
 
     #[must_use]
     pub fn label(self, base: TextStyle) -> TextStyle {
-        let mut style = self.text(base);
-        style.weight = self.label_weight;
-        style.variable_weight = self.label_weight != base.weight;
-        style.tracking = self
-            .tracking
-            .map_or(base.tracking, |tracking| base.size * tracking)
-            * self.font_scale;
-        style
-    }
-}
-
-/// Maps a shared token onto the overlay's artwork. Some artwork defaults use a different
-/// shade from Settings, or a different shade at each stop of a gradient.
-fn tint(chosen: Color, base: Color, artwork: Rgba) -> Rgba {
-    if chosen == base {
-        artwork
-    } else {
-        Rgba::from(chosen).faded(artwork.a)
+        self.text(base)
     }
 }
 
@@ -146,27 +112,6 @@ pub struct StateColors {
     pub pending: Rgba,
     pub done: Rgba,
     pub failed: Rgba,
-}
-
-impl StateColors {
-    fn resolve(scheme: &Scheme, base: &Scheme, live: Rgba, working: Rgba) -> Self {
-        Self {
-            live: if scheme.live == base.live {
-                live
-            } else {
-                scheme.live.into()
-            },
-            quiet: scheme.quiet.into(),
-            working: if scheme.working == base.working {
-                working
-            } else {
-                scheme.working.into()
-            },
-            pending: scheme.pending.into(),
-            done: scheme.done.into(),
-            failed: scheme.failed.into(),
-        }
-    }
 }
 
 const MODULE_ACCENT: Rgba = Rgba::rgb(107, 248, 255);
@@ -202,15 +147,6 @@ const BUTTON: Gradient<2> = [
     (1.0, Rgba::rgb(0x3a, 0x3a, 0x3d)),
 ];
 
-fn gradient<const N: usize>(
-    art: Gradient<N>,
-    chosen: Color,
-    base: Color,
-    opacity: f32,
-) -> Gradient<N> {
-    art.map(|(at, color)| (at, tint(chosen, base, color).faded(opacity)))
-}
-
 /// Colours and measures for Gunmetal and Holo's shared module.
 #[derive(Debug)]
 pub struct Module {
@@ -238,65 +174,40 @@ pub struct Module {
 impl Module {
     #[must_use]
     pub fn resolve(style: &Style) -> Self {
-        let built_in = defaults_of(style.look());
-        let base = &built_in.dark;
         let scheme = &style.dark;
-        let opacity = if scheme.opacity.to_bits() == base.opacity.to_bits() {
-            1.0
-        } else {
-            scheme.opacity
-        };
-        let accent = tint(scheme.accent, base.accent, MODULE_ACCENT);
-        let rim = Rgba::from(scheme.border);
         let holo = style.look() == Look::Holo;
-        let mut state = StateColors::resolve(scheme, base, accent, accent);
-        state.quiet = tint(scheme.quiet, base.quiet, MODULE_MUTED);
         Self {
-            measures: Measures::resolve(scheme, base),
-            state,
-            accent,
-            text: tint(scheme.text, base.text, MODULE_TEXT),
-            muted: tint(scheme.muted, base.muted, MODULE_MUTED),
-            shadow: tint(scheme.accent, base.accent, BLACK.alpha(0.6)),
-            metal: gradient(METAL, scheme.border, base.border, opacity),
-            face: gradient(FACE, scheme.background, base.background, opacity),
-            bezel: gradient(BEZEL, scheme.raised, base.raised, opacity),
-            glass: gradient(GLASS, scheme.surface, base.surface, opacity),
-            field: [
-                (
-                    FIELD[0].0,
-                    tint(scheme.raised, base.raised, FIELD[0].1).faded(opacity),
-                ),
-                (
-                    FIELD[1].0,
-                    tint(scheme.background, base.background, FIELD[1].1).faded(opacity),
-                ),
-                (
-                    FIELD[2].0,
-                    tint(scheme.surface, base.surface, FIELD[2].1).faded(opacity),
-                ),
-            ],
-            rim: rim.faded(opacity),
-            button: gradient(BUTTON, scheme.raised, base.raised, 1.0),
+            measures: Measures::of(scheme),
+            state: StateColors {
+                live: MODULE_ACCENT,
+                quiet: MODULE_MUTED,
+                working: MODULE_ACCENT,
+                pending: scheme.pending.into(),
+                done: scheme.done.into(),
+                failed: scheme.failed.into(),
+            },
+            accent: MODULE_ACCENT,
+            text: MODULE_TEXT,
+            muted: MODULE_MUTED,
+            shadow: BLACK.alpha(0.6),
+            metal: METAL,
+            face: FACE,
+            bezel: BEZEL,
+            glass: GLASS,
+            field: FIELD,
+            rim: scheme.border.into(),
+            button: BUTTON,
             button_outline: if holo {
-                tint(scheme.border, base.border, MODULE_MUTED.alpha(0.4))
+                MODULE_MUTED.alpha(0.4)
             } else {
-                tint(scheme.border, base.border, Rgba::rgb(0x6e, 0x6e, 0x72))
+                Rgba::rgb(0x6e, 0x6e, 0x72)
             },
-            button_glyph: tint(
-                scheme.text,
-                base.text,
-                if holo {
-                    MODULE_MUTED
-                } else {
-                    Rgba::rgb(0xe1, 0xe4, 0xe7)
-                },
-            ),
-            mesh: if holo && scheme.mesh.to_bits() == base.mesh.to_bits() {
-                0.042
+            button_glyph: if holo {
+                MODULE_MUTED
             } else {
-                scheme.mesh
+                Rgba::rgb(0xe1, 0xe4, 0xe7)
             },
+            mesh: if holo { 0.042 } else { scheme.mesh },
             scanlines: scheme.scanlines,
             corners: scheme.corners,
             shine: scheme.shine,
@@ -316,49 +227,42 @@ pub struct Neon {
     pub muted: Rgba,
     pub accent: Rgba,
     pub blue: Rgba,
-    pub dot_halo: Option<Rgba>,
     pub shadow: Rgba,
 }
 
 impl Neon {
     #[must_use]
     pub fn resolve(style: &Style, dark: bool) -> Self {
-        let built_in = defaults_of(Look::Neon);
-        let base = built_in.scheme(dark);
         let scheme = style.scheme(dark);
-        let glass = if dark {
-            base.background.into()
-        } else {
-            base.surface.into()
-        };
-        let card = if dark { base.surface.into() } else { WHITE };
-        let glass = tint(scheme.background, base.background, glass).faded(scheme.opacity);
-        let card_opacity = if scheme.opacity.to_bits() != base.opacity.to_bits() {
-            scheme.opacity
-        } else if dark {
-            0.95
-        } else {
-            0.96
-        };
-        let card = tint(scheme.surface, base.surface, card).faded(card_opacity);
         let line = Rgba::from(scheme.border);
-        let mut state =
-            StateColors::resolve(scheme, base, line, Rgba::from(scheme.muted).alpha(0.6));
-        if scheme.working != base.working {
-            state.working = scheme.working.into();
-        }
         Self {
-            measures: Measures::resolve(scheme, base),
-            state,
-            glass,
-            card,
+            measures: Measures::of(scheme),
+            state: StateColors {
+                live: line,
+                quiet: scheme.quiet.into(),
+                working: Rgba::from(scheme.muted).alpha(0.6),
+                pending: scheme.pending.into(),
+                done: scheme.done.into(),
+                failed: scheme.failed.into(),
+            },
+            glass: Rgba::from(if dark {
+                scheme.background
+            } else {
+                scheme.surface
+            })
+            .faded(scheme.opacity),
+            card: (if dark {
+                Rgba::from(scheme.surface)
+            } else {
+                WHITE
+            })
+            .faded(if dark { 0.95 } else { 0.96 }),
             line,
             fg: scheme.text.into(),
             muted: scheme.muted.into(),
             accent: scheme.accent.into(),
             blue: scheme.secondary.into(),
-            dot_halo: (scheme.raised != base.raised).then(|| scheme.raised.into()),
-            shadow: tint(scheme.accent, base.accent, BLACK),
+            shadow: BLACK,
         }
     }
 }

@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { DownloadFailure, errorText } from "./contract.ts";
-import type { AudioStatus, Backend, ChatModelInfo, CurrentApp, Draft, HistoryEntry, KeyDefaults, Learning, Level, LookStyles, OverlayPreviewState, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
+import type { AudioStatus, Backend, ChatModelInfo, CurrentApp, Draft, HistoryEntry, KeyDefaults, Learning, Level, OverlayPreviewState, SwitchState, Settings, SpeechModelInfo, SpeechModelProgress, Status, UpdateState, WakeModelInfo } from "./contract.ts";
 
 /** The rejection of `download_speech_model`, which carries `{ message, causes }`, as a typed error. */
 function downloadFailure(rejection: unknown): DownloadFailure {
@@ -16,7 +16,7 @@ function downloadFailure(rejection: unknown): DownloadFailure {
 }
 
 export function tauriBackend(): Backend {
-  const dark = window.matchMedia("(prefers-color-scheme: dark)");
+  const scheme = window.matchMedia("(prefers-color-scheme: dark)");
   return {
     getStatus: () => invoke<Status>("get_status"),
     onStatus: (listener) => {
@@ -47,8 +47,11 @@ export function tauriBackend(): Backend {
       });
     },
     getSettings: () => invoke<Settings>("get_settings"),
-    getLookStyles: () => invoke<LookStyles>("get_look_styles", { dark: dark.matches }),
-    onThemeChanged: (listener) => { dark.addEventListener("change", listener); },
+    setDark: (dark) => invoke<undefined>("set_dark", { dark }),
+    onThemeChanged: (listener) => {
+      listener(scheme.matches);
+      scheme.addEventListener("change", () => { listener(scheme.matches); });
+    },
     previewOverlay: (state: OverlayPreviewState, scale: number) => invoke<ArrayBuffer>("preview_overlay", { state, scale }),
     settingsReady: () => invoke<undefined>("settings_ready"),
     saveSettings: (patch) => invoke<undefined>("save_settings", { patch }),

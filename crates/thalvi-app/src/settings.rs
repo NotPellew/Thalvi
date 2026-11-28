@@ -3,12 +3,11 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use thalvi_desktop::config::{ConfigError, DesktopConfig, Look};
+use thalvi_desktop::config::{ConfigError, DesktopConfig};
 use thalvi_desktop::entries::{self, LiveKind};
 use thalvi_desktop::hold::KeyBind;
 use thalvi_desktop::host::{Desktop, HostError};
 use thalvi_desktop::models::CatalogSpeech;
-use thalvi_desktop::theme::{self, LookOverrides};
 use thalvi_desktop::transducer::{SpeechChoice, check_folder};
 use thalvi_desktop::wake::validate_wake_model;
 use thalvi_desktop::writing::{DEFAULT_PROMPT, Writing};
@@ -100,8 +99,6 @@ impl Store {
     pub fn check(mut settings: Value, current: &DesktopConfig) -> Result<DesktopConfig, String> {
         prepare(&mut settings, current);
         check_keys(&settings, current, Desktop::check_hold_keys)?;
-        // A theme that did not change, including one this build cannot read, is written back as stored.
-        restore_themes(&mut settings, current)?;
         load(&settings)
     }
 
@@ -178,46 +175,6 @@ fn writing_has_endpoint(writing: &serde_json::Map<String, Value>) -> bool {
     filled("url") && filled("model")
 }
 
-/// Puts an unchanged theme back as stored, and refuses a changed one this build cannot use.
-/// The form shows an unreadable look as `{ "unreadable": reason }` and withholds its JSON, so a
-/// save that did not edit that look sends the placeholder back and the original JSON is restored.
-/// A first `themes` object that gives no version is version 1. A version other than 1 is refused
-/// when the value differs from what is stored.
-fn restore_themes(settings: &mut Value, current: &DesktopConfig) -> Result<(), String> {
-    let Some(presented) = settings.get("themes").cloned() else {
-        return Ok(());
-    };
-    if presented.is_null() {
-        if let Some(object) = settings.as_object_mut() {
-            object.remove("themes");
-        }
-        return Ok(());
-    }
-    let mut candidate = presented;
-    if current.themes.is_empty()
-        && let Some(object) = candidate.as_object_mut()
-        && !object.contains_key("version")
-    {
-        object.insert("version".to_owned(), serde_json::json!(theme::VERSION));
-    }
-    if let Some(object) = candidate.as_object_mut() {
-        for look in [Look::Neon, Look::Holo, Look::Gunmetal] {
-            let Some(LookOverrides::Unreadable { raw, reason }) = current.themes.of(look) else {
-                continue;
-            };
-            let placeholder = serde_json::json!({ "unreadable": reason });
-            if object.get(look.name()) == Some(&placeholder) {
-                object.insert(look.name().to_owned(), raw.clone());
-            }
-        }
-    }
-    theme::refuse_changed(&current.themes, &candidate)?;
-    if let Some(object) = settings.as_object_mut() {
-        object.insert("themes".to_owned(), candidate);
-    }
-    Ok(())
-}
-
 /// Validates `settings` as the loader does at startup.
 fn load(settings: &Value) -> Result<DesktopConfig, String> {
     DesktopConfig::from_json_str(&settings.to_string()).map_err(|error| match error {
@@ -276,8 +233,6 @@ pub fn merge_patch(target: &mut Value, patch: &Value) {
 pub fn judge(mut settings: Value, current: &DesktopConfig) -> Result<DesktopConfig, String> {
     prepare(&mut settings, current);
     check_keys(&settings, current, Desktop::check_hold_keys)?;
-    // The same restore-and-refuse step a save runs, so a check matches what set would do.
-    restore_themes(&mut settings, current)?;
     let config = load(&settings)?;
     let mut before = serde_json::to_value(current).map_err(|error| error.to_string())?;
     let known: Vec<Value> = entries_of(&mut before)
@@ -378,11 +333,6 @@ pub fn settings_json(config: &DesktopConfig) -> Result<Value, String> {
             "writing_default_prompt".to_owned(),
             Value::String(DEFAULT_PROMPT.to_owned()),
         );
-        if config.themes.is_empty() {
-            settings.remove("themes");
-        } else {
-            settings.insert("themes".to_owned(), theme::form_of_themes(&config.themes));
-        }
     }
     Ok(settings)
 }
@@ -622,6 +572,10 @@ mod tests {
         );
         assert_eq!(saved.wake.conversation().threshold.get(), 0.65);
         assert_eq!(reloaded, saved);
+        assert!(
+            !serde_json::to_string(&saved).unwrap().contains("themes"),
+            "a save never writes themes"
+        );
         assert_eq!(
             (
                 saved.recordings.metrics,
@@ -631,169 +585,6 @@ mod tests {
             (true, false, true)
         );
         assert_eq!(leftovers, ["desktop.json"]);
-    }
-
-    #[test]
-    fn an_unrelated_save_keeps_a_newer_a_non_object_or_a_malformed_themes_value_verbatim() {
-        type Check = fn(&DesktopConfig, &DesktopConfig);
-        type Row<'a> = (&'a str, &'a str, &'a [(&'a str, Value)], Check);
-        let rows: [Row; 3] = [
-            (
-                "newer",
-                r##"{"look":"holo","themes":{"version":2,"holo":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##,
-                &[
-                    ("/themes/version", json!(2)),
-                    ("/themes/holo/colors/dark/accent", json!("#ffffff")),
-                ],
-                |current, again| {
-                    assert_eq!(current.themes.notices().len(), 1);
-                    assert!(current.themes.notices()[0].contains("newer"));
-                    assert!(!current.themes.notices()[0].contains("Holo"));
-                    assert_eq!(again.themes.to_value()["version"], 2);
-                    assert_eq!(again.themes.notices(), current.themes.notices());
-                },
-            ),
-            (
-                "non-object",
-                r#"{"look":"holo","themes":"bad"}"#,
-                &[("/themes", json!("bad"))],
-                |current, _| {
-                    assert_eq!(
-                        current.themes.notices(),
-                        ["Your look customizations could not be read (themes must be an object)."]
-                    );
-                    assert!(current.themes.of(Look::Gunmetal).is_none());
-                },
-            ),
-            (
-                "malformed",
-                r##"{"look":"holo","themes":{"version":1,"holo":{"colors":{"dark":{"accent":"red"}}},"gunmetal":{"colors":{"dark":{"accent":"#ffffff"}}}}}"##,
-                &[
-                    ("/themes/holo/colors/dark/accent", json!("red")),
-                    ("/themes/gunmetal/colors/dark/accent", json!("#ffffff")),
-                ],
-                |_, _| {},
-            ),
-        ];
-        for (name, raw, kept, check) in rows {
-            let (store, dir) = store(name);
-            std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
-            std::fs::write(&store.path, raw).unwrap();
-            let current = store.load().unwrap();
-            let mut form = settings_json(&current).unwrap();
-            form["overlay"]["draft"] = json!(false);
-            form["microphone"] = json!("USB Mic");
-            let saved = store.save(form, &current).unwrap();
-            let file: Value =
-                serde_json::from_str(&std::fs::read_to_string(&store.path).unwrap()).unwrap();
-            let again = store.load().unwrap();
-            let _ = std::fs::remove_dir_all(&dir);
-            assert!(!saved.overlay.draft, "{name}");
-            assert_eq!(saved.microphone.as_deref(), Some("USB Mic"), "{name}");
-            for (pointer, expected) in kept {
-                assert_eq!(file.pointer(pointer), Some(expected), "{name} {pointer}");
-            }
-            check(&current, &again);
-        }
-    }
-
-    #[test]
-    fn an_empty_themes_object_is_omitted() {
-        let (store, dir) = store("theme-shape");
-        let empty = DesktopConfig::from_json_str(r#"{"look":"holo","themes":{}}"#).unwrap();
-        assert!(empty.themes.is_empty());
-        store.write(&empty).unwrap();
-        let written = std::fs::read_to_string(&store.path).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(!written.contains("\"themes\""));
-    }
-
-    #[test]
-    fn a_first_theme_patch_without_a_version_defaults_to_1_and_an_invalid_theme_or_any_other_version_is_refused()
-     {
-        let (store, dir) = store("theme-version");
-        let start = store
-            .save(settings_json(&store_defaults()).unwrap(), &store_defaults())
-            .unwrap();
-        let mut settings = settings_json(&start).unwrap();
-        settings["themes"] = json!({"version": 1, "holo": {"colors": {"dark": {"accent": "red"}}}});
-        let error = Store::check(settings, &start).unwrap_err();
-        assert!(
-            error.contains("themes.holo.colors.dark.accent: use a colour like #6bf8ff"),
-            "{error}"
-        );
-        assert!(store.load().unwrap().themes.is_empty());
-        let form = merged(
-            &start,
-            &json!({"themes": {"holo": {"font": {"scale": 0.85}}}}),
-        )
-        .unwrap();
-        let saved = store.save(form, &start).unwrap();
-        let file: Value =
-            serde_json::from_str(&std::fs::read_to_string(&store.path).unwrap()).unwrap();
-        assert_eq!(file["themes"]["version"], 1);
-        let scale = match saved.themes.of(Look::Holo) {
-            Some(thalvi_desktop::theme::LookOverrides::Usable(overrides)) => {
-                overrides.font.scale.unwrap().get()
-            }
-            other => panic!("{other:?}"),
-        };
-        assert!((scale - 0.85).abs() < 0.001, "{scale}");
-
-        for version in [json!(0), json!(2)] {
-            let form = merged(
-                &saved,
-                &json!({"themes": {"version": version, "holo": {"font": {"scale": 1.0}}}}),
-            )
-            .unwrap();
-            let error = Store::check(form, &saved).unwrap_err();
-            assert_eq!(error, "themes.version must be 1", "{version}");
-        }
-        let kept = store.load().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(kept.themes.to_value()["version"], 1);
-        match kept.themes.of(Look::Holo) {
-            Some(thalvi_desktop::theme::LookOverrides::Usable(overrides)) => {
-                assert!((overrides.font.scale.unwrap().get() - 0.85).abs() < 0.001);
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_property_and_a_look_reset_leave_the_rest() {
-        let (store, dir) = store("theme-reset");
-        let current = DesktopConfig::from_json_str(
-            r##"{"look":"holo","microphone":"USB Mic","themes":{"version":1,"holo":{"colors":{"dark":{"accent":"#ffffff","text":"#eafff3"}},"font":{"scale":1.1}},"gunmetal":{"font":{"scale":1.2}}}}"##,
-        )
-        .unwrap();
-        store.write(&current).unwrap();
-        let form = merged(
-            &current,
-            &json!({"themes": {"holo": {"colors": {"dark": {"accent": null}}}}}),
-        )
-        .unwrap();
-        let saved = store.save(form, &current).unwrap();
-        let holo = match saved.themes.of(Look::Holo) {
-            Some(thalvi_desktop::theme::LookOverrides::Usable(overrides)) => overrides.clone(),
-            other => panic!("{other:?}"),
-        };
-        assert!(holo.colors.dark.accent.is_none());
-        assert_eq!(holo.colors.dark.text.unwrap().to_hex(), "#eafff3");
-        assert_eq!(holo.font.scale.unwrap().get(), 1.1);
-        assert_eq!(saved.microphone.as_deref(), Some("USB Mic"));
-
-        let form = merged(&saved, &json!({"themes": {"holo": null}})).unwrap();
-        let saved = store.save(form, &saved).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(saved.themes.of(Look::Holo).is_none());
-        match saved.themes.of(Look::Gunmetal) {
-            Some(thalvi_desktop::theme::LookOverrides::Usable(overrides)) => {
-                assert_eq!(overrides.font.scale.unwrap().get(), 1.2);
-            }
-            other => panic!("{other:?}"),
-        }
-        assert_eq!(saved.microphone.as_deref(), Some("USB Mic"));
     }
 
     #[test]
