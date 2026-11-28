@@ -244,7 +244,7 @@ mod tests {
             (
                 "",
                 vec![],
-                r#"{"stt": {"engine": "local"}}"#,
+                r#"{}"#,
                 "\
                  Error: Thalvi could not reach the speech server.\n\n\
                  Time: 2026-11-03 12:34:56 UTC\nThalvi: 1.2.3\nSystem: linux\n\n\
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn a_configured_key_or_endpoint_never_reaches_the_report() {
         let config = config(
-            r#"{"writing": {"url": "http://writing.invalid/v1", "model": "m"}, "stt": {"secondary": {"enabled": true, "url": "https://example.com/v1/url-secret", "model": "m", "api_key": "sk-secret-key", "api": "openai"}}}"#,
+            r#"{"writing": {"url": "https://example.com/v1/url-secret", "model": "m", "api_key": "sk-secret-key"}, "stt": {"entries": [{"kind": "realtime", "id": "r", "name": "Office", "active": true, "address": "ws://127.0.0.1:9", "model": "m", "api_key": "sk-secret-key"}]}}"#,
         );
         let report = Report::new("Failed.", &[], "1.2.3", system("GNOME"), &config).text();
         for secret in ["sk-secret-key", "url-secret", "example.com"] {

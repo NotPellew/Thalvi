@@ -119,7 +119,6 @@ const ENDINGS: readonly (readonly [Ending, string])[] = [
 const SCRIPT_ACTIONS: readonly (readonly [ScriptActionKind, string])[] = [
   ["open_url", "Open web address"],
   ["focus_app", "Focus app"],
-  ["discord_message", "Send Discord message"],
 ];
 const OPEN_AI_REQUESTS: readonly (readonly [OpenAiRequest, string])[] = [
   ["transcriptions", "Transcriptions"],

@@ -551,7 +551,7 @@ impl CaptureSession {
     }
 
     /// Whether `text` alone is a task that needs no spoken ending: a configured phrase, else
-    /// `open <host>`, but not a Discord message, which matches on a prefix.
+    /// `open <host>`.
     fn is_whole_task(&self, text: &str) -> bool {
         self.spoken.as_ref().is_some_and(|spoken| {
             matches!(

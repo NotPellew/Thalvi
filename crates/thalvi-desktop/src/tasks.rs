@@ -7,19 +7,8 @@ use crate::report::UserError;
 /// What the task ending asked for, as a typed action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Task {
-    OpenUrl {
-        url: WebUrl,
-        label: String,
-    },
-    FocusApp {
-        app: App,
-        label: String,
-    },
-    DiscordMessage {
-        destination: String,
-        message: String,
-        label: String,
-    },
+    OpenUrl { url: WebUrl, label: String },
+    FocusApp { app: App, label: String },
 }
 
 /// Why no task was chosen. `Display` is the plain notice for the user.
@@ -33,9 +22,6 @@ impl UserError for NotConfigured {
     }
 }
 
-/// The refusal for every Discord message: live Discord actions are switched off.
-const DISCORD_OFF: &str = "Discord messages are switched off for now. Nothing was pasted or sent.";
-
 /// Chooses the task `text` asks for: a configured phrase, else `open <host>`.
 ///
 /// # Errors
@@ -44,18 +30,6 @@ pub fn decide(text: &str, scripts: &[Script]) -> Result<Task, NotConfigured> {
     let spoken = normalize(text);
     for script in scripts {
         match &script.action {
-            ScriptAction::DiscordMessage { destination } => {
-                let prefix = format!("{} ", script.phrase);
-                if let Some(rest) = strip_prefix_ignore_case(text, &prefix)
-                    && !rest.trim().is_empty()
-                {
-                    return Ok(Task::DiscordMessage {
-                        destination: destination.clone(),
-                        message: rest.trim().to_owned(),
-                        label: script.label.clone(),
-                    });
-                }
-            }
             ScriptAction::OpenUrl(url) if spoken == script.phrase => {
                 return Ok(Task::OpenUrl {
                     url: url.clone(),
@@ -77,10 +51,9 @@ pub fn decide(text: &str, scripts: &[Script]) -> Result<Task, NotConfigured> {
 /// Runs `task` on the desktop and returns the notice to show.
 ///
 /// # Errors
-/// Why the host could not do it; Discord messages are always refused, before any host call.
+/// Why the host could not do it.
 pub fn execute(task: &Task, host: &impl Host) -> Result<String, HostError> {
     match task {
-        Task::DiscordMessage { .. } => Err(HostError::Unsupported(DISCORD_OFF.to_owned())),
         Task::OpenUrl { url, label } => {
             host.open_url(url)?;
             Ok(format!("Asked the browser to open {label}."))
@@ -99,23 +72,6 @@ fn normalize(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// The rest of `text` after `prefix`, matched ignoring case. `prefix` is already lowercase.
-fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
-    let mut wanted = prefix.chars();
-    for (index, character) in text.char_indices() {
-        for lower in character.to_lowercase() {
-            match wanted.next() {
-                Some(expected) if expected == lower => {}
-                _ => return None,
-            }
-        }
-        if wanted.as_str().is_empty() {
-            return Some(&text[index + character.len_utf8()..]);
-        }
-    }
-    None
 }
 
 /// `open <host>` with a plain web address: letters, digits and hyphens in dotted labels, the
@@ -211,9 +167,7 @@ mod tests {
                 "scripts": [
                     {"phrase": "Open  the project page", "action": "open_url",
                      "destination": "https://github.com/NotPellew/Thalvi", "label": "the project page"},
-                    {"phrase": "switch to editor", "action": "focus_app", "destination": "editor"},
-                    {"phrase": "message the demo channel saying", "action": "discord_message",
-                     "destination": "https://discord.com/channels/1/2", "label": "Demo"}
+                    {"phrase": "switch to editor", "action": "focus_app", "destination": "editor"}
                 ]
             }"#,
         )
@@ -333,34 +287,6 @@ mod tests {
         ] {
             let expected = expected.map(|(url, label)| open(url, label));
             assert_eq!(decide(spoken, &config.scripts).ok(), expected, "{spoken:?}");
-        }
-    }
-
-    #[test]
-    fn discord_phrases_are_prefixes_whose_rest_is_the_message() {
-        let config = config();
-        let message = |text: &str| Task::DiscordMessage {
-            destination: "https://discord.com/channels/1/2".to_owned(),
-            message: text.to_owned(),
-            label: "Demo".to_owned(),
-        };
-        assert_eq!(
-            decide(
-                "Message the demo channel saying  Hello There ",
-                &config.scripts
-            ),
-            Ok(message("Hello There"))
-        );
-        for spoken in [
-            "message the demo channel saying",
-            "message the demo channel saying   ",
-            "message the demo channel",
-        ] {
-            assert_eq!(
-                decide(spoken, &config.scripts),
-                Err(NotConfigured),
-                "{spoken:?}"
-            );
         }
     }
 }
