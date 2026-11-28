@@ -512,23 +512,6 @@ impl Text {
         "Thalvi Test Weight"
     }
 
-    #[cfg(test)]
-    pub fn alternative_family<'a>(&self, names: &'a [&'a str], mono: bool) -> Option<&'a str> {
-        let db = self.fonts.db();
-        let generic = if mono {
-            Family::Monospace
-        } else {
-            Family::SansSerif
-        };
-        let fallback = db.family_name(&generic);
-        names.iter().copied().find(|name| {
-            *name != fallback
-                && db
-                    .faces()
-                    .any(|face| face.families.iter().any(|(family, _)| family == name))
-        })
-    }
-
     pub fn has_custom_families(&self) -> bool {
         self.families.0.is_some() || self.families.1.is_some()
     }

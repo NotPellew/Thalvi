@@ -1,7 +1,7 @@
 // Test doubles shared by the page tests.
 
 import { vi } from "vitest";
-import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatBuild, type ChatModelInfo, type CurrentApp, type Draft, type HistoryEntry, type KeyDefaults, type Learning, type LiveEntry, type LookStyles, type OverlayPreviewState, type SpeechEntry, type SwitchState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
+import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatBuild, type ChatModelInfo, type CurrentApp, type Draft, type HistoryEntry, type KeyDefaults, type Learning, type LiveEntry, type OverlayPreviewState, type SpeechEntry, type SwitchState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
 import { applyPatch } from "./fake.ts";
 import type { SettingsPatch } from "./patch.ts";
 
@@ -50,18 +50,6 @@ export const WAKE_MODELS_INFO: WakeModelInfo[] = [
   { name: "hey_mycroft", title: "Hey Mycroft", size: 857_691, cached: false, threshold: 0.5 },
   { name: "hey_jarvis", title: "Hey Jarvis", size: 1_271_370, cached: false, threshold: 0.5 },
 ];
-
-/** The custom properties a test needs to see applied; the real set comes from the look model. */
-export const LOOK_STYLES: LookStyles = {
-  properties: [],
-  schemes: { gunmetal: "dark", holo: "dark", neon: "dark" },
-  looks: {
-    gunmetal: { "--neon": "#6bf8ff", "--bg": "#0f1012", "--editor-bg": "#101418" },
-    holo: { "--neon": "#6bf8ff", "--bg": "#0c1820", "--editor-bg": "#101418" },
-    neon: { "--neon": "light-dark(#007a43, #2bff88)", "--bg": "light-dark(#e8eff7, #020617)", "--editor-bg": "#ffffff" },
-  },
-  values: { gunmetal: {}, holo: {}, neon: {} },
-};
 
 /** A tiny image whose pixels differ per state, so a preview can be checked byte for byte. */
 export function previewBuffer(state: OverlayPreviewState): ArrayBuffer {
@@ -143,13 +131,14 @@ export const WHISPER: SpeechModelInfo = {
 };
 
 /** A backend whose calls are spies and whose events the test emits. */
-export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }, lookStyles: LookStyles = LOOK_STYLES) {
+export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }) {
   const statusListeners: ((status: Status) => void)[] = [];
   const levelListeners: ((level: number) => void)[] = [];
   const audioListeners: ((audio: AudioStatus) => void)[] = [];
   const rebuildingListeners: ((rebuilding: boolean) => void)[] = [];
   const elsewhereListeners: (() => void)[] = [];
-  const themeListeners: (() => void)[] = [];
+  const schemeListeners: ((dark: boolean) => void)[] = [];
+  let dark = false;
   const speechListeners: ((progress: SpeechModelProgress) => void)[] = [];
   const pageListeners: ((page: string) => void)[] = [];
   const updateListeners: ((state: UpdateState) => void)[] = [];
@@ -181,9 +170,12 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     getRebuilding: vi.fn(() => Promise.resolve(false)),
     onRebuilding: vi.fn((listener: (rebuilding: boolean) => void) => rebuildingListeners.push(listener)),
     onSettingsChangedElsewhere: vi.fn((listener: () => void) => elsewhereListeners.push(listener)),
-    onThemeChanged: vi.fn((listener: () => void) => themeListeners.push(listener)),
     getSettings: vi.fn(() => Promise.resolve(structuredClone(settings))),
-    getLookStyles: vi.fn<(styles?: LookStyles) => Promise<LookStyles>>(() => Promise.resolve(structuredClone(lookStyles))),
+    setDark: vi.fn<(value: boolean) => Promise<void>>(() => Promise.resolve()),
+    onThemeChanged: vi.fn((listener: (value: boolean) => void) => {
+      schemeListeners.push(listener);
+      listener(dark);
+    }),
     previewOverlay: vi.fn<(state: OverlayPreviewState, scale: number) => Promise<ArrayBuffer>>((state) => Promise.resolve(previewBuffer(state))),
     settingsReady: vi.fn(() => Promise.resolve()),
     saveSettings: vi.fn<(patch: SettingsPatch) => Promise<void>>((patch) => {
@@ -295,13 +287,13 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     changedElsewhere: () => {
       for (const listener of elsewhereListeners) listener();
     },
+    schemeChanged: (value: boolean) => {
+      dark = value;
+      for (const listener of schemeListeners) listener(value);
+    },
     learningChanged: (next: Learning) => {
       learning = structuredClone(next);
       tellLearning();
-    },
-    themeChanged: (styles: LookStyles) => {
-      lookStyles = styles;
-      for (const listener of themeListeners) listener();
     },
     update: (next: UpdateState) => {
       updateState = next;

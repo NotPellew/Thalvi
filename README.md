@@ -64,7 +64,7 @@ On first launch, Thalvi writes default settings, opens Settings, and downloads t
 ### Wake words, looks, history & privacy
 
 - **Wake words** (**Settings → Listening**): choose **Hey Thalvi**, **Hey Mycroft**, **Hey Jarvis**, or a custom `.onnx` model, tune thresholds and capture limits, or turn wake words off.
-- **Overlay & sounds** (**Settings → Overlay & sounds**): toggle the overlay pill, live draft preview, five audio cues, and pick between **Gunmetal** (default), **Holo**, and **Neon** looks (customizable under `themes` in `desktop.json`).
+- **Overlay & sounds** (**Settings → Overlay & sounds**): toggle the overlay pill, live draft preview, five audio cues, and pick between the fixed **Gunmetal** (default), **Holo**, and **Neon** looks.
 - **History & recordings** (**Settings → History & recordings**): **Last dictation** keeps the latest capture in memory (even if cancelled or failed) to edit and copy. Local **History** is on by default (last 200 entries, configurable 1–1000). Metrics, text, and audio recordings are all **off by default** and stay strictly on your computer (`~/.local/share/thalvi` on Linux, `%LOCALAPPDATA%\thalvi` on Windows).
 - **Config:** stored in `desktop.json` under `~/.config/thalvi/` (Linux) or `%APPDATA%\thalvi\` (Windows).
 

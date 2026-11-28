@@ -10,21 +10,9 @@ export const LOOKS: readonly (readonly [Look, string])[] = [
   ["neon", "Neon"],
 ];
 
-/** The custom properties last set on a root, so none from the look before stays behind. */
-const applied = new WeakMap<HTMLElement, readonly string[]>();
-
 /** Tells the stylesheets which look `root` wears; gunmetal is the default. */
 export function applyLook(root: HTMLElement, look: Look): void {
   root.dataset["look"] = look;
-}
-
-/** Sets one look's resolved custom properties on `root`, dropping the ones it no longer has. */
-export function applyLookStyles(root: HTMLElement, styles: Record<string, string>): void {
-  for (const name of applied.get(root) ?? []) {
-    if (!(name in styles)) root.style.removeProperty(name);
-  }
-  for (const [name, value] of Object.entries(styles)) root.style.setProperty(name, value);
-  applied.set(root, Object.keys(styles));
 }
 
 /** One radio per look, with a small preview of it. */

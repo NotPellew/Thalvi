@@ -1,19 +1,19 @@
+import { build } from "vite";
 import { beforeEach, describe, expect, it } from "vitest";
-import type { Look, LookStyles } from "./contract.ts";
+import type { Look } from "./contract.ts";
+import gunmetalCss from "./look-gunmetal.css?raw";
+import holoCss from "./look-holo.css?raw";
+import neonCss from "./look-neon.css?raw";
 import settingsCss from "./settings.css?raw";
 import settingsLooksCss from "./settings-looks.css?raw";
 import { mountSettings } from "./settings.ts";
-import { LOOK_STYLES, SETTINGS, settle, stubBackend } from "./testing.ts";
+import { SETTINGS, settle, stubBackend } from "./testing.ts";
 import themeCss from "./theme.css?raw";
 
 function pick(root: HTMLElement, selector: string): HTMLElement {
   const found = root.querySelector<HTMLElement>(selector);
   if (!found) throw new Error(`missing ${selector}`);
   return found;
-}
-
-function withNeon(styles: LookStyles, neon: Record<string, string>): LookStyles {
-  return { ...styles, looks: { ...styles.looks, neon: { ...styles.looks.neon, ...neon } } };
 }
 
 describe("the settings window's look", () => {
@@ -34,33 +34,22 @@ describe("the settings window's look", () => {
   const radio = (look: Look) => pick(root, `[data-choice="${look}"] input`) as HTMLInputElement;
 
   it("wears the saved look and offers the three looks on the Overlay & sounds page", async () => {
-    await open("gunmetal");
+    const stub = await open("gunmetal");
     expect(root.dataset["look"]).toBe("gunmetal");
     expect(Array.from(root.querySelectorAll(".lk")).map((choice) => choice.textContent)).toEqual(["Gunmetal", "Holo", "Neon"]);
     expect(radio("gunmetal").checked).toBe(true);
-  });
-
-  it("sets the saved look's variables before it builds the pages", async () => {
-    const stub = stubBackend({ ...SETTINGS, look: "holo" });
-    const when: { name: string; pageBuilt: boolean }[] = [];
-    const real = root.style.setProperty.bind(root.style);
-    root.style.setProperty = (name: string, value: string, priority?: string): void => {
-      when.push({ name, pageBuilt: root.querySelector("section[data-page]") !== null });
-      real(name, value, priority);
-    };
-    mountSettings(root, stub.backend);
-    await settle();
-    expect(root.style.getPropertyValue("--neon")).toBe("#6bf8ff");
-    expect(when.find((set) => set.name === "--neon")?.pageBuilt).toBe(false);
-    // The window is only shown once it wears its styles, so it never flashes unstyled.
     expect(stub.backend.settingsReady).toHaveBeenCalled();
+    // The overlay needs the system scheme while Thalvi runs, not just at start.
+    expect(stub.backend.setDark).toHaveBeenCalledWith(false);
+    stub.schemeChanged(true);
+    await settle();
+    expect(stub.backend.setDark).toHaveBeenCalledWith(true);
   });
 
   it("switches at once when picked, applies it, and goes back when the app refuses it", async () => {
     const stub = await open();
     radio("holo").click();
     expect(root.dataset["look"]).toBe("holo");
-    expect(root.style.getPropertyValue("--neon")).toBe("#6bf8ff");
     await settle();
     expect(stub.backend.saveSettings).toHaveBeenCalledWith({ look: "holo" });
     expect(pick(root, "section[data-page=overlay] .row[data-label=look] .applied").textContent).toBe("Applied.");
@@ -70,68 +59,15 @@ describe("the settings window's look", () => {
     expect(root.dataset["look"]).toBe("gunmetal");
     await settle();
     expect(root.dataset["look"]).toBe("holo");
-    expect(root.style.getPropertyValue("--neon")).toBe("#6bf8ff");
     expect(radio("holo").checked).toBe(true);
     expect(pick(root, "section[data-page=overlay] .row[data-label=look] .note:not([hidden])").textContent).toBe("Thalvi could not apply it.");
-  });
-
-  it("re-reads the variables when the settings changed outside this window", async () => {
-    const stub = await open();
-    expect(root.style.getPropertyValue("--neon")).toBe("light-dark(#007a43, #2bff88)");
-    stub.backend.getLookStyles.mockResolvedValueOnce(withNeon(LOOK_STYLES, { "--neon": "#123456" }));
-    stub.changedElsewhere();
-    await settle();
-    expect(root.style.getPropertyValue("--neon")).toBe("#123456");
-  });
-
-  it("keeps the newest styles when an older answer arrives after them", async () => {
-    const stub = await open();
-    const waiting: ((styles: LookStyles) => void)[] = [];
-    stub.backend.getLookStyles.mockImplementation(() => new Promise<LookStyles>((resolve) => { waiting.push(resolve); }));
-    stub.changedElsewhere();
-    await settle();
-    stub.changedElsewhere();
-    await settle();
-    expect(waiting.length).toBeGreaterThanOrEqual(2);
-
-    const newest = waiting[waiting.length - 1];
-    const oldest = waiting[0];
-    if (!newest || !oldest) throw new Error("the styles were not read twice");
-    newest(withNeon(LOOK_STYLES, { "--neon": "#222222" }));
-    await settle();
-    expect(root.style.getPropertyValue("--neon")).toBe("#222222");
-    oldest(withNeon(LOOK_STYLES, { "--neon": "#111111" }));
-    await settle();
-    expect(root.style.getPropertyValue("--neon")).toBe("#222222");
-  });
-
-  it("shows the window only after the newest settings load has its styles", async () => {
-    const stub = stubBackend({ ...SETTINGS, look: "neon" });
-    const pending: ((styles: LookStyles) => void)[] = [];
-    stub.backend.getLookStyles.mockImplementation(() => new Promise<LookStyles>((resolve) => { pending.push(resolve); }));
-    mountSettings(root, stub.backend);
-    await settle();
-    stub.backend.getSettings.mockResolvedValueOnce({ ...SETTINGS, look: "holo" });
-    stub.changedElsewhere();
-    await settle();
-
-    const [older, newer] = pending;
-    if (!older || !newer) throw new Error("the styles were not read twice");
-    older(LOOK_STYLES);
-    await settle();
-    expect(stub.backend.settingsReady).not.toHaveBeenCalled();
-
-    newer(LOOK_STYLES);
-    await settle();
-    expect(root.dataset["look"]).toBe("holo");
-    expect(stub.backend.settingsReady).toHaveBeenCalledTimes(1);
   });
 
   it("puts each heading and the rows after it in one group the looks can frame", async () => {
     await open();
     const headings = (page: string) =>
       Array.from(root.querySelectorAll(`section[data-page="${page}"] .grp`)).map((group) => group.querySelector("h4")?.textContent ?? "");
-    expect(headings("overlay")).toEqual(["Overlay", "Look", "Customize", "Sounds"]);
+    expect(headings("overlay")).toEqual(["Overlay", "Look", "Sounds"]);
     expect(headings("listening")).toEqual([
       "Right now",
       "Device",
@@ -155,12 +91,15 @@ describe("the settings window's look", () => {
 });
 
 describe("the settings stylesheets", () => {
-  // Every colour and effect is a custom property the look model emits; a literal here would
-  // bring back the drift between Settings and the overlay that the model exists to remove.
+  // Every colour and effect is a fixed custom property; a literal in a rule would bring back
+  // the drift between Settings and the overlay that the shared palettes exist to remove.
   const sheets: readonly (readonly [string, string])[] = [
     ["theme.css", themeCss],
     ["settings.css", settingsCss],
     ["settings-looks.css", settingsLooksCss],
+    ["look-neon.css", neonCss],
+    ["look-holo.css", holoCss],
+    ["look-gunmetal.css", gunmetalCss],
   ];
   const colorLiteral =
     /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix|light-dark|device-cmyk)\s*\(/;
@@ -184,4 +123,34 @@ describe("the settings stylesheets", () => {
     }
     expect(literalColors).toEqual([]);
   });
+
+  const used = new Set(
+    [themeCss, settingsCss, settingsLooksCss]
+      .flatMap((css) => Array.from(css.matchAll(/var\((--[\w-]+)/g), (match) => match[1]))
+      .filter((name) => name !== "--p"),
+  );
+
+  it.each([
+    ["neon", neonCss, "light-dark(#007a43, #2bff88)"],
+    ["holo", holoCss, "#6bf8ff"],
+    ["gunmetal", gunmetalCss, "#6bf8ff"],
+  ] as const)("the %s stylesheet defines every property the rules read", (look, css, accent) => {
+    const defined = new Set(Array.from(css.matchAll(/^\s*(--[\w-]+):/gm), (match) => match[1]));
+    expect(defined.size).toBeGreaterThan(0);
+    for (const name of used) {
+      expect(defined.has(name), `${look} has no ${String(name)}`).toBe(true);
+    }
+    expect(css).toContain(`--neon: ${accent};`);
+  });
+
+  it("keeps Neon's light and dark colours in the built window", async () => {
+    const output = await build({ configFile: "vite.config.ts", logLevel: "silent", build: { write: false } });
+    const bundles = Array.isArray(output) ? output : [output];
+    const css = bundles
+      .flatMap((bundle) => ("output" in bundle ? bundle.output : []))
+      .flatMap((file) => (file.type === "asset" && file.fileName.endsWith(".css") ? [String(file.source)] : []))
+      .join("");
+    expect(css).toContain("--bg:light-dark(#e8eff7,#020617)");
+    expect(css).not.toContain("--lightningcss-");
+  }, 60_000);
 });

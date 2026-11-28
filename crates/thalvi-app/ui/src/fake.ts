@@ -1,9 +1,8 @@
 // Dev-only backend for `?fake`. `at` pins status, `look` picks the look, and `fail` and `slow` take comma-separated Settings operations.
 
 import { DownloadFailure } from "./contract.ts";
-import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatModelInfo, type Draft, type HistoryEntry, type Learning, type LookStyles, type OverlayPreviewState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
+import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatModelInfo, type Draft, type HistoryEntry, type Learning, type OverlayPreviewState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
-import fixture from "./look-styles.json";
 import type { SettingsPatch } from "./patch.ts";
 
 function isObject(value: unknown): value is { [key: string]: unknown } {
@@ -261,8 +260,7 @@ export function fakeBackend(params: URLSearchParams): Backend {
     onRebuilding: () => undefined,
     onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
-    // Generated from what the desktop resolves; a Rust test keeps it in step.
-    getLookStyles: () => Promise.resolve(fixture as LookStyles),
+    setDark: () => Promise.resolve(),
     onThemeChanged: () => undefined,
     previewOverlay: (state: OverlayPreviewState, scale: number) => {
       const ratio = Math.round(scale);
