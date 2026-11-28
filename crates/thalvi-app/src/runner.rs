@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
 use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::chosen::{Chosen, Preload};
@@ -2460,7 +2462,6 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use serde_json::json;
     use thalvi_desktop::device::{Download, Export};
     use thalvi_desktop::local::{LocalRecognizer, ModelSource};
     use thalvi_desktop::models::{self, CatalogHead, CatalogSpeech};
