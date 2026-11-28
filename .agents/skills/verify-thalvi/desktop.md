@@ -91,15 +91,12 @@ $H app-start $R /var/tmp/thalvi-rig/bin/<name>/thalvi-desktop --config cfg.json 
   or a download: `install -D -m 444 -t $BASE/models FILE...` (`$BASE` is
   `THALVI_RIG_BASE` or `/var/tmp/thalvi-rig`). Then pass the same files to
   `up --models ...`: the default wake word needs `melspectrogram.onnx`,
-  `embedding_model.onnx`, `hey_thalvi_v0.0.14.onnx` and the ending spotter's four
-  `kws_gigaspeech_3m.*` files (about 9 MB together); on-device Nemotron adds
+  `embedding_model.onnx` and `hey_thalvi_v0.0.14.onnx`; on-device Nemotron adds
   `nemotron_160ms.*`, and another chosen wake word its own head. `up` hardlinks
   each named file or `NAME.*` into `$R/home/.local/share/thalvi/models/` and
   stops if one is missing; deleting `$R/home/.local/share/thalvi` or the app
   replacing a damaged file leaves the cache intact. The app accepts a cached file
-  by its pinned size, without rehashing it. A missing ending spotter downloads
-  from modelscope.cn, which can be slow enough to fail; the app then says so and
-  keeps working.
+  by its pinned size, without rehashing it.
 - A Whisper Turbo entry (`"model":"whisper_turbo_cpu"` or `whisper_turbo_vulkan`) needs
   `up --models ggml-large-v3-turbo-q5_0.bin,ggml-silero-v6.2.0.bin` (plus the wake and
   ending files) and `app-start ... --whisper DIR`, where DIR holds the helper script's `cpu/`

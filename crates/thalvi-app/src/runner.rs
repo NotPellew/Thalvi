@@ -9,9 +9,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use thalvi_desktop::audio::{Frames, InputGate, Microphone};
-use thalvi_desktop::capture::{CaptureRoute, EndingPauses, Endings};
+use thalvi_desktop::capture::{CaptureRoute, EndingPauses};
 use thalvi_desktop::chosen::{Chosen, Preload};
 use thalvi_desktop::config::DesktopConfig;
 use thalvi_desktop::delivery::{Bound, Delivery, Finished};
@@ -30,19 +32,18 @@ use thalvi_desktop::host::{
 };
 use thalvi_desktop::learn::{FieldLimit, FieldProbe, Learning, watch};
 use thalvi_desktop::metrics::{Event, Metrics, Recorder};
-use thalvi_desktop::models::{self, ListedSpeech, ModelStore};
+use thalvi_desktop::models::{ListedSpeech, ModelStore};
 use thalvi_desktop::recognizer::{Recognizer, RecognizerError};
 use thalvi_desktop::report::{UserError, causes};
 use thalvi_desktop::speech_device::SpeechDevices;
-use thalvi_desktop::spotter::{KeywordSpotter, OnnxSpotter, SpotterError};
 use thalvi_desktop::wake::{WakeConfig, WakeEngine};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::announcement::Announcements;
 use crate::status::{
-    Failure, FailureKind, LighterModel, Mode, SPOTTER_DOWNLOAD_NOTICE, STARTING_NOTICE, Status,
-    View, WAKE_DOWNLOAD_NOTICE, load_notice,
+    Failure, FailureKind, LighterModel, Mode, STARTING_NOTICE, Status, View, WAKE_DOWNLOAD_NOTICE,
+    load_notice,
 };
 use crate::update::Stop;
 
@@ -439,49 +440,6 @@ async fn load_wake<T>(
     let loaded = load.await;
     publisher.mode(Mode::Starting);
     loaded
-}
-
-/// Loads the ending spotter next to the wake models. It only double-checks the transcript, so a
-/// failure is a notice, shown with the first capture, and dictation goes on without it.
-async fn load_spotter(
-    publisher: &Publisher,
-    endings: &Endings,
-    store: &ModelStore,
-    recorder: &Recorder,
-    load: impl Future<Output = Result<Box<dyn KeywordSpotter>, SpotterError>>,
-) -> (Option<Box<dyn KeywordSpotter>>, Option<String>) {
-    let started = Instant::now();
-    let mut downloads = false;
-    for asset in [
-        models::SPOTTER.encoder,
-        models::SPOTTER.decoder,
-        models::SPOTTER.joiner,
-        models::SPOTTER.pieces,
-    ] {
-        downloads |= !store.is_asset_cached(&asset).await;
-    }
-    if downloads {
-        println!("{SPOTTER_DOWNLOAD_NOTICE}");
-        publisher.mode(Mode::SpotterDownload);
-    }
-    let loaded = load.await;
-    if downloads {
-        publisher.mode(Mode::Starting);
-    }
-    recorder.metric(
-        Event::EndingSpotter,
-        if loaded.is_ok() { "ok" } else { "error" },
-        Some(started.elapsed()),
-        json!({"call": "load", "phrases": endings.entries().count(), "downloaded": downloads}),
-    );
-    match loaded {
-        Ok(spotter) => (Some(spotter), None),
-        Err(error) => {
-            let notice = format!("{error} Endings still work from the transcript.");
-            println!("{notice}");
-            (None, Some(notice))
-        }
-    }
 }
 
 struct PublisherState {
@@ -899,8 +857,6 @@ pub(crate) struct Loaded<S: Rig> {
     recorder: Recorder,
     http: reqwest::Client,
     chat: Option<thalvi_desktop::chat::Chat>,
-    spotter: Option<Box<dyn KeywordSpotter>>,
-    spotter_off: Option<String>,
     local: Option<Arc<dyn Preload>>,
 }
 
@@ -927,19 +883,13 @@ impl Rig for DesktopRig {
             Recorder::per_user(config.recordings).map_err(|error| Failure::of(&error))?;
         let store = ModelStore::per_user().map_err(|error| Failure::of(&error))?;
         let started = Instant::now();
-        let (wake, (spotter, spotter_off)) = tokio::join!(
-            load_wake(
-                publisher,
-                &config.wake,
-                &store,
-                WakeEngine::load(&config.wake, &store),
-            ),
-            load_spotter(publisher, &config.endings, &store, &recorder, async {
-                OnnxSpotter::load(&config.endings, &store)
-                    .await
-                    .map(|spotter| Box::new(spotter) as Box<dyn KeywordSpotter>)
-            }),
-        );
+        let wake = load_wake(
+            publisher,
+            &config.wake,
+            &store,
+            WakeEngine::load(&config.wake, &store),
+        )
+        .await;
         recorder.metric(
             Event::WakeLoad,
             if wake.is_ok() { "ok" } else { "error" },
@@ -972,8 +922,6 @@ impl Rig for DesktopRig {
             recorder,
             http: self.http.clone(),
             chat,
-            spotter,
-            spotter_off,
             local,
         })
     }
@@ -1299,8 +1247,6 @@ async fn build_session<S: Rig>(
         recorder,
         http,
         chat,
-        spotter,
-        spotter_off,
         local,
     } = rig.load(config, &gate, publisher).await?;
     let metrics = recorder.metrics();
@@ -1315,8 +1261,6 @@ async fn build_session<S: Rig>(
             hold: key_state.clone(),
             notice: publisher.notice_sink(),
             status: publisher.status_sink(),
-            spotter,
-            spotter_off,
         },
         config,
         recorder,
@@ -3199,8 +3143,6 @@ mod tests {
                 http: reqwest::Client::new(),
                 notice: publisher.notice_sink(),
                 status: publisher.status_sink(),
-                spotter: None,
-                spotter_off: None,
             }, &DesktopConfig::from_json_str("{}").unwrap(), Recorder::disabled());
             let listening = tokio::task::spawn_local(async move { engine.listen(&mut frames).await });
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -3507,8 +3449,6 @@ mod tests {
                         http: reqwest::Client::new(),
                         notice: publisher.notice_sink(),
                         status: publisher.status_sink(),
-                        spotter: None,
-                        spotter_off: None,
                     },
                     &DesktopConfig::from_json_str("{}").unwrap(),
                     Recorder::disabled(),
@@ -5030,82 +4970,6 @@ mod tests {
         drop(engine_level_tx);
         following.await.unwrap();
     }
-    #[tokio::test]
-    async fn the_spotter_loader_reports_downloads_and_returns_the_model_or_a_notice() {
-        use thalvi_desktop::engine::fakes::FakeSpotter;
-        use thalvi_desktop::spotter::Unspeakable;
-
-        let assets = [
-            models::SPOTTER.encoder,
-            models::SPOTTER.decoder,
-            models::SPOTTER.joiner,
-            models::SPOTTER.pieces,
-        ];
-        for missing in [None, Some(0), Some(3)] {
-            let dir = std::env::temp_dir().join(format!(
-                "thalvi-spotter-load-{}-{missing:?}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            for (index, asset) in assets.iter().enumerate() {
-                if missing != Some(index) {
-                    std::fs::File::create(dir.join(asset.file_name))
-                        .unwrap()
-                        .set_len(asset.size)
-                        .unwrap();
-                }
-            }
-            let store = ModelStore::in_dir(&dir);
-            for fails in [false, true] {
-                let (out, status) = watch::channel(Status::Paused);
-                let publisher = Publisher::new(out, EndingPauses::default());
-                publisher.mode(Mode::Paused);
-                let recorder = Recorder::disabled();
-                let (spotter, notice) =
-                    load_spotter(&publisher, &Endings::default(), &store, &recorder, async {
-                        assert_eq!(
-                            *status.borrow(),
-                            if missing.is_some() {
-                                Status::Loading {
-                                    notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
-                                    downloading: true,
-                                }
-                            } else {
-                                Status::Paused
-                            }
-                        );
-                        if fails {
-                            Err(SpotterError::Phrases(vec![Unspeakable {
-                                phrase: "f\u{fc}ge ein".to_owned(),
-                                characters: "\u{dc}".to_owned(),
-                            }]))
-                        } else {
-                            let (fake, _control) = FakeSpotter::new();
-                            Ok(Box::new(fake) as Box<dyn KeywordSpotter>)
-                        }
-                    })
-                    .await;
-                if fails {
-                    assert!(spotter.is_none());
-                    let notice = notice.unwrap();
-                    assert!(
-                        notice.contains("\"f\u{fc}ge ein\"")
-                            && notice.ends_with("Endings still work from the transcript."),
-                        "{notice}"
-                    );
-                } else {
-                    assert!(spotter.is_some() && notice.is_none());
-                }
-                if missing.is_some() {
-                    assert_eq!(title(&status.borrow()), "Thalvi: starting");
-                } else {
-                    assert_eq!(*status.borrow(), Status::Paused);
-                }
-            }
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_native_input_reports_the_open_microphone_and_closes_it_on_pause() {
@@ -5242,8 +5106,6 @@ mod tests {
                     .unwrap_or_else(Recorder::disabled),
                 http: reqwest::Client::new(),
                 chat: None,
-                spotter: None,
-                spotter_off: None,
                 local: self.local.clone(),
             }))
         }
@@ -5580,8 +5442,6 @@ mod tests {
                 recorder: Recorder::disabled(),
                 http: reqwest::Client::new(),
                 chat: None,
-                spotter: None,
-                spotter_off: None,
                 local: None,
             }))
         }
@@ -6991,8 +6851,6 @@ mod tests {
                 recorder: Recorder::disabled(),
                 http: reqwest::Client::new(),
                 chat: None,
-                spotter: None,
-                spotter_off: None,
                 local: None,
             })
         }

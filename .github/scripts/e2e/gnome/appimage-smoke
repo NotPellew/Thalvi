@@ -62,9 +62,9 @@ copy_models() {
     shopt -s nullglob
     local directory
     local files=("$src"/nemotron_160ms.* "$src"/melspectrogram.onnx "$src"/embedding_model.onnx \
-      "$src"/hey_thalvi*.onnx "$src"/hey_mycroft*.onnx "$src"/kws_gigaspeech_3m.*)
+      "$src"/hey_thalvi*.onnx "$src"/hey_mycroft*.onnx)
     cp -a "${files[@]}" "$dst/"
-    for directory in openwakeword sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01; do
+    for directory in openwakeword; do
       if [[ -d $src/$directory ]]; then
         cp -a "$src/$directory" "$dst/"
       fi

@@ -88,7 +88,7 @@ function script(): Status[] {
     { state: "capturing", target: slack, committed: "", partial: words.slice(0, 3).join(" "), notice: null },
     { state: "capturing", target: slack, committed: words.slice(0, 7).join(" "), partial: words.slice(7, 10).join(" "), notice: null },
     { state: "capturing", target: slack, committed: SENTENCE.repeat(3), partial: "and bring the", notice: null },
-    { state: "capturing", target: slack, committed: SENTENCE, partial: null, notice: "Heard \u201cpaste that\u201d, but the transcript did not end with it. Nothing was removed; say the ending again." },
+    { state: "capturing", target: slack, committed: SENTENCE, partial: null, notice: null },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: true, pauseMs: 2500, copies: false },
     { state: "pending", target: slack, route: "submit", text: SENTENCE, waitingForQuiet: false, pauseMs: 2500, copies: false },
     { state: "working", target: slack, route: "submit", cancellable: false },

@@ -1,8 +1,8 @@
 # Exact counts of lint names in #[expect] attributes under crates/.
 
-"clippy::cast_possible_truncation" = 45
-"clippy::cast_possible_wrap" = 3
-"clippy::cast_precision_loss" = 32
+"clippy::cast_possible_truncation" = 44
+"clippy::cast_possible_wrap" = 2
+"clippy::cast_precision_loss" = 27
 "clippy::cast_sign_loss" = 26
 "clippy::large_enum_variant" = 1
 "clippy::needless_pass_by_value" = 1

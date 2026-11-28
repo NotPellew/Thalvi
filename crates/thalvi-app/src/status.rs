@@ -11,7 +11,6 @@ use thalvi_desktop::report::{UserError, causes};
 
 pub const STARTING_NOTICE: &str = "Starting listening. The microphone is not ready yet.";
 pub const WAKE_DOWNLOAD_NOTICE: &str = "Downloading the wake word model.";
-pub const SPOTTER_DOWNLOAD_NOTICE: &str = "Downloading the ending phrase model.";
 
 /// A lighter on-device model the user can switch to after their model could not keep up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -286,8 +285,6 @@ pub enum Mode {
     Starting,
     /// A wake word model is downloading.
     WakeDownload,
-    /// The ending phrase model is downloading.
-    SpotterDownload,
     /// The microphone is closed.
     Paused,
     /// An accepted capture is being delivered.
@@ -324,7 +321,7 @@ impl View {
             && matches!(self.engine, EngineState::Listening)
             && !matches!(
                 self.mode,
-                Mode::Paused | Mode::WakeDownload | Mode::SpotterDownload | Mode::Delivering(_)
+                Mode::Paused | Mode::WakeDownload | Mode::Delivering(_)
             )
         {
             return Some(Status::Loading {
@@ -356,10 +353,6 @@ impl View {
             },
             (Mode::WakeDownload, _) => Status::Loading {
                 notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
-                downloading: true,
-            },
-            (Mode::SpotterDownload, _) => Status::Loading {
-                notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
                 downloading: true,
             },
             (Mode::Paused, _) => Status::Paused,
@@ -688,14 +681,6 @@ mod tests {
                 EngineState::Listening,
                 Status::Loading {
                     notice: WAKE_DOWNLOAD_NOTICE.to_owned(),
-                    downloading: true,
-                },
-            ),
-            (
-                Mode::SpotterDownload,
-                EngineState::Listening,
-                Status::Loading {
-                    notice: SPOTTER_DOWNLOAD_NOTICE.to_owned(),
                     downloading: true,
                 },
             ),

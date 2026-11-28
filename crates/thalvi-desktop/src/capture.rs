@@ -391,7 +391,7 @@ pub enum FinalStep {
 pub struct CaptureFullError;
 
 /// What a wake-word capture listens for; a hold has none of it.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Spoken {
     endings: Endings,
     /// The scripts whose phrase, spoken alone, runs without an ending.
@@ -400,7 +400,7 @@ struct Spoken {
 
 /// One dictation: final transcripts in, an ending delivered after a quiet pause out.
 /// Pure and synchronous; the caller supplies every instant.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CaptureSession {
     spoken: Option<Spoken>,
     pauses: EndingPauses,
