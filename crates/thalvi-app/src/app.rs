@@ -753,6 +753,7 @@ fn start(login: bool, config: Option<std::path::PathBuf>) -> Result<(), String> 
             commands::get_audio,
             commands::get_rebuilding,
             commands::get_settings,
+            commands::set_dark,
             commands::preview_overlay,
             commands::settings_ready,
             commands::save_settings,

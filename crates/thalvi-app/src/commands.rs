@@ -61,6 +61,12 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
     settings_json(&state.config())
 }
 
+/// Reports the system colour scheme the overlay and its preview draw with.
+#[tauri::command]
+pub fn set_dark(dark: bool, state: State<'_, AppState>) {
+    state.set_dark(dark);
+}
+
 /// Draws the real overlay for a synthetic state, as framed raw RGBA bytes for the preview canvas.
 #[tauri::command]
 pub async fn preview_overlay(

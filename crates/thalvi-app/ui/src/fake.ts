@@ -246,6 +246,8 @@ export function fakeBackend(params: URLSearchParams): Backend {
     onRebuilding: () => undefined,
     onSettingsChangedElsewhere: () => undefined,
     getSettings: () => Promise.resolve(structuredClone(saved)),
+    setDark: () => Promise.resolve(),
+    onThemeChanged: () => undefined,
     previewOverlay: (state: OverlayPreviewState, scale: number) => {
       const ratio = Math.round(scale);
       const width = 460 * ratio;

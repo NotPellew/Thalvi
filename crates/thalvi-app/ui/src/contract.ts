@@ -339,6 +339,10 @@ export interface Backend {
   /** An agent changed the saved settings or a switch the window reads from the OS; the window's own saves never fire this. */
   onSettingsChangedElsewhere(listener: () => void): void;
   getSettings(): Promise<Settings>;
+  /** Picks the Neon palette the overlay draws with, and the palette a preview draws with. */
+  setDark(dark: boolean): Promise<void>;
+  /** Reports the system colour scheme now and whenever it changes. */
+  onThemeChanged(listener: (dark: boolean) => void): void;
   /** Straight-alpha RGBA of one overlay state: width and height as u32 LE, then width * height * 4 bytes. */
   previewOverlay(state: OverlayPreviewState, scale: number): Promise<ArrayBuffer>;
   /** Says this window has its styles, so a show asked for meanwhile can happen. */

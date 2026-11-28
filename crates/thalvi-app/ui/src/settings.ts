@@ -396,6 +396,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   backend.onUpdate((state) => {
     live.update(state);
   });
+  backend.onThemeChanged((dark) => { void backend.setDark(dark); });
   backend.onSettingsChangedElsewhere(() => {
     load(typingNow());
   });

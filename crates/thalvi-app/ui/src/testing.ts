@@ -132,11 +132,6 @@ export const WHISPER: SpeechModelInfo = {
   word_list: false,
 };
 
-type SchemeReporter = {
-  setDark(dark: boolean): Promise<void>;
-  onThemeChanged(listener: (dark: boolean) => void): void;
-};
-
 /** A backend whose calls are spies and whose events the test emits. */
 export function stubBackend(settings: Settings = SETTINGS, initial: Status = { state: "listening" }) {
   const statusListeners: ((status: Status) => void)[] = [];
@@ -260,7 +255,7 @@ export function stubBackend(settings: Settings = SETTINGS, initial: Status = { s
     onUpdate: vi.fn((listener: (state: UpdateState) => void) => updateListeners.push(listener)),
     checkForUpdates: vi.fn<() => Promise<void>>(() => Promise.resolve()),
     openReleaseNotes: vi.fn<() => Promise<void>>(() => Promise.resolve()),
-  } satisfies Backend & SchemeReporter;
+  } satisfies Backend;
   return {
     backend,
     /** The settings after each change the desktop accepted, in order. */
