@@ -2296,7 +2296,6 @@ fn retunes_only(old: &DesktopConfig, new: &DesktopConfig) -> bool {
         recordings: old.recordings,
         history: old.history,
         update_channel: old.update_channel,
-        themes: old.themes.clone(),
         wake: new.wake.clone().with_enabled(old.wake.enabled()),
         stt: thalvi_desktop::config::SttConfig {
             learn_from_corrections: old.stt.learn_from_corrections,
@@ -3363,10 +3362,6 @@ mod tests {
             (r#"{"update_channel": "development"}"#, false),
             (r#"{"history": {"enabled": false}}"#, false),
             (r#"{"look": "neon"}"#, false),
-            (
-                r#"{"themes":{"version":1,"gunmetal":{"font":{"scale":1.25}}}}"#,
-                false,
-            ),
             (
                 r#"{"history": {"limit": 5}, "recordings": {"audio": true}}"#,
                 false,

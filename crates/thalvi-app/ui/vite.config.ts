@@ -8,6 +8,6 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
     environment: "jsdom",
-    css: { include: [/settings(?:-looks)?\.css/] },
+    css: { include: [/settings(?:-looks)?\.css/, /look-(?:neon|holo|gunmetal)\.css/] },
   },
 });

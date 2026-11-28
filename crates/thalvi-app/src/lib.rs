@@ -9,7 +9,6 @@ mod client;
 mod commands;
 mod control;
 mod launch;
-mod look_styles;
 mod menu_entry;
 mod overlay;
 mod preview;

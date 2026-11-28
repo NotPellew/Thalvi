@@ -1,10 +1,10 @@
 // The settings window: sidebar, search, pages, and the one way a change is applied.
 
-import type { AudioStatus, Backend, Look, LookStyles, Settings, Status } from "./contract.ts";
+import type { AudioStatus, Backend, Look, Settings, Status } from "./contract.ts";
 import { errorText } from "./contract.ts";
 import { createControls } from "./controls.ts";
 import { el } from "./dom.ts";
-import { applyLook, applyLookStyles } from "./look.ts";
+import { applyLook } from "./look.ts";
 import { settingsPatch } from "./patch.ts";
 import {
   APPLIED_LATER_TEXT,
@@ -54,10 +54,6 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   const touchedDuringSearch = new Set<HTMLDetailsElement>();
   // What the desktop holds; pages read it and change it only through `apply`.
   let settings: Settings | null = null;
-  // The looks' resolved styles, and which read is newest so a slow answer cannot win.
-  let lookStyles: LookStyles | null = null;
-  let displayedLook: Look = "gunmetal";
-  let styleRequest = 0;
   let loadRequest = 0;
   let windowReady = false;
   let runtimeFailure = "";
@@ -76,7 +72,6 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     status: () => undefined,
     opened: () => undefined,
     look: () => undefined,
-    lookStyles: () => undefined,
     refresh: () => undefined,
     update: () => undefined,
   };
@@ -243,32 +238,10 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     }, { once: true });
   }
 
-  /** Shows a look at once; the styles read last are on hand, so picking one does not wait. */
+  /** Shows a look at once; its stylesheet is already on the page. */
   function showLook(look: Look): void {
-    displayedLook = look;
     applyLook(root, look);
-    if (lookStyles) applyLookStyles(root, lookStyles.looks[look]);
     live.look(look);
-  }
-
-  /** Reads the resolved look styles and puts the current look's on the window. */
-  async function refreshLookStyles(): Promise<void> {
-    const request = ++styleRequest;
-    let styles: LookStyles;
-    try {
-      styles = await backend.getLookStyles();
-    } catch (error) {
-      if (request === styleRequest) {
-        loadFailure = errorText(error);
-        feedback();
-      }
-      return;
-    }
-    if (request !== styleRequest) return;
-    lookStyles = styles;
-    applyLookStyles(root, styles.looks[displayedLook]);
-    live.lookStyles(styles);
-    if (search.value !== "") applyView();
   }
 
   function load(typing: Typing | null = null): void {
@@ -292,8 +265,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     feedback();
     await queue;
     if (request !== loadRequest) return;
-    const stylesReady = refreshLookStyles();
-    const loaded = await backend.getSettings().finally(() => stylesReady);
+    const loaded = await backend.getSettings();
     if (request !== loadRequest) return;
     const microphones = await backend.listMicrophones().catch((error: unknown) => ({ error: errorText(error) }));
     const holdKeyUnavailable = await backend.getHoldKeyUnavailable();
@@ -313,7 +285,7 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
     showLook(loaded.look);
     live.opened = () => undefined;
     pages = buildPages({
-      settings: loaded, backend, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, keyDefaults, startAtLogin, menuEntry, live, apply, reloadSettings: () => { load(typingNow()); }, showLook, lookStyles,
+      settings: loaded, backend, open, controls, microphones, audio, holdKeyUnavailable, appStylesUnavailable, keyDefaults, startAtLogin, menuEntry, live, apply, reloadSettings: () => { load(typingNow()); }, showLook,
     });
     pagesNode.replaceChildren(...pages.map((page) => page.node));
     navButtons = pages.map((page) => {
@@ -347,7 +319,6 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
       }
       for (const key of Object.keys(settings)) Reflect.deleteProperty(settings, key);
       Object.assign(settings, next);
-      if (Object.hasOwn(patch, "look") || Object.hasOwn(patch, "themes")) void refreshLookStyles();
     };
     const result = queue.then(run);
     queue = result.catch(() => undefined);
@@ -428,7 +399,6 @@ export function mountSettings(root: HTMLElement, backend: Backend): void {
   backend.onSettingsChangedElsewhere(() => {
     load(typingNow());
   });
-  backend.onThemeChanged(() => { void refreshLookStyles(); });
   backend.onStatus(showStatus);
   backend.getStatus().then(showStatus).catch((error: unknown) => {
     runtimeFailure = errorText(error);
