@@ -66,6 +66,8 @@ Changes since `6baf0f0e` alter hook routing and its tests (`251fd063`, `27430c3b
 contains the already represented AltGr addition `51c26f40` and key-validation/message changes
 `0baa95a4`, `c056fa4c`. Hook routing itself remains outside this proof.
 
+The write-only `KeyState.kind`, `.mode` and `.since` were dropped (#805): no property or harness patch reads them. Each row's own phase and each `Impulse` still carry the action, mode and chord-wait order the properties check; the mutation patches follow the shorter `step`.
+
 `Cutoff` kept a release time for the final-pass deadline (#586). The one-recognizer change (#727)
 removes that deadline, so `released_at` and the stored `Instant` are gone: `Cutoff` records only the
 release's `Order`, set by the same first release, and `precedes` compares it as before. `Cutoff::at`
