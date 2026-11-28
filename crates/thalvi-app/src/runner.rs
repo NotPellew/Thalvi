@@ -4308,7 +4308,9 @@ mod tests {
             };
             self.link.send(Control::Apply(Box::new(change)));
             let control = self.runner.control.recv().await.unwrap();
-            Box::pin(self.runner.handle(control)).await;
+            tokio::time::timeout(WAIT, Box::pin(self.runner.handle(control)))
+                .await
+                .expect("the runner applied the change without a rebuild");
             assert_eq!(
                 self.runner.config.stt.learn_from_corrections(),
                 retune,
@@ -4318,7 +4320,9 @@ mod tests {
                 let on = self.on.clone();
                 self.link.send(Control::Apply(Box::new(on)));
                 let control = self.runner.control.recv().await.unwrap();
-                Box::pin(self.runner.handle(control)).await;
+                tokio::time::timeout(WAIT, Box::pin(self.runner.handle(control)))
+                    .await
+                    .expect("the runner applied the change without a rebuild");
                 assert!(self.runner.config.stt.learn_from_corrections(), "{label}");
             }
         }
