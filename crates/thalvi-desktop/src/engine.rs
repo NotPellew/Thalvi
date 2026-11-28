@@ -2002,11 +2002,7 @@ where
     }
 
     /// Ends a released hold with the text the recognizer has.
-    fn hold_done(
-        &mut self,
-        live: &mut Live<R::Session>,
-        held: Option<&Started>,
-    ) -> Option<Done> {
+    fn hold_done(&mut self, live: &mut Live<R::Session>, held: Option<&Started>) -> Option<Done> {
         if held.is_none()
             && let Some(pending) = live.text.pending()
         {
@@ -2122,11 +2118,7 @@ where
     }
 
     /// Ends a released hold: what was said, with the words still being recognized, is pasted.
-    fn finish_hold(
-        &mut self,
-        live: &mut Live<R::Session>,
-        held: Option<&Started>,
-    ) -> Option<Done> {
+    fn finish_hold(&mut self, live: &mut Live<R::Session>, held: Option<&Started>) -> Option<Done> {
         if let Some(partial) = live.partial.take().filter(|text| has_words(text)) {
             if let Some(done) = self.on_final(live, &partial) {
                 return Some(done);

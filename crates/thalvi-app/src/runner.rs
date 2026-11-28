@@ -4252,8 +4252,7 @@ mod tests {
                 .await
                 .expect("the runner applied the change without a rebuild");
             assert_eq!(
-                self.runner.config.stt.learn_from_corrections,
-                retune,
+                self.runner.config.stt.learn_from_corrections, retune,
                 "{label}: the switch was applied"
             );
             if !retune {

@@ -243,9 +243,7 @@ pub fn parse_event(text: &str) -> Option<Result<Event, Error>> {
         Some("speechStart") => Some(Ok(Event::SpeechStart)),
         Some("speechEnd") => Some(Ok(Event::SpeechEnd)),
         Some("transcript") => Some(Ok(Event::Partial { text: transcript() })),
-        Some("speechComplete") => Some(Ok(Event::SpeechComplete {
-            text: transcript(),
-        })),
+        Some("speechComplete") => Some(Ok(Event::SpeechComplete { text: transcript() })),
         Some("error") => Some(Ok(Event::Error {
             message: value
                 .get("message")

@@ -764,15 +764,24 @@ mod tests {
             ("http://host/v1", "  ", Err(WritingSettingsError::Model)),
         ];
         for (url, model, expected) in cases {
-            let result = writing(url, model, "secret", None, Vec::new(), Vec::new()).map(
-                |writing| match writing.destination {
-                    Destination::Manual(endpoint) => endpoint.url,
-                    Destination::Computer { .. } | Destination::None => panic!("manual"),
-                },
-            );
+            let result =
+                writing(url, model, "secret", None, Vec::new(), Vec::new()).map(|writing| {
+                    match writing.destination {
+                        Destination::Manual(endpoint) => endpoint.url,
+                        Destination::Computer { .. } | Destination::None => panic!("manual"),
+                    }
+                });
             assert_eq!(result, expected.map(str::to_owned), "{url:?} {model:?}");
         }
-        let writing = writing("http://host/v1", "m", "secret", None, Vec::new(), Vec::new()).unwrap();
+        let writing = writing(
+            "http://host/v1",
+            "m",
+            "secret",
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
         assert_eq!(writing.key(), "secret");
         assert_eq!(
             format!("{writing:?}"),

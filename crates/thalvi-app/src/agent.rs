@@ -642,12 +642,7 @@ async fn cancel(running: &impl Running, wait: Duration) -> String {
         let current = status.borrow();
         (
             capturing(&current),
-            matches!(
-                &*current,
-                Status::Working {
-                    ..
-                }
-            ),
+            matches!(&*current, Status::Working { .. }),
         )
     };
     let feeding_now = *feeding.borrow();
