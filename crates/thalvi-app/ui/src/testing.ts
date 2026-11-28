@@ -2,7 +2,8 @@
 
 import { vi } from "vitest";
 import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatBuild, type ChatModelInfo, type CurrentApp, type Draft, type HistoryEntry, type KeyDefaults, type Learning, type LiveEntry, type LookStyles, type OverlayPreviewState, type SpeechEntry, type SwitchState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
-import { applyPatch, type SettingsPatch } from "./patch.ts";
+import { applyPatch } from "./fake.ts";
+import type { SettingsPatch } from "./patch.ts";
 
 export const CHAT_MODEL: ChatModelInfo = {
   title: "Qwen3 4B · Q4_K_M", size: 2533261953, license: "Apache-2.0",

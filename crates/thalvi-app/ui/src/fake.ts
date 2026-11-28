@@ -4,7 +4,23 @@ import { DownloadFailure } from "./contract.ts";
 import { OVERLAY_PREVIEW_STATES, type AudioStatus, type Backend, type ChatModelInfo, type Draft, type HistoryEntry, type Learning, type LookStyles, type OverlayPreviewState, type Settings, type SpeechModelInfo, type SpeechModelProgress, type Status, type UpdateState, type WakeModelInfo } from "./contract.ts";
 import { LOOKS } from "./look.ts";
 import fixture from "./look-styles.json";
-import { applyPatch } from "./patch.ts";
+import type { SettingsPatch } from "./patch.ts";
+
+function isObject(value: unknown): value is { [key: string]: unknown } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** `target` with `patch` merged in, as the desktop merges it; `target` is left alone. */
+export function applyPatch<T extends object>(target: T, patch: SettingsPatch): T {
+  const merged = new Map<string, unknown>(Object.entries(target));
+  for (const [key, value] of Object.entries(patch)) {
+    const was = merged.get(key);
+    if (value === null) merged.delete(key);
+    else if (isObject(value)) merged.set(key, applyPatch(isObject(was) ? was : {}, value));
+    else merged.set(key, value);
+  }
+  return Object.fromEntries(merged) as T;
+}
 
 const UNIFIED_LANGUAGES = [
   "Bulgarian",
