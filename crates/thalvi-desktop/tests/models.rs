@@ -17,7 +17,7 @@ use axum::routing::get;
 use sha2::{Digest, Sha256};
 use thalvi_desktop::device::{Device, Fallback, Gpu};
 use thalvi_desktop::models::{
-    Asset, CatalogSpeech, ListedSpeech, ModelError, ModelKind, ModelStore, SPOTTER, SpeechAssets,
+    Asset, CatalogSpeech, ListedSpeech, ModelError, ModelKind, ModelStore, SpeechAssets,
     SpeechDownloads, SpeechProgress, WHISPER_TURBO,
 };
 use thalvi_desktop::report::causes;
@@ -136,7 +136,7 @@ async fn a_download_names_the_client_for_hosts_that_refuse_anonymous_ones() {
     let url = format!("http://{address}/needs-agent.onnx");
     let sha = sha256(GOOD);
     let asset = Asset {
-        kind: ModelKind::Spotter,
+        kind: ModelKind::Wake,
         file_name: "needs-agent.onnx",
         url: &url,
         size: GOOD.len() as u64,
@@ -605,17 +605,6 @@ async fn the_catalog_lists_each_model_with_its_size_license_languages_source_and
 #[test]
 fn model_files_are_pinned_and_kept_apart() {
     let mut names = Vec::new();
-    for asset in [
-        SPOTTER.encoder,
-        SPOTTER.decoder,
-        SPOTTER.joiner,
-        SPOTTER.pieces,
-    ] {
-        assert_eq!(asset.kind, ModelKind::Spotter, "{}", asset.file_name);
-        assert!(asset.url.starts_with("https://"), "{}", asset.url);
-        assert_eq!(asset.sha256.len(), 64, "{}", asset.file_name);
-        names.push(asset.file_name);
-    }
     for model in CatalogSpeech::ALL {
         for assets in std::iter::once(model.assets()).chain(model.gpu_assets()) {
             let files = [assets.encoder, assets.decoder, assets.joiner, assets.tokens]

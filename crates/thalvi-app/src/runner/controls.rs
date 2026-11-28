@@ -112,8 +112,6 @@ impl Rig for FakeRig {
             recorder: Recorder::disabled(),
             http: reqwest::Client::new(),
             chat: None,
-            spotter: None,
-            spotter_off: None,
             local: None,
         })
     }

@@ -110,11 +110,6 @@ jobs:
           shared-key: linux
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - if: needs.changes.outputs.server != 'false'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/thalvi/test-models
-          key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
-      - if: needs.changes.outputs.server != 'false'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libvulkan-dev glslc spirv-headers
       - if: needs.changes.outputs.server != 'false'
         # Ubuntu's AppArmor blocks the unprivileged user namespaces the sandboxed socket test runs in.
@@ -166,11 +161,6 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - if: needs.changes.outputs.windows != 'false'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/AppData/Local/thalvi/test-models
-          key: spotter-models-${{ runner.os }}-${{ hashFiles('crates/thalvi-desktop/src/models.rs') }}
       - if: needs.changes.outputs.windows != 'false'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:

@@ -8,7 +8,7 @@ Spec: none — no runner drives the real app; download, hashing and timeouts are
 
 ## Sub-features
 
-- `downloads-start` a start fetches only the selected wake head, the mel and embedding models, the four `kws_gigaspeech_3m.*` ending-spotter files and the active on-device speech model.
+- `downloads-start` a start fetches only the selected wake head, the mel and embedding models, the active on-device speech model.
 - `downloads-wake` Listening → **Wake model (dictation)**: choosing a model downloads it and the row shows **Downloading…**; **Download** retries.
 - `downloads-speech` Recognition → speech model cards with size, **Download**, **Checking files…**, **Downloading… N%** and **Copy report** on failure.
 - `downloads-failure` a failure names the host and says **Check the internet connection and try again.**, beside the row and in the error bar.

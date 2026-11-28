@@ -42,7 +42,7 @@ Smaller screens are unverified for the overlay.
 
 ## Gotchas
 
-- At normal speed the Ryan voice's `Finish dictation.` was heard as `Finish vacation` (ending spotter: 0 hits) and the capture stayed open; `--length-scale 1.25` ended it 7 of 7 times. Close a capture that never ends with `ctl cancel`.
+- At normal speed the Ryan voice's `Finish dictation.` was heard as `Finish vacation` and the capture stayed open; `--length-scale 1.25` ended it 7 of 7 times. Close a capture that never ends with `ctl cancel`.
 - `ctl state` shows `copy_error: true` after any capture in the rig: the cue sound fails on the null audio device (`Audio feedback failed. Check the output device. The capture continues.`). It is not a delivery failure.
 - `desktop_ready_cue` and `desktop_end_cue` report `outcome: error` for the same reason.
 - The text has no trailing space; repeated runs run together in `typed.txt`. Compare the tail.
