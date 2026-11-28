@@ -411,18 +411,6 @@ impl View {
                 None,
                 preview.as_ref(),
             ),
-            EngineState::ConfirmingSubmit {
-                text,
-                pause,
-                preview,
-            } => self.pending_status(
-                target,
-                CaptureRoute::Submit,
-                text,
-                false,
-                Some(*pause),
-                Some(preview),
-            ),
             EngineState::TranscribingLive { route } => Status::Transcribing {
                 target,
                 route: *route,

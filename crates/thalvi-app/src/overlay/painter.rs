@@ -181,10 +181,11 @@ mod tests {
 
         StatusView {
             mode: Mode::Idle,
-            engine: EngineState::ConfirmingSubmit {
+            engine: EngineState::PendingEnding {
+                route: CaptureRoute::Submit,
                 text: text.to_owned(),
-                pause: Duration::from_millis(2500),
-                preview: SubmitPreview::default(),
+                waiting_for_quiet: false,
+                preview: Some(SubmitPreview::default()),
             },
             target: None,
             copies: false,
