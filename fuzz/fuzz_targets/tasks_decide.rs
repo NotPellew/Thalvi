@@ -15,7 +15,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = decide(spoken, &scripts);
 });
 
-/// `open`, `focus` or `message`, a space, then the phrase, normalized as the config does.
+/// `open` or `focus`, a space, then the phrase, normalized as the config does.
 fn script(line: &str) -> Option<Script> {
     let (kind, phrase) = line.split_once(' ')?;
     let phrase = phrase
@@ -35,9 +35,6 @@ fn script(line: &str) -> Option<Script> {
                 executables: Vec::new(),
                 shortcut: None,
             },
-        },
-        "message" => ScriptAction::DiscordMessage {
-            destination: "https://discord.com/channels/@me/42".to_owned(),
         },
         _ => return None,
     };

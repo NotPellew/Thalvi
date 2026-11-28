@@ -17,7 +17,3 @@ Getting the words into the window, and the actions a capture can run.
   browser and app actions; execution receives a typed action. Why: a later model
   can choose the same actions. Rejected for now: a plugin runtime, speculative
   interfaces and open-ended computer use before the scripted flow works.
-- **Live Discord actions are disabled.** `discord_message` is refused before any host
-  call and the message stays on the clipboard. Why: trusted input can reach an existing
-  child editor outside the gate, and a key acknowledgement is no delivery receipt.
-  Rejected: shipping the unsafe path, channel webhooks and private REST.

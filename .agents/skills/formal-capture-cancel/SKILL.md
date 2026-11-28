@@ -17,7 +17,12 @@ after the user cancels or pauses.
 
 The sync commit and its source hashes are recorded in `source.json`. The notes below say why each covered change since the model was written left its actions unchanged.
 
-Dropping unused code (#805) removes `EngineState::ConfirmingSubmit`, the `Done::Prepare` outcome and its unreachable arm, and the write-only `Live::capture_end`. A submit's cleanup still runs inside the capture under the same cancellation-first `bounded` call before its ending; `prepare_submit` and `cleans_before_confirm` keep their await boundaries and the final empty receive still fences delivery. Dropping `Finished.text_delivery` removes a field written at delivery but never read; `Delivery::paste_in` keeps the same terminal hold-back, `keep` and `deliver` calls. `OpenAiSession::next_event` drops a match arm that returned a `Final` unchanged; the receive and every error path stay. Model actions and bounds are unchanged.
+Removing the Discord action (#804) deletes one `Task` variant and its always-refused host call from
+`delivery.rs`. `Delivery::run_task` still decides a task and calls `tasks::execute` through the same
+`call` beneath `Delivery::finish`; no await, queue step, cancellation write or delivery admission
+changed, so the model actions and bounds are unchanged.
+
+Dropping unused code (#805) removes `EngineState::ConfirmingSubmit` and the write-only `Live::capture_end`. A submit's cleanup still runs inside the capture under the same cancellation-first `bounded` call before its ending; `prepare_submit` and `cleans_before_confirm` keep their await boundaries and the final empty receive still fences delivery. Dropping `Finished.text_delivery` removes a field written at delivery but never read; `Delivery::paste_in` keeps the same terminal hold-back, `keep` and `deliver` calls. `OpenAiSession::next_event` drops a match arm that returned a `Final` unchanged; the receive and every error path stay. Model actions and bounds are unchanged.
 
 Removing the ending spotter (#803) deletes `load_spotter` and the spotter fields from `Parts`, `Loaded` and `Engine`, along with the per-frame spotter work, the disputed-ending notice and its cue, and the `CaptureSession` clone those claims used. The removed timer was a display branch below the cancellation branch of the capture select; it never wrote cancellation state or admitted delivery. `Requests::take`, `Requests::read_queued`, `drive`, `Runner::capture`, `Settling::settle` and the engine's ending and release paths keep their await boundaries and the final empty receive, so the model actions and bounds are unchanged.
 

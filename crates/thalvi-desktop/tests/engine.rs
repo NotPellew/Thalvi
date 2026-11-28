@@ -1244,9 +1244,7 @@ const COMMANDS: &str = r#"{
     "scripts": [
         {"phrase": "open the project page", "action": "open_url",
          "destination": "https://github.com/NotPellew/Thalvi", "label": "the project page"},
-        {"phrase": "switch to editor", "action": "focus_app", "destination": "editor"},
-        {"phrase": "message the demo channel saying", "action": "discord_message",
-         "destination": "https://discord.com/channels/1/2", "label": "Demo"}
+        {"phrase": "switch to editor", "action": "focus_app", "destination": "editor"}
     ]
 }"#;
 
@@ -1403,7 +1401,6 @@ async fn text_that_is_not_the_whole_command_never_runs_without_an_ending() {
                 "I said open google.com yesterday",
                 "open the file",
                 "open google.com and then some",
-                "message the demo channel saying hello",
             ] {
                 let (mut rig, engine, frames) = Rig::new(COMMANDS);
                 let task = capture_task(engine, frames);
@@ -1732,7 +1729,7 @@ async fn a_capture_without_words_for_a_minute_ends_and_keeps_its_text() {
         ),
         (
             "Parakeet",
-            r#"{"stt": {"engine": "local", "model": "parakeet_tdt_v3"}}"#,
+            r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "Device", "active": true, "model": "parakeet_tdt_v3"}]}}"#,
             EndingListener::Parakeet,
             "Didn't hear an ending for 1 minute. Parakeet may miss an English ending after other languages; add one in your language in Settings → Endings.",
         ),

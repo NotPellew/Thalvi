@@ -43,38 +43,30 @@ impl Store {
         self.path.with_file_name(name)
     }
 
-    /// The config to start with, whether this is the first start, and whether the active legacy
-    /// Thalvi server entry was removed.
+    /// The config to start with and whether this is the first start.
     /// A first start writes the defaults as a save with nothing changed would. A path given on the
     /// command line must exist, so a missing one is an error before it can be a first start.
     ///
     /// # Errors
     /// Why the file cannot be read or is not valid, or why the defaults cannot be written.
-    pub fn start(&self) -> Result<(DesktopConfig, bool, bool), String> {
+    pub fn start(&self) -> Result<(DesktopConfig, bool), String> {
         let first_start = !self.path.exists();
-        let (config, legacy_keys) = self.load_with_legacy_keys()?;
-        let removed_entry = config.stt.entries.dropped_legacy_server();
-        let removed_active_entry = config.stt.entries.dropped_active_legacy_server();
-        if first_start || removed_entry || legacy_keys {
+        let config = self.load()?;
+        if first_start {
             self.write(&config)?;
         }
-        Ok((config, first_start, removed_active_entry))
+        Ok((config, first_start))
     }
 
     /// The config in effect: the file if there is one, else the defaults.
     ///
     /// # Errors
     /// Fails when the file cannot be read or is not valid.
-    #[cfg(test)]
     pub fn load(&self) -> Result<DesktopConfig, String> {
-        self.load_with_legacy_keys().map(|(config, _)| config)
-    }
-
-    fn load_with_legacy_keys(&self) -> Result<(DesktopConfig, bool), String> {
         if self.required || self.path.exists() {
-            DesktopConfig::load_with_legacy_keys(&self.path)
+            DesktopConfig::load(&self.path)
         } else {
-            DesktopConfig::from_json_str("{}").map(|config| (config, false))
+            DesktopConfig::from_json_str("{}")
         }
         .map_err(|error| error.to_string())
     }
@@ -733,11 +725,10 @@ mod tests {
             required: false,
         };
 
-        let (config, first, removed) = store.start().unwrap();
+        let (config, first) = store.start().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let file: Value = serde_json::from_str(&text).unwrap();
         assert!(first, "no file yet");
-        assert!(!removed);
         assert_eq!(
             file["stt"]["entries"],
             json!([{"kind": "on_device", "id": "on-device", "name": "On this computer", "active": true, "model": "nemotron_160ms"}])
@@ -749,43 +740,17 @@ mod tests {
         );
         assert!(!text.contains("\"prompt\""), "{text}");
 
-        let (again, first, removed) = store.start().unwrap();
+        let (again, first) = store.start().unwrap();
         assert!(!first, "the written file ends the first start");
-        assert!(!removed);
         assert_eq!(again, config);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
 
-        std::fs::write(&path, r#"{"hold_key": "F8", "write_key": null}"#).unwrap();
-        let (migrated, first, removed) = store.start().unwrap();
+        let saved = r#"{"keys": [{"action": "dictate", "mode": "hold", "key": "F8"}]}"#;
+        std::fs::write(&path, saved).unwrap();
+        let (loaded, first) = store.start().unwrap();
         assert!(!first);
-        assert!(!removed);
-        let written = std::fs::read_to_string(&path).unwrap();
-        let file: Value = serde_json::from_str(&written).unwrap();
-        assert_eq!(
-            file["keys"][0],
-            json!({"action": "dictate", "mode": "hold", "key": "F8"})
-        );
-        assert!(file.get("hold_key").is_none());
-        assert!(file.get("write_key").is_none());
-        assert_eq!(store.start().unwrap().0, migrated);
-
-        let server = r#"{"stt": {"entries": [{"kind": "thalvi_server", "id": "s", "name": "Thalvi server", "active": true, "address": "ws://127.0.0.1:8080"}]}}"#;
-        std::fs::write(&path, server).unwrap();
-        let (kept, first, removed) = store.start().unwrap();
-        assert!(!first);
-        assert!(removed, "the active legacy entry needs one notice");
-        assert!(matches!(
-            kept.stt.entries.active_live().kind,
-            LiveKind::OnDevice(SpeechChoice::Catalog(_))
-        ));
-        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["stt"]["entries"][0]["kind"], "on_device");
-        assert_eq!(saved["stt"]["entries"][0]["active"].as_bool(), Some(true));
-        assert!(saved.to_string().find("thalvi_server").is_none());
-        let (_, _, removed_again) = store.start().unwrap();
-        assert!(
-            !removed_again,
-            "the normalized config does not repeat the notice"
-        );
+        assert_eq!(loaded.keys[0].key.to_string(), "F8");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
 
         let required = Store {
             path: dir.join("missing.json"),

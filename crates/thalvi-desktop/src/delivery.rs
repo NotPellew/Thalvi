@@ -276,12 +276,10 @@ where
         let target = match &task {
             Task::OpenUrl { url, .. } => url.as_str().to_owned(),
             Task::FocusApp { label, .. } => label.clone(),
-            Task::DiscordMessage { destination, .. } => destination.clone(),
         };
         let (call, keep) = match &task {
             Task::OpenUrl { .. } => ("open_url", text.to_owned()),
             Task::FocusApp { .. } => ("focus_app", text.to_owned()),
-            Task::DiscordMessage { message, .. } => ("discord_message", message.clone()),
         };
         match self
             .call(recorder, call, move |host| tasks::execute(&task, host))
@@ -403,9 +401,7 @@ mod tests {
             {"phrase": "open the project page", "action": "open_url",
              "destination": "https://github.com/NotPellew/Thalvi", "label": "the project page"},
             {"phrase": "switch to editor", "action": "focus_app", "destination": "editor",
-             "label": "the editor"},
-            {"phrase": "message the demo channel saying", "action": "discord_message",
-             "destination": "https://discord.com/channels/1/2", "label": "Demo"}
+             "label": "the editor"}
         ]
     }"#;
 
@@ -1119,25 +1115,6 @@ mod tests {
             seen.last().map(String::as_str),
             Some("copy:\"switch to editor\"")
         );
-    }
-
-    #[tokio::test]
-    async fn a_discord_message_is_refused_before_the_host_acts_and_only_the_message_is_kept() {
-        let (notice, seen) = run(
-            FakeHost::default(),
-            accepted(
-                CaptureRoute::Task,
-                "Message the demo channel saying hello there",
-            ),
-        )
-        .await;
-        assert_eq!(
-            notice.as_deref(),
-            Some(
-                "Discord messages are switched off for now. Nothing was pasted or sent. Captured text is on the clipboard."
-            )
-        );
-        assert_eq!(seen, calls(&["capture_target", "copy:\"hello there\""]));
     }
 
     #[test]

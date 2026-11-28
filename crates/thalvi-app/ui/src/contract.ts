@@ -62,7 +62,7 @@ export interface AudioStatus {
 }
 
 export type Ending = "paste" | "write" | "submit" | "task" | "scratch" | "cancel";
-export type ScriptActionKind = "open_url" | "focus_app" | "discord_message";
+export type ScriptActionKind = "open_url" | "focus_app";
 export type SecondaryApi = "openai" | "meta";
 /** How a live OpenAI-compatible entry sends each capture. */
 export type OpenAiRequest = "transcriptions" | "chat";

@@ -38,9 +38,8 @@ Starting and ending a capture: wake words, hold keys, cues and silence.
   started ends only by a key or `cancel`: no spoken or pause ending, so every word is text. Each
   immediate start keeps up to 480 ms (6 frames) of pre-roll from the listening ring, and an AltGr-only press
   keeps its audio from the press while it waits 0.2 s to be told from a chord. The rows are stored
-  only when they differ from the desktop's two Hold rows, and a config's `hold_key`/`write_key`
-  become its Hold rows once on load; then the old fields are gone. A key appears in one row, and an
-  action in the list needs a row that can start it and one that can end it. Hyprland adds Hold
+  only when they differ from the desktop's two Hold rows. A key appears in one row, and an action
+  in the list needs a row that can start it and one that can end it. Hyprland adds Hold
   rows as `bindrti` release binds and the others as press binds at runtime through `hyprctl`,
   removed on quit and re-added on `configreloaded`; Windows swallows each matched key's press,
   repeats and release, acting only on the press for the other modes. Why: Hyprland 0.53.3 types

@@ -84,9 +84,6 @@ pub struct DesktopConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDesktopConfig {
-    /// The address a config written before the speech server list kept; read only to migrate it.
-    #[serde(default)]
-    server: Option<String>,
     #[serde(default)]
     wake: WakeConfig,
     #[serde(default, deserialize_with = "cues")]
@@ -121,27 +118,11 @@ struct RawDesktopConfig {
     start_at_login: bool,
     #[serde(default)]
     show_in_menu: bool,
-    /// Read only to migrate a config written before keybinds held modes.
-    #[serde(default, deserialize_with = "legacy_key")]
-    hold_key: LegacyKey,
-    #[serde(default, deserialize_with = "legacy_key")]
-    write_key: LegacyKey,
     /// Read as written, validated in `build`.
     #[serde(default)]
     keys: Option<Vec<KeyBind>>,
     #[serde(default)]
     writing: Option<Writing>,
-}
-
-#[derive(Default)]
-enum LegacyKey {
-    #[default]
-    Absent,
-    Present(Option<KeyName>),
-}
-
-fn legacy_key<'de, D: Deserializer<'de>>(input: D) -> Result<LegacyKey, D::Error> {
-    Option::deserialize(input).map(LegacyKey::Present)
 }
 
 impl DesktopConfig {
@@ -279,15 +260,6 @@ fn validate_keys(keys: &[KeyBind]) -> Result<(), String> {
     Ok(())
 }
 
-/// The key in effect for a stored one: the default when none is stored, or when it is the value
-/// every config stored before defaults were set per desktop.
-fn in_effect(stored: LegacyKey, formerly_always_stored: &KeyName, default: &KeyName) -> KeyName {
-    match stored {
-        LegacyKey::Present(Some(key)) if &key != formerly_always_stored => key,
-        LegacyKey::Absent | LegacyKey::Present(_) => default.clone(),
-    }
-}
-
 impl TryFrom<RawDesktopConfig> for DesktopConfig {
     type Error = String;
 
@@ -296,25 +268,8 @@ impl TryFrom<RawDesktopConfig> for DesktopConfig {
     }
 }
 
-fn build(
-    raw: RawDesktopConfig,
-    (hold_default, write_default): &KeyDefaults,
-) -> Result<DesktopConfig, String> {
-    let keys = match raw.keys {
-        Some(keys) => keys,
-        None => vec![
-            KeyBind::new(
-                Action::Dictate,
-                KeyMode::Hold,
-                in_effect(raw.hold_key, &KeyName::alt_z(), hold_default),
-            ),
-            KeyBind::new(
-                Action::Write,
-                KeyMode::Hold,
-                in_effect(raw.write_key, &KeyName::alt_x(), write_default),
-            ),
-        ],
-    };
+fn build(raw: RawDesktopConfig, defaults: &KeyDefaults) -> Result<DesktopConfig, String> {
+    let keys = raw.keys.unwrap_or_else(|| default_keys(defaults));
     validate_keys(&keys)?;
     let apps = raw
         .apps
@@ -346,7 +301,7 @@ fn build(
     let raw_stt: RawStt = serde_json::from_value(serde_json::Value::Object(stt))
         .map_err(|error: serde_json::Error| error.to_string())?;
     let (entries, phrases) = raw_stt
-        .entries(raw.server)
+        .entries()
         .map_err(|error: EntryError| error.to_string())?;
     Ok(DesktopConfig {
         wake: raw.wake,
@@ -391,14 +346,7 @@ pub struct Script {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScriptAction {
     OpenUrl(WebUrl),
-    FocusApp {
-        name: String,
-        app: App,
-    },
-    /// The phrase is a prefix: the words after it are the message. Normalized channel URL.
-    DiscordMessage {
-        destination: String,
-    },
+    FocusApp { name: String, app: App },
 }
 
 #[derive(Deserialize)]
@@ -474,7 +422,6 @@ struct RawScript {
 enum RawAction {
     OpenUrl,
     FocusApp,
-    DiscordMessage,
 }
 
 impl RawScript {
@@ -504,9 +451,6 @@ impl RawScript {
                     .ok_or_else(|| format!("No app named {destination:?} is configured."))?,
                 name: destination,
             },
-            RawAction::DiscordMessage => ScriptAction::DiscordMessage {
-                destination: discord_channel(&destination)?,
-            },
         };
         let label = match self.label {
             Some(label) => nonempty(&label, "script label")?,
@@ -518,29 +462,6 @@ impl RawScript {
             label,
         })
     }
-}
-
-fn discord_channel(destination: &str) -> Result<String, String> {
-    let invalid = || "Discord destination must be a Discord channel or DM URL.".to_owned();
-    let url = reqwest::Url::parse(destination).map_err(|_| invalid())?;
-    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
-    let segments: Vec<&str> = url.path_segments().ok_or_else(invalid)?.collect();
-    let ["channels", server, channel] = segments[..] else {
-        return Err(invalid());
-    };
-    if !matches!(url.scheme(), "https" | "discord")
-        || url.host_str() != Some("discord.com")
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !(server == "@me" || digits(server))
-        || !digits(channel)
-    {
-        return Err(invalid());
-    }
-    Ok(format!("https://discord.com/channels/{server}/{channel}"))
 }
 
 fn nonempty(value: &str, label: &str) -> Result<String, String> {
@@ -653,12 +574,12 @@ impl Serialize for DesktopConfig {
 }
 
 impl DesktopConfig {
-    /// The file form for a desktop whose default keys are `defaults`: the hold and write keys are
-    /// in it only when they differ.
+    /// The file form for a desktop whose default keys are `defaults`: the key rows are in it only
+    /// when they differ.
     fn serialize_for<S: Serializer>(
         &self,
         serializer: S,
-        (hold_default, write_default): &KeyDefaults,
+        defaults: &KeyDefaults,
     ) -> Result<S::Ok, S::Error> {
         let scripts = self
             .scripts
@@ -671,9 +592,6 @@ impl DesktopConfig {
                             return Err(serde::ser::Error::custom("script app is not configured"));
                         }
                         ("focus_app", name.as_str())
-                    }
-                    ScriptAction::DiscordMessage { destination } => {
-                        ("discord_message", destination.as_str())
                     }
                 };
                 Ok(FileScript {
@@ -705,7 +623,7 @@ impl DesktopConfig {
             history: self.history,
             start_at_login: self.start_at_login,
             show_in_menu: self.show_in_menu,
-            keys: stored_keys(&self.keys, &(hold_default.clone(), write_default.clone())),
+            keys: stored_keys(&self.keys, defaults),
             writing: &self.writing,
         }
         .serialize(serializer)
@@ -718,14 +636,6 @@ impl DesktopConfig {
     /// # Errors
     /// Fails when the file cannot be read or a setting is unknown or out of range.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        Self::load_with_legacy_keys(path).map(|(config, _)| config)
-    }
-
-    /// Loads the config and reports whether it contained the old key fields.
-    ///
-    /// # Errors
-    /// Fails when the file cannot be read, is invalid or names a key the desktop cannot bind.
-    pub fn load_with_legacy_keys(path: &Path) -> Result<(Self, bool), ConfigError> {
         let json = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_owned(),
             source,
@@ -735,15 +645,13 @@ impl DesktopConfig {
             source,
         };
         let raw: RawDesktopConfig = serde_json::from_str(&json).map_err(invalid)?;
-        let had_legacy_keys = matches!(raw.hold_key, LegacyKey::Present(_))
-            || matches!(raw.write_key, LegacyKey::Present(_));
         let config =
             Self::try_from(raw).map_err(|message| invalid(serde::de::Error::custom(message)))?;
         Desktop::check_hold_keys(&config.keys).map_err(|source| ConfigError::UnbindableKeys {
             path: path.to_owned(),
             source,
         })?;
-        Ok((config, had_legacy_keys))
+        Ok(config)
     }
 
     /// Validates config `json`.
@@ -803,7 +711,6 @@ mod tests {
     use crate::models::{CatalogHead, CatalogSpeech};
     use crate::transducer::SpeechChoice;
     use crate::wake::HeadModel;
-    use crate::whisper::WhisperBackend;
     use crate::writing::DEFAULT_PROMPT;
 
     fn parse(json: &str) -> Result<DesktopConfig, ConfigError> {
@@ -882,7 +789,7 @@ mod tests {
             &'static [&'static str],
             bool,
         );
-        let cases: [Case; 9] = [
+        let cases: [Case; 4] = [
             (
                 HYPRLAND,
                 "{}",
@@ -894,36 +801,6 @@ mod tests {
                 "{}",
                 &["dictate hold Alt+KeyZ", "write hold Alt+KeyX"],
                 false,
-            ),
-            (
-                HYPRLAND,
-                r#"{"hold_key": "Alt+KeyZ", "write_key": "Alt+KeyX"}"#,
-                &["dictate hold F9", "write hold F10"],
-                false,
-            ),
-            (
-                HYPRLAND,
-                r#"{"hold_key": "F8"}"#,
-                &["dictate hold F8", "write hold F10"],
-                true,
-            ),
-            (
-                WINDOWS,
-                r#"{"write_key": "F10"}"#,
-                &["dictate hold Alt+KeyZ", "write hold F10"],
-                true,
-            ),
-            (
-                WINDOWS,
-                r#"{"hold_key": "F9", "write_key": "Ctrl+F10"}"#,
-                &["dictate hold F9", "write hold Ctrl+F10"],
-                true,
-            ),
-            (
-                HYPRLAND,
-                r#"{"hold_key": null, "write_key": "F11"}"#,
-                &["dictate hold F9", "write hold F11"],
-                true,
             ),
             (
                 HYPRLAND,
@@ -949,39 +826,8 @@ mod tests {
                 .serialize_for(serde_json::value::Serializer, &defaults)
                 .unwrap();
             assert_eq!(written.get("keys").is_some(), stored, "{json}");
-            for legacy in ["hold_key", "write_key"] {
-                assert!(written.get(legacy).is_none(), "{json}: {legacy} is gone");
-            }
             assert_eq!(loaded(&written.to_string(), &defaults).unwrap(), config);
         }
-    }
-
-    #[test]
-    fn a_legacy_key_that_is_no_key_or_names_one_twice_is_refused() {
-        let error = loaded(r#"{"write_key": "KeyX"}"#, &WINDOWS()).unwrap_err();
-        assert!(error.contains("needs a modifier"), "{error}");
-        let error = loaded(r#"{"hold_key": "Alt+Hyper"}"#, &WINDOWS()).unwrap_err();
-        assert!(error.contains("not a key name"), "{error}");
-        let error = loaded(
-            r#"{"hold_key": "Alt+KeyX", "write_key": "Alt+KeyX"}"#,
-            &WINDOWS(),
-        )
-        .unwrap_err();
-        assert!(
-            error.contains("Alt+KeyX is bound more than once"),
-            "{error}"
-        );
-        assert_eq!(
-            rows(
-                &loaded(
-                    r#"{"hold_key": "Alt+KeyX", "write_key": "Alt+KeyZ"}"#,
-                    &WINDOWS()
-                )
-                .unwrap()
-            ),
-            ["dictate hold Alt+KeyX", "write hold Alt+KeyZ"],
-            "the legacy keys may swap places"
-        );
     }
 
     #[test]
@@ -1230,77 +1076,6 @@ mod tests {
     }
 
     #[test]
-    fn old_merge_and_secondary_settings_load_ignored() {
-        for json in [
-            r#"{"stt": {"merge": true}}"#,
-            r#"{"stt": {"merge": false}}"#,
-            r#"{"stt": {"secondary": {"enabled": true, "url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k", "api": "meta"}}}"#,
-            r#"{"stt": {"secondary": {"enabled": true, "url": "", "model": ""}}}"#,
-            r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}], "merge": true}}"#,
-        ] {
-            let config = parse(json).unwrap_or_else(|error| panic!("{json}: {error}"));
-            assert_eq!(config.stt.entries.live().len(), 1, "{json}");
-            let written = serde_json::to_value(&config).unwrap();
-            assert!(written["stt"].get("merge").is_none(), "{json}");
-            assert!(!written.to_string().contains("127.0.0.1:9"), "{json}");
-            assert!(!written.to_string().contains("api_key"), "{json}");
-            assert_eq!(
-                parse(&written.to_string()).unwrap().stt,
-                config.stt,
-                "{json}: round trip"
-            );
-        }
-    }
-
-    #[test]
-    fn dictation_is_recognized_on_the_server_unless_a_local_model_is_chosen() {
-        for (json, kind) in [
-            (
-                r#"{"stt": {"engine": "server"}}"#,
-                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ALL[0])),
-            ),
-            (
-                r#"{"stt": {"engine": "local"}}"#,
-                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms)),
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "nemotron_160ms"}}"#,
-                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Nemotron160ms)),
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "unified_160ms"}}"#,
-                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::Unified160ms)),
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "parakeet_tdt_v3"}}"#,
-                LiveKind::OnDevice(SpeechChoice::Catalog(CatalogSpeech::ParakeetTdtV3)),
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "whisper_turbo_cpu"}}"#,
-                LiveKind::OnDevice(SpeechChoice::Whisper(WhisperBackend::Cpu)),
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "whisper_turbo_vulkan"}}"#,
-                LiveKind::OnDevice(SpeechChoice::Whisper(WhisperBackend::Vulkan)),
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "/models/mine"}}"#,
-                LiveKind::OnDevice(SpeechChoice::Folder("/models/mine".into())),
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "C:\\models\\mine"}}"#,
-                LiveKind::OnDevice(SpeechChoice::Folder("C:\\models\\mine".into())),
-            ),
-        ] {
-            assert_eq!(
-                parse(json).unwrap().stt.entries.active_live().kind,
-                kind,
-                "{json}"
-            );
-        }
-    }
-
-    #[test]
     fn the_word_list_round_trips_trimmed_and_a_refused_one_names_the_limit() {
         let config = parse(r#"{"stt": {"phrases": [" Cybrex2 ", "Thalvi"]}}"#).unwrap();
         assert_eq!(config.stt.phrases.phrases(), ["Cybrex2", "Thalvi"]);
@@ -1321,8 +1096,6 @@ mod tests {
     fn every_setting_is_read() {
         let config = DesktopConfig::from_json_str(
             r#"{
-                "server": "wss://thalvi.example:9000/",
-                "stt": {"secondary": {"url": "http://127.0.0.1:9/v1/", "model": " m ", "api": "meta"}},
                 "wake": {"capture": {"model": "hey_jarvis", "threshold": 0.7}},
                 "cues": {"wake": false, "error": false},
                 "ending_pause": {"paste": 1, "submit": 3},
@@ -1445,9 +1218,7 @@ mod tests {
                     {"phrase": "  Switch   To T3 ", "action": "focus_app", "destination": " t3 ",
                      "label": " T3 Code "},
                     {"phrase": "project", "action": "open_url",
-                     "destination": " https://github.com/NotPellew/Thalvi "},
-                    {"phrase": "message the demo saying", "action": "discord_message",
-                     "destination": "discord://discord.com/channels/@me/42"}
+                     "destination": " https://github.com/NotPellew/Thalvi "}
                 ]
             }"#,
         )
@@ -1477,13 +1248,6 @@ mod tests {
                         WebUrl::parse("https://github.com/NotPellew/Thalvi").unwrap()
                     ),
                     label: "project".to_owned(),
-                },
-                Script {
-                    phrase: "message the demo saying".to_owned(),
-                    action: ScriptAction::DiscordMessage {
-                        destination: "https://discord.com/channels/@me/42".to_owned()
-                    },
-                    label: "message the demo saying".to_owned(),
                 },
             ]
         );
@@ -1521,50 +1285,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn discord_destinations_must_be_channel_or_dm_urls() {
-        for (destination, normalized) in [
-            (
-                "https://discord.com/channels/123/456",
-                Some("https://discord.com/channels/123/456"),
-            ),
-            (
-                "discord://discord.com/channels/@me/456",
-                Some("https://discord.com/channels/@me/456"),
-            ),
-            ("https://discord.com/channels/123/456?x=1", None),
-            ("https://discord.com/channels/123/456#top", None),
-            ("https://discord.com/channels/123/456/789", None),
-            ("https://discord.com/channels/abc/456", None),
-            ("https://discord.com/channels/@me/", None),
-            ("https://example.com/channels/123/456", None),
-            ("https://discord.com:8443/channels/123/456", None),
-            ("https://u@discord.com/channels/123/456", None),
-            ("http://discord.com/channels/123/456", None),
-            ("not a url", None),
-        ] {
-            let result = parse(&script(&format!(
-                r#""phrase": "x", "action": "discord_message", "destination": "{destination}""#
-            )));
-            match normalized {
-                Some(normalized) => assert_eq!(
-                    result.unwrap().scripts[0].action,
-                    ScriptAction::DiscordMessage {
-                        destination: normalized.to_owned()
-                    },
-                    "{destination}"
-                ),
-                None => assert!(
-                    result
-                        .unwrap_err()
-                        .to_string()
-                        .contains("Discord destination must be a Discord channel or DM URL."),
-                    "{destination}"
-                ),
-            }
-        }
-    }
-
     fn rejected_settings() -> Vec<(String, &'static str)> {
         const HISTORY_LIMIT: &str =
             "history limit must be a whole number of entries from 1 to 1000";
@@ -1572,14 +1292,19 @@ mod tests {
             "scratch": "scratch", "cancel": "cancel""#;
         vec![
             (r#"{"discord": {}}"#.to_owned(), "unknown field `discord`"),
-            (
-                r#"{"server": "http://127.0.0.1:8080"}"#.to_owned(),
-                "server must be a ws or wss URL",
-            ),
-            (
-                r#"{"server": "ws://127.0.0.1:8080/session"}"#.to_owned(),
-                "server root",
-            ),
+            (r#"{"server": "http://127.0.0.1:8080"}"#.to_owned(), "unknown field `server`"),
+            (r#"{"server": "ws://127.0.0.1:8080/session"}"#.to_owned(), "unknown field `server`"),
+            (r#"{"server": "ws://127.0.0.1:8080"}"#.to_owned(), "unknown field `server`"),
+            (r#"{"hold_key": "F8"}"#.to_owned(), "unknown field `hold_key`"),
+            (r#"{"write_key": "F10"}"#.to_owned(), "unknown field `write_key`"),
+            (r#"{"stt": {"engine": "local", "model": "nemotron_160ms"}}"#.to_owned(), "unknown field `engine`"),
+            (r#"{"stt": {"secondary": {"enabled": true, "url": "http://127.0.0.1:9/v1", "model": "m"}}}"#.to_owned(), "unknown field `secondary`"),
+            (r#"{"stt": {"merge": true}}"#.to_owned(), "unknown field `merge`"),
+            (r#"{"stt": {"entries": [{"kind": "thalvi_server", "id": "s", "name": "S", "active": true}]}}"#.to_owned(), "unknown variant `thalvi_server`"),
+            (r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "extra", "id": "x", "name": "X", "active": false}]}}"#.to_owned(), "unknown variant `extra`"),
+            (r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "second_pass", "id": "x", "name": "X", "active": false}]}}"#.to_owned(), "unknown variant `second_pass`"),
+            (r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true, "extra": true}]}}"#.to_owned(), "unknown field `extra`"),
+            (r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true, "final_pass": true}]}}"#.to_owned(), "unknown field `final_pass`"),
             (
                 r#"{"stt": {"primary": {}}}"#.to_owned(),
                 "unknown field `primary`",
@@ -1622,18 +1347,9 @@ mod tests {
                 format!(r#"{{"endings": {{{valid_endings}, "x": "enter"}}}}"#),
                 "unknown variant `enter`",
             ),
-            (
-                r#"{"stt": {"model": "nemotron_160ms"}}"#.to_owned(),
-                "stt.model only applies when stt.engine is local.",
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "whisper"}}"#.to_owned(),
-                "Unknown speech model \"whisper\". Use nemotron_160ms, unified_160ms, parakeet_tdt_v3 or the path of a folder",
-            ),
-            (
-                r#"{"stt": {"engine": "cloud"}}"#.to_owned(),
-                "unknown variant `cloud`",
-            ),
+            (r#"{"stt": {"model": "nemotron_160ms"}}"#.to_owned(), "unknown field `model`"),
+            (r#"{"stt": {"engine": "local", "model": "whisper"}}"#.to_owned(), "unknown field `engine`"),
+            (r#"{"stt": {"engine": "cloud"}}"#.to_owned(), "unknown field `engine`"),
             (r#"{"history": {"limit": 0}}"#.to_owned(), HISTORY_LIMIT),
             (r#"{"history": {"limit": 1001}}"#.to_owned(), HISTORY_LIMIT),
             (r#"{"history": {"limit": -1}}"#.to_owned(), "invalid value"),
@@ -1700,6 +1416,12 @@ mod tests {
             (
                 script(r#""phrase": "x", "action": "run", "destination": "x""#),
                 "unknown variant `run`",
+            ),
+            (
+                script(
+                    r#""phrase": "x", "action": "discord_message", "destination": "https://discord.com/channels/1/2""#,
+                ),
+                "unknown variant `discord_message`",
             ),
             (
                 script(r#""phrase": " ", "action": "open_url", "destination": "https://x.com""#),
@@ -1809,9 +1531,8 @@ mod tests {
     #[test]
     fn the_config_serializes_to_the_file_form_it_was_read_from() {
         let full = r#"{
-            "server": "wss://thalvi.example:9000/",
-            "stt": {"engine": "local", "model": "/models/speech",
-                    "secondary": {"enabled": true, "url": "http://127.0.0.1:9/v1/", "model": "m", "api_key": "k", "api": "meta"}},
+            "stt": {"entries": [{"kind": "on_device", "id": "d", "name": "Device",
+                                 "active": true, "model": "/models/speech"}]},
             "wake": {"capture": {"model": "/models/me.onnx", "threshold": 0.7},
                      "conversation": {"model": "hey_jarvis"}},
             "cues": {"wake": false, "error": false},
@@ -1825,9 +1546,7 @@ mod tests {
             "scripts": [
                 {"phrase": "open site", "action": "open_url", "destination": "https://y.com/a"},
                 {"phrase": "switch to editor", "action": "focus_app", "destination": "editor",
-                 "label": "the editor"},
-                {"phrase": "message demo saying", "action": "discord_message",
-                 "destination": "https://discord.com/channels/1/2"}
+                 "label": "the editor"}
             ],
             "overlay": {"show": false, "draft": true},
             "microphone": " USB Mic ",
@@ -1837,8 +1556,6 @@ mod tests {
             "history": {"enabled": false, "limit": 50},
             "start_at_login": true,
             "show_in_menu": true,
-            "hold_key": "Ctrl+Shift+F9",
-            "write_key": "Ctrl+F10",
             "writing": {"url": "http://127.0.0.1:9/v1", "model": "m", "api_key": "k"}
         }"#;
         for json in ["{}", full] {
