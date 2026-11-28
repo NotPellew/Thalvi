@@ -4460,7 +4460,6 @@ mod tests {
     fn only_a_capture_that_was_not_delivered_fails_as_a_delivery() {
         let finished = |delivered| Finished {
             delivered,
-            text_delivery: None,
             maybe_partial: false,
             notice: "Done.".to_owned(),
             headline: "Done".to_owned(),

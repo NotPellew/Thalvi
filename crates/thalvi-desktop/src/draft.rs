@@ -65,17 +65,8 @@ pub struct Draft {
 impl Draft {
     /// The draft a finished capture leaves, bound to the window it started in. `None` when no
     /// text was heard, and for tasks, whose text is a command rather than something to paste.
-    #[must_use]
-    pub fn of<T: Display>(
-        outcome: &CaptureOutcome,
-        finished: Option<&Finished>,
-        bound: &Bound<T>,
-    ) -> Option<Self> {
-        Self::with_raw(outcome, finished, bound, None)
-    }
-
-    /// Like [`of`](Self::of), and keeps `raw` (the words as recognized) when a cleanup pasted
-    /// something else, so a bad cleanup can be recovered.
+    /// Keeps `raw` (the words as recognized) when a cleanup pasted something else, so a bad
+    /// cleanup can be recovered.
     #[must_use]
     pub fn with_raw<T: Display>(
         outcome: &CaptureOutcome,

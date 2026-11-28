@@ -61,8 +61,6 @@ impl UserError for TerminalLines {
 pub struct Finished {
     /// The text reached its destination; otherwise it is kept on the clipboard when possible.
     pub delivered: bool,
-    /// Where a successful text delivery left the text.
-    pub text_delivery: Option<Delivered>,
     /// It is not known whether the paste reached the window, so the text may be in it; never with `delivered`.
     pub maybe_partial: bool,
     /// Says what happened and where the dictated text went.
@@ -85,7 +83,6 @@ impl Finished {
     fn delivered(notice: String) -> Self {
         Self {
             delivered: true,
-            text_delivery: None,
             maybe_partial: false,
             notice,
             headline: "Delivered".to_owned(),
@@ -98,7 +95,6 @@ impl Finished {
     fn kept(notice: String, headline: String) -> Self {
         Self {
             delivered: false,
-            text_delivery: None,
             maybe_partial: false,
             notice,
             headline,
@@ -249,7 +245,6 @@ where
                     _ => None,
                 };
                 Finished {
-                    text_delivery: Some(delivered),
                     field,
                     ..Finished::delivered(notice.to_owned())
                 }
@@ -726,11 +721,6 @@ mod tests {
             let (finished, seen) = finish(FakeHost::default(), accepted(route, text)).await;
             let finished = finished.unwrap();
             assert!(finished.delivered, "{route:?} {text}");
-            assert_eq!(
-                finished.text_delivery,
-                Some(Delivered::InWindow),
-                "{route:?}"
-            );
             assert_eq!(finished.notice, "Delivered.", "{route:?} {text}");
             assert_eq!(
                 seen,
@@ -803,11 +793,6 @@ mod tests {
             .await;
             let finished = finished.unwrap();
             assert!(finished.delivered, "{route:?}");
-            assert_eq!(
-                finished.text_delivery,
-                Some(Delivered::OnClipboard),
-                "{route:?}"
-            );
             assert_eq!(finished.notice, notice, "{route:?}");
             assert_eq!(
                 seen,
