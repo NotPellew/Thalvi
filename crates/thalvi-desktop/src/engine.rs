@@ -1934,9 +1934,7 @@ where
                 ),
             ))),
             release => {
-                let Some(done) = self.finish_hold(live, held) else {
-                    return None;
-                };
+                let done = self.finish_hold(live, held)?;
                 if let Release::Behind(at) = release {
                     self.release_waited(live, at, &done);
                 }
