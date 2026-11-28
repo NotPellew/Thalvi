@@ -244,7 +244,7 @@ mod tests {
             (
                 "",
                 vec![],
-                r#"{}"#,
+                "{}",
                 "\
                  Error: Thalvi could not reach the speech server.\n\n\
                  Time: 2026-11-03 12:34:56 UTC\nThalvi: 1.2.3\nSystem: linux\n\n\

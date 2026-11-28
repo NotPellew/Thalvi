@@ -1300,55 +1300,19 @@ mod tests {
             "scratch": "scratch", "cancel": "cancel""#;
         vec![
             (r#"{"discord": {}}"#.to_owned(), "unknown field `discord`"),
-            (
-                r#"{"server": "http://127.0.0.1:8080"}"#.to_owned(),
-                "unknown field `server`",
-            ),
-            (
-                r#"{"server": "ws://127.0.0.1:8080/session"}"#.to_owned(),
-                "unknown field `server`",
-            ),
-            (
-                r#"{"server": "ws://127.0.0.1:8080"}"#.to_owned(),
-                "unknown field `server`",
-            ),
+            (r#"{"server": "http://127.0.0.1:8080"}"#.to_owned(), "unknown field `server`"),
+            (r#"{"server": "ws://127.0.0.1:8080/session"}"#.to_owned(), "unknown field `server`"),
+            (r#"{"server": "ws://127.0.0.1:8080"}"#.to_owned(), "unknown field `server`"),
             (r#"{"hold_key": "F8"}"#.to_owned(), "unknown field `hold_key`"),
-            (
-                r#"{"write_key": "F10"}"#.to_owned(),
-                "unknown field `write_key`",
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "nemotron_160ms"}}"#.to_owned(),
-                "unknown field `engine`",
-            ),
-            (
-                r#"{"stt": {"secondary": {"enabled": true, "url": "http://127.0.0.1:9/v1", "model": "m"}}}"#.to_owned(),
-                "unknown field `secondary`",
-            ),
-            (
-                r#"{"stt": {"merge": true}}"#.to_owned(),
-                "unknown field `merge`",
-            ),
-            (
-                r#"{"stt": {"entries": [{"kind": "thalvi_server", "id": "s", "name": "S", "active": true}]}}"#.to_owned(),
-                "unknown variant `thalvi_server`",
-            ),
-            (
-                r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "extra", "id": "x", "name": "X", "active": false}]}}"#.to_owned(),
-                "unknown variant `extra`",
-            ),
-            (
-                r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "second_pass", "id": "x", "name": "X", "active": false}]}}"#.to_owned(),
-                "unknown variant `second_pass`",
-            ),
-            (
-                r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true, "extra": true}]}}"#.to_owned(),
-                "unknown field `extra`",
-            ),
-            (
-                r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true, "final_pass": true}]}}"#.to_owned(),
-                "unknown field `final_pass`",
-            ),
+            (r#"{"write_key": "F10"}"#.to_owned(), "unknown field `write_key`"),
+            (r#"{"stt": {"engine": "local", "model": "nemotron_160ms"}}"#.to_owned(), "unknown field `engine`"),
+            (r#"{"stt": {"secondary": {"enabled": true, "url": "http://127.0.0.1:9/v1", "model": "m"}}}"#.to_owned(), "unknown field `secondary`"),
+            (r#"{"stt": {"merge": true}}"#.to_owned(), "unknown field `merge`"),
+            (r#"{"stt": {"entries": [{"kind": "thalvi_server", "id": "s", "name": "S", "active": true}]}}"#.to_owned(), "unknown variant `thalvi_server`"),
+            (r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "extra", "id": "x", "name": "X", "active": false}]}}"#.to_owned(), "unknown variant `extra`"),
+            (r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "second_pass", "id": "x", "name": "X", "active": false}]}}"#.to_owned(), "unknown variant `second_pass`"),
+            (r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true, "extra": true}]}}"#.to_owned(), "unknown field `extra`"),
+            (r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true, "final_pass": true}]}}"#.to_owned(), "unknown field `final_pass`"),
             (
                 r#"{"stt": {"primary": {}}}"#.to_owned(),
                 "unknown field `primary`",
@@ -1391,18 +1355,9 @@ mod tests {
                 format!(r#"{{"endings": {{{valid_endings}, "x": "enter"}}}}"#),
                 "unknown variant `enter`",
             ),
-            (
-                r#"{"stt": {"model": "nemotron_160ms"}}"#.to_owned(),
-                "unknown field `model`",
-            ),
-            (
-                r#"{"stt": {"engine": "local", "model": "whisper"}}"#.to_owned(),
-                "unknown field `engine`",
-            ),
-            (
-                r#"{"stt": {"engine": "cloud"}}"#.to_owned(),
-                "unknown field `engine`",
-            ),
+            (r#"{"stt": {"model": "nemotron_160ms"}}"#.to_owned(), "unknown field `model`"),
+            (r#"{"stt": {"engine": "local", "model": "whisper"}}"#.to_owned(), "unknown field `engine`"),
+            (r#"{"stt": {"engine": "cloud"}}"#.to_owned(), "unknown field `engine`"),
             (r#"{"history": {"limit": 0}}"#.to_owned(), HISTORY_LIMIT),
             (r#"{"history": {"limit": 1001}}"#.to_owned(), HISTORY_LIMIT),
             (r#"{"history": {"limit": -1}}"#.to_owned(), "invalid value"),
