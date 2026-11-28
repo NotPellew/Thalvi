@@ -14,7 +14,7 @@ use crate::{
         Recognizer, RecognizerError, RecognizerEvent, RecognizerSession, SpeechSource,
         TranscriptionFailure,
     },
-    secondary::{Language, OpenAiLive, SecondaryError, transcribe_events},
+    secondary::{Language, OpenAiLive, SecondaryError, request_audio},
 };
 
 pub struct OpenAiRecognizer {
@@ -179,7 +179,7 @@ impl RecognizerSession for OpenAiSession {
                 let started = Instant::now();
                 let mut first_text = true;
                 let mut deltas = 0_u32;
-                let result = transcribe_events(&client, &live, &frames, &prompt, |event| {
+                let result = request_audio(&client, &live, &frames, &prompt, |event| {
                     if matches!(event, RecognizerEvent::Partial(_)) {
                         deltas = deltas.saturating_add(1);
                         metrics.metric(Event::LiveSttDelta, "ok", None, serde_json::json!({}));
@@ -233,7 +233,6 @@ impl RecognizerSession for OpenAiSession {
             }));
         }
         match self.events.recv().await {
-            Some(Ok(RecognizerEvent::Final(text))) => Ok(RecognizerEvent::Final(text)),
             Some(event) => event,
             None => Err(RecognizerError::said(
                 "Speech transcription stopped unexpectedly. Nothing was delivered.",

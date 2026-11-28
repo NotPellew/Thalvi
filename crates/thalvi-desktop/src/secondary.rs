@@ -342,17 +342,7 @@ fn detected_language(answer: &Value) -> Option<Language> {
 ///
 /// Returns an error when the endpoint is unreachable, rejects the request, times out, or returns
 /// an unsupported response.
-pub async fn transcribe_events(
-    client: &reqwest::Client,
-    entry: &OpenAiLive,
-    frames: &[Frame],
-    prompt: &str,
-    emit: impl FnMut(crate::recognizer::RecognizerEvent),
-) -> Result<Transcript, SecondaryError> {
-    request_audio(client, entry, frames, prompt, emit).await
-}
-
-async fn request_audio(
+pub(crate) async fn request_audio(
     client: &reqwest::Client,
     entry: &OpenAiLive,
     frames: &[Frame],
