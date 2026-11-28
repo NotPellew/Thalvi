@@ -3713,12 +3713,48 @@ mod tests {
         }
     }
 
+    /// Holds a fake field until the test releases it, announcing when it was reached.
+    struct FieldGate {
+        at_probe: bool,
+        reached: oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl FieldGate {
+        fn at(at_probe: bool) -> (Self, oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            let (reached, waiting) = oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            (
+                Self {
+                    at_probe,
+                    reached,
+                    release: released,
+                },
+                waiting,
+                release,
+            )
+        }
+
+        fn wait(self) {
+            self.reached
+                .send(())
+                .expect("the test is waiting for the gate");
+            self.release
+                .recv_timeout(WAIT)
+                .expect("the test released the gate");
+        }
+    }
+
     struct TestField {
         source: FieldSource,
+        gate: Option<FieldGate>,
     }
 
     impl thalvi_desktop::learn::Field for TestField {
         fn text(&mut self) -> Result<String, thalvi_desktop::learn::FieldEnd> {
+            if let Some(gate) = self.gate.take() {
+                gate.wait();
+            }
             let mut source = self.source.0.lock().unwrap();
             source.1 += 1;
             source.0.pop_front().unwrap_or(Ok(String::new()))
@@ -3728,6 +3764,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct TestProbe {
         source: FieldSource,
+        gate: Arc<Mutex<Option<FieldGate>>>,
     }
 
     impl thalvi_desktop::learn::FieldProbe for TestProbe {
@@ -3736,8 +3773,17 @@ mod tests {
             _pasted: &str,
         ) -> Result<Box<dyn thalvi_desktop::learn::Field>, thalvi_desktop::learn::FieldLimit>
         {
+            let gate = self.gate.lock().unwrap().take();
+            let gate = match gate {
+                Some(gate) if gate.at_probe => {
+                    gate.wait();
+                    None
+                }
+                other => other,
+            };
             Ok(Box::new(TestField {
                 source: self.source,
+                gate,
             }))
         }
     }
@@ -3764,7 +3810,22 @@ mod tests {
             Self(
                 Arc::new(Mutex::new(Vec::new())),
                 Arc::new(Mutex::new(Vec::new())),
-                Arc::new(Mutex::new(Some(TestProbe { source }))),
+                Arc::new(Mutex::new(Some(TestProbe {
+                    source,
+                    gate: Arc::new(Mutex::new(None)),
+                }))),
+                Arc::new(Mutex::new(None)),
+            )
+        }
+
+        fn gated(source: FieldSource, gate: FieldGate) -> Self {
+            Self(
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Some(TestProbe {
+                    source,
+                    gate: Arc::new(Mutex::new(Some(gate))),
+                }))),
                 Arc::new(Mutex::new(None)),
             )
         }
@@ -4161,6 +4222,206 @@ mod tests {
             "the watch did not run to its five-minute limit"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A learning watch held at a gate, with the runner and stores its effects are read from.
+    struct GatedWatch {
+        on: DesktopConfig,
+        link: EngineLink,
+        runner: Runner<NoticeRig>,
+        delivery: Arc<Delivery<TestHost>>,
+        history: Arc<History>,
+        drafts: Arc<Drafts>,
+        learning: Arc<Learning>,
+        recorder: Recorder,
+        changed: watch::Receiver<u64>,
+        waiting: oneshot::Receiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    impl GatedWatch {
+        fn new(dir: &std::path::Path, at_probe: bool) -> Self {
+            let mut on =
+                DesktopConfig::from_json_str(r#"{"stt":{"learn_from_corrections":true}}"#).unwrap();
+            on.recordings.metrics = true;
+            let source = FieldSource::default();
+            source.text("before Cyber X2 after");
+            source.text("before Cybrex2 after");
+            source.end(thalvi_desktop::learn::FieldEnd::FocusLeft);
+            let (gate, waiting, release) = FieldGate::at(at_probe);
+            let delivery = Arc::new(Delivery::new(TestHost::gated(source, gate)));
+            let recorder = Recorder::in_dir(on.recordings, dir.join("metrics")).unwrap();
+            let (link, ends, _) = EngineLink::wire(&on, false);
+            let history = Arc::new(History::at(dir.join("history.json")));
+            let drafts = Arc::new(Drafts::default());
+            let learning = Arc::new(Learning::default());
+            let changed = learning.changed();
+            let mut runner = Runner::new(
+                on.clone(),
+                Arc::clone(&delivery),
+                ends.control,
+                ends.publisher,
+                ends.level,
+                ends.audio,
+                Shared {
+                    rig: NoticeRig,
+                    key: ends.key,
+                    quitting: ends.quitting,
+                    history: Arc::clone(&history),
+                    drafts: Arc::clone(&drafts),
+                    feeding: ends.feeding,
+                    paused: false,
+                    last_writing_window: ends.last_writing_window,
+                    learning: Arc::clone(&learning),
+                    watch_enabled: ends.watch_enabled,
+                    learn_fields: ends.learn_fields,
+                },
+            );
+            runner.set_learning(true);
+            Self {
+                on,
+                link,
+                runner,
+                delivery,
+                history,
+                drafts,
+                learning,
+                recorder,
+                changed,
+                waiting,
+                release,
+            }
+        }
+
+        async fn apply(&mut self, label: &str, retune: bool) {
+            let change = if retune {
+                let mut settings = DesktopConfig::from_json_str(
+                    r#"{"stt":{"learn_from_corrections":true},"history":{"limit":5}}"#,
+                )
+                .unwrap();
+                settings.recordings.metrics = true;
+                settings
+            } else {
+                let mut off = self.on.clone();
+                off.stt.learn_from_corrections = false;
+                off
+            };
+            self.link.send(Control::Apply(Box::new(change)));
+            let control = self.runner.control.recv().await.unwrap();
+            Box::pin(self.runner.handle(control)).await;
+            assert_eq!(
+                self.runner.config.stt.learn_from_corrections(),
+                retune,
+                "{label}: the switch was applied"
+            );
+            if !retune {
+                let on = self.on.clone();
+                self.link.send(Control::Apply(Box::new(on)));
+                let control = self.runner.control.recv().await.unwrap();
+                Box::pin(self.runner.handle(control)).await;
+                assert!(self.runner.config.stt.learn_from_corrections(), "{label}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn turning_learning_off_and_on_ends_a_blocked_watch_but_a_settings_change_keeps_it() {
+        // (label, gate the probe rather than a field read, apply only an unrelated setting)
+        let mut observations = Vec::new();
+        for (label, at_probe, retune) in [
+            ("probe; off then on", true, false),
+            ("in-flight read; off then on", false, false),
+            ("probe; settings change", true, true),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "thalvi-learning-switch-watch-{}-{at_probe}-{retune}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut watch = GatedWatch::new(&dir, at_probe);
+            let bound = watch.delivery.bind(&watch.recorder).await;
+            let outcome = request(CaptureRoute::Paste, "Cyber X2");
+            let finished = Settling {
+                delivery: &watch.delivery,
+                history: &watch.history,
+                drafts: &watch.drafts,
+                config: &watch.runner.config,
+                recorder: &watch.recorder,
+                learning: &watch.learning,
+                watch_enabled: &watch.runner.watch_enabled,
+                watch_cancel: &mut watch.runner.watch_cancel,
+            }
+            .settle(
+                &outcome,
+                None,
+                false,
+                &bound,
+                &mut watch.runner.key,
+                |_, _| {},
+            )
+            .await;
+            assert!(
+                finished.expect("the paste was delivered").delivered,
+                "{label}"
+            );
+            tokio::time::timeout(WAIT, &mut watch.waiting)
+                .await
+                .expect("the watch reached the gate")
+                .expect("the gate is live");
+
+            watch.apply(label, retune).await;
+
+            watch.release.send(()).unwrap();
+            tokio::time::timeout(WAIT, watch.changed.changed())
+                .await
+                .expect("the watch ended")
+                .expect("the learning store is live");
+            let entry = tokio::time::timeout(WAIT, async {
+                loop {
+                    if let Some(entry) = watch.history.list().unwrap().into_iter().next() {
+                        return entry;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the paste was stored in History");
+            let draft = watch.drafts.view().expect("the draft is shown");
+            watch.recorder.finish().await;
+            let events = recorded_events(&dir.join("metrics"), Event::FieldWatch);
+            assert_eq!(events.len(), 1, "{label}");
+            let suggestions: Vec<_> = watch
+                .learning
+                .view()
+                .suggestions
+                .into_iter()
+                .map(|suggestion| suggestion.word)
+                .collect();
+            observations.push((
+                label,
+                retune,
+                entry.corrected,
+                draft.corrected,
+                events[0]["outcome"].as_str().map(str::to_owned),
+                suggestions,
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        for (label, retune, history, draft, outcome, suggestions) in observations {
+            let corrected = retune.then_some("Cybrex2");
+            assert_eq!(history.as_deref(), corrected, "{label}: History");
+            assert_eq!(draft.as_deref(), corrected, "{label}: the draft");
+            assert_eq!(
+                outcome.as_deref(),
+                Some(if retune { "corrected" } else { "ended:cancel" }),
+                "{label}"
+            );
+            assert_eq!(
+                suggestions,
+                corrected.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                "{label}"
+            );
+        }
     }
 
     #[tokio::test]
