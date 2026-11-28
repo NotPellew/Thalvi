@@ -1913,7 +1913,10 @@ mod tests {
         let config = parse(original).unwrap();
         assert_eq!(config.look, Look::Holo);
         let written = serde_json::to_string_pretty(&config).unwrap();
-        assert!(!written.contains("\"themes\""), "a save adds no themes: {written}");
+        assert!(
+            !written.contains("\"themes\""),
+            "a save adds no themes: {written}"
+        );
         let again = parse(&written).unwrap();
         assert_eq!(serde_json::to_string_pretty(&again).unwrap(), written);
     }

@@ -335,11 +335,9 @@ fn run(thread: Thread, cancel: &dyn Fn()) {
     };
     *waker.lock().unwrap_or_else(PoisonError::into_inner) = Some(surface.waker());
     // Fonts load here, before the first show, so no show waits for them.
-    let Some(mut painter) = Painter::new(
-        surface.scale(),
-        Arc::new(Style::of(Look::default())),
-        true,
-    ) else {
+    let Some(mut painter) =
+        Painter::new(surface.scale(), Arc::new(Style::of(Look::default())), true)
+    else {
         publish(
             &failures,
             sink.as_ref(),

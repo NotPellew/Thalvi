@@ -626,8 +626,6 @@ mod tests {
         }
     }
 
-
-
     #[test]
     fn skin_rebuilds_once_when_the_visible_look_changes() {
         let mut painter = painter(1.0, Look::Neon, true);

@@ -437,12 +437,7 @@ fn hexes(canvas: &mut Canvas, [x, y, width, height]: [f32; 4], inset: f32, alpha
 }
 
 /// The soft glow behind the wave in `tone`'s colour, drawn once per tone.
-fn glow(
-    glows: &mut Vec<(Tone, Canvas)>,
-    tone: Tone,
-    color: Rgba,
-    scale: f32,
-) -> Option<&Canvas> {
+fn glow(glows: &mut Vec<(Tone, Canvas)>, tone: Tone, color: Rgba, scale: f32) -> Option<&Canvas> {
     if !glows.iter().any(|(drawn, _)| *drawn == tone) {
         let (w, h) = art::WAVE_HALO;
         let mut canvas = Canvas::new(w + 2.0 * art::GLOW_PAD, h + 2.0 * art::GLOW_PAD, scale)?;
@@ -461,13 +456,7 @@ fn glow(
 }
 
 /// Nine twisting strands, faded at both ends, with their top-left at `origin`.
-fn draw_wave(
-    canvas: &mut Canvas,
-    view: &View,
-    color: Rgba,
-    seconds: f32,
-    origin: (f32, f32),
-) {
+fn draw_wave(canvas: &mut Canvas, view: &View, color: Rgba, seconds: f32, origin: (f32, f32)) {
     let Some(wave) = &view.wave else {
         return;
     };
@@ -650,12 +639,7 @@ fn button_face(canvas: &mut Canvas, finish: Finish, theme: &Theme) {
         Finish::Holo => Fill::Solid(art::BUTTON_GLASS),
     };
     canvas.rect(CANCEL, radius, &fill);
-    canvas.outline(
-        CANCEL,
-        radius,
-        theme.button_outline,
-        art::BUTTON_RIM.0,
-    );
+    canvas.outline(CANCEL, radius, theme.button_outline, art::BUTTON_RIM.0);
 }
 
 fn cancel_button(canvas: &mut Canvas, text: &mut Text, finish: Finish, theme: &Theme) {

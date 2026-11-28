@@ -236,8 +236,7 @@ impl Neon {
         for (index, envelope) in (0u8..).zip(art::ENVELOPE) {
             let share = if moving {
                 let (base, amplitude, period, phase) = art::BAR_WOBBLE;
-                let wobble =
-                    base + amplitude * (now_ms / period + f32::from(index) * phase).sin();
+                let wobble = base + amplitude * (now_ms / period + f32::from(index) * phase).sin();
                 art::FLAT
                     + (1.0 - art::FLAT) * (self.shown * envelope * wobble * art::BAR_GAIN).min(1.0)
             } else {
