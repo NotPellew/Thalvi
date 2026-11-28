@@ -1582,11 +1582,52 @@ mod tests {
             (r#"{"discord": {}}"#.to_owned(), "unknown field `discord`"),
             (
                 r#"{"server": "http://127.0.0.1:8080"}"#.to_owned(),
-                "server must be a ws or wss URL",
+                "unknown field `server`",
             ),
             (
                 r#"{"server": "ws://127.0.0.1:8080/session"}"#.to_owned(),
-                "server root",
+                "unknown field `server`",
+            ),
+            (
+                r#"{"server": "ws://127.0.0.1:8080"}"#.to_owned(),
+                "unknown field `server`",
+            ),
+            (r#"{"hold_key": "F8"}"#.to_owned(), "unknown field `hold_key`"),
+            (
+                r#"{"write_key": "F10"}"#.to_owned(),
+                "unknown field `write_key`",
+            ),
+            (
+                r#"{"stt": {"engine": "local", "model": "nemotron_160ms"}}"#.to_owned(),
+                "unknown field `engine`",
+            ),
+            (
+                r#"{"stt": {"secondary": {"enabled": true, "url": "http://127.0.0.1:9/v1", "model": "m"}}}"#.to_owned(),
+                "unknown field `secondary`",
+            ),
+            (
+                r#"{"stt": {"merge": true}}"#.to_owned(),
+                "unknown field `merge`",
+            ),
+            (
+                r#"{"stt": {"entries": [{"kind": "thalvi_server", "id": "s", "name": "S", "active": true}]}}"#.to_owned(),
+                "unknown variant `thalvi_server`",
+            ),
+            (
+                r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "extra", "id": "x", "name": "X", "active": false}]}}"#.to_owned(),
+                "unknown variant `extra`",
+            ),
+            (
+                r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true}, {"kind": "second_pass", "id": "x", "name": "X", "active": false}]}}"#.to_owned(),
+                "unknown variant `second_pass`",
+            ),
+            (
+                r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true, "extra": true}]}}"#.to_owned(),
+                "unknown field `extra`",
+            ),
+            (
+                r#"{"stt": {"entries": [{"kind": "on_device", "id": "d", "name": "D", "active": true, "final_pass": true}]}}"#.to_owned(),
+                "unknown field `final_pass`",
             ),
             (
                 r#"{"stt": {"primary": {}}}"#.to_owned(),
@@ -1708,6 +1749,12 @@ mod tests {
             (
                 script(r#""phrase": "x", "action": "run", "destination": "x""#),
                 "unknown variant `run`",
+            ),
+            (
+                script(
+                    r#""phrase": "x", "action": "discord_message", "destination": "https://discord.com/channels/1/2""#,
+                ),
+                "unknown variant `discord_message`",
             ),
             (
                 script(r#""phrase": " ", "action": "open_url", "destination": "https://x.com""#),
